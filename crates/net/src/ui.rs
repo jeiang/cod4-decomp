@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// `clientscore` and the single-row scoreboard sort translated in part from KisakCOD (cgame_mp/cg_servercmds_mp.cpp;
+// GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! What the server tells a client's user interface, and the store the client reads it from.
 //!
 //! The client crate consumes this module only: it never parses a reliable command or a snapshot
@@ -711,6 +713,11 @@ pub enum ServerCmd {
         total: u16,
         rows: Vec<ScoreRow>,
     },
+    /// `updatedmscores`: one scoreboard row's new score (the stock `I` command); the row moves to its place.
+    ClientScore {
+        client: u16,
+        score: i32,
+    },
     /// A kill, for the obituary feed and the kill icons.
     Obituary(Obituary),
     /// `setstat`: this client's persistent stat `index` is now `value` (what menus read with
@@ -760,6 +767,28 @@ pub struct ScoreRow {
     pub team: u8,
     /// [`pstate`].
     pub state: u8,
+}
+
+/// `CG_ClientScoreIsBetter`: a higher score, then fewer deaths; a spectator never passes a player of another team.
+fn score_is_better(a: &ScoreRow, b: &ScoreRow) -> bool {
+    const SPECTATOR: u8 = 3;
+    if a.team != b.team && (a.team == SPECTATOR || b.team == SPECTATOR) {
+        return false;
+    }
+    a.score > b.score || (a.score == b.score && a.deaths < b.deaths)
+}
+
+/// `CG_SortSingleClientScore` (KisakCOD `cgame_mp/cg_servercmds_mp.cpp:817-847`): moves row `i` up past the rows it
+/// is better than, then down past the rows better than it.
+fn sort_single_score(rows: &mut [ScoreRow], mut i: usize) {
+    while i > 0 && score_is_better(&rows[i], &rows[i - 1]) {
+        rows.swap(i, i - 1);
+        i -= 1;
+    }
+    while i + 1 < rows.len() && score_is_better(&rows[i + 1], &rows[i]) {
+        rows.swap(i, i + 1);
+        i += 1;
+    }
 }
 
 impl ScoreRow {
@@ -958,6 +987,11 @@ impl ServerCmd {
                     arg(&mut s, &r.word());
                 }
             }
+            ServerCmd::ClientScore { client, score } => {
+                s.push_str("clientscore");
+                arg(&mut s, &client.to_string());
+                arg(&mut s, &score.to_string());
+            }
             ServerCmd::Obituary(o) => {
                 s.push_str("obit");
                 arg(&mut s, &o.killer.to_string());
@@ -986,9 +1020,55 @@ impl ServerCmd {
         s
     }
 
-    /// `None` for a string that is not a UI command (the caller keeps it).
+    /// The command words [`ServerCmd::parse`] knows.
+    const WORDS: &[&str] = &[
+        "map",
+        "gamestate_end",
+        "cs",
+        "dvar",
+        "openmenu",
+        "closemenu",
+        "closeingame",
+        "print",
+        "announce",
+        "scores",
+        "obit",
+        "stat",
+        "vision",
+        "shellshock",
+        "chat",
+    ];
+
+    /// `None` for a string that is not a UI command (the caller keeps it). A UI command word whose arguments do
+    /// not parse is also `None`, warned about once per word; a line with an unterminated quote is logged at debug
+    /// (it may be no UI command at all).
     pub fn parse(line: &str) -> Option<Self> {
-        let w = words(line)?;
+        let Some(w) = words(line) else {
+            logging::dedup!(
+                DEBUG,
+                "unterminated",
+                "server command with an unterminated quote not parsed"
+            );
+            return None;
+        };
+        let cmd = Self::from_words(&w);
+        if cmd.is_none()
+            && let Some(word) = w
+                .first()
+                .and_then(|c| Self::WORDS.iter().find(|u| **u == c.as_str()))
+        {
+            logging::dedup!(
+                WARN,
+                word,
+                command = *word,
+                args = w.len() - 1,
+                "UI server command not parsed"
+            );
+        }
+        cmd
+    }
+
+    fn from_words(w: &[String]) -> Option<Self> {
         let a = |i: usize| w.get(i).map(String::as_str);
         Some(match (a(0)?, w.len()) {
             ("map", 2) => ServerCmd::Map { name: w[1].clone() },
@@ -1028,6 +1108,10 @@ impl ServerCmd {
                         .collect::<Option<_>>()?,
                 }
             }
+            ("clientscore", 3) => ServerCmd::ClientScore {
+                client: w[1].parse().ok()?,
+                score: w[2].parse().ok()?,
+            },
             ("obit", 6) => ServerCmd::Obituary(Obituary {
                 killer: w[1].parse().ok()?,
                 victim: w[2].parse().ok()?,
@@ -1245,6 +1329,9 @@ pub struct ClientUiState {
     /// Rows of a multi-part scoreboard received so far.
     scores_partial: Vec<ScoreRow>,
     stats: HashMap<i32, i32>,
+    /// A [`ServerCmd::ClientScore`] named a player the scoreboard has no row for: ask for the whole scoreboard
+    /// ([`ClientUiState::take_scores_missing`]).
+    scores_missing: bool,
 }
 
 impl Default for ClientUiState {
@@ -1260,6 +1347,7 @@ impl Default for ClientUiState {
             scores: Scoreboard::default(),
             scores_partial: Vec::new(),
             stats: HashMap::new(),
+            scores_missing: false,
         }
     }
 }
@@ -1379,7 +1467,25 @@ impl ClientUiState {
                     self.push(UiEvent::Scores);
                 }
             }
+            ServerCmd::ClientScore { client, score } => {
+                // `CG_SetSingleClientScore` (KisakCOD `cgame_mp/cg_servercmds_mp.cpp:788-815`): the row takes the
+                // score and moves to its place; without a row, the scoreboard is asked for.
+                match self.scores.rows.iter().position(|r| r.client == client) {
+                    Some(i) => {
+                        self.scores.rows[i].score = score;
+                        sort_single_score(&mut self.scores.rows, i);
+                        self.push(UiEvent::Scores);
+                    }
+                    None => self.scores_missing = true,
+                }
+            }
         }
+    }
+
+    /// Whether a single score arrived for a player the scoreboard lacks since the last call: the caller asks for
+    /// the scoreboard (the stock client does when it has not asked in the last 10 s).
+    pub fn take_scores_missing(&mut self) -> bool {
+        std::mem::take(&mut self.scores_missing)
     }
 
     fn apply_codinfo(&mut self, k: u16) {
@@ -1683,6 +1789,59 @@ mod tests {
                 text: "  spaced  out ".into(),
             },
         ]
+    }
+
+    #[test]
+    fn a_single_client_score_moves_its_row_or_asks_for_the_scoreboard() {
+        let row = |client, score, deaths, team| ScoreRow {
+            client,
+            score,
+            deaths,
+            team,
+            ..ScoreRow::default()
+        };
+        let mut ui = ClientUiState::new();
+        ui.apply(ServerCmd::Scores {
+            axis: 0,
+            allies: 0,
+            limit: 0,
+            start: 0,
+            total: 4,
+            rows: vec![
+                row(0, 30, 1, 0),
+                row(1, 20, 1, 0),
+                row(2, 10, 0, 0),
+                row(3, 50, 0, 3),
+            ],
+        });
+        ui.drain_events();
+        let c = ServerCmd::ClientScore {
+            client: 2,
+            score: 20,
+        };
+        assert_eq!(ServerCmd::parse(&c.encode()), Some(c.clone()));
+        // Ties with client 1 on score and passes it on fewer deaths, not client 0; the spectator stays last.
+        ui.apply(c);
+        assert_eq!(ui.drain_events(), [UiEvent::Scores]);
+        let order: Vec<_> = ui
+            .scoreboard()
+            .rows
+            .iter()
+            .map(|r| (r.client, r.score))
+            .collect();
+        assert_eq!(order, [(0, 30), (2, 20), (1, 20), (3, 50)]);
+        ui.apply(ServerCmd::ClientScore {
+            client: 0,
+            score: 5,
+        });
+        let order: Vec<_> = ui.scoreboard().rows.iter().map(|r| r.client).collect();
+        assert_eq!(order, [2, 1, 0, 3]);
+        assert!(!ui.take_scores_missing());
+        ui.apply(ServerCmd::ClientScore {
+            client: 9,
+            score: 1,
+        });
+        assert!(ui.take_scores_missing() && !ui.take_scores_missing());
     }
 
     #[test]
@@ -1997,5 +2156,19 @@ mod tests {
         let (answers, shown) = join.filter(ev, true);
         assert_eq!(answers.len(), 2);
         assert!(shown.is_empty());
+    }
+
+    #[test]
+    fn a_ui_command_that_does_not_parse_warns_with_its_word() {
+        let (cmd, events) = logging::capture(|| ServerCmd::parse("stat logtest_index 3"));
+        assert!(cmd.is_none());
+        let w = events
+            .iter()
+            .find(|e| e.level == tracing::Level::WARN)
+            .expect("a warning");
+        assert_eq!(w.field("command"), Some("stat"));
+        let (cmd, events) = logging::capture(|| ServerCmd::parse("logtest_not_ui 1 2"));
+        assert!(cmd.is_none());
+        assert!(events.iter().all(|e| e.level != tracing::Level::WARN));
     }
 }

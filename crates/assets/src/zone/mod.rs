@@ -208,7 +208,10 @@ impl<'a> Zone<'a> {
         stream.push(Block::Virtual);
         let script_strings = match strings {
             Ptr::Follow => {
-                let (_, b) = stream.load(4, string_count * 4)?;
+                let len = string_count
+                    .checked_mul(4)
+                    .ok_or(ZoneError::Invalid("script string count"))?;
+                let (_, b) = stream.load(4, len)?;
                 let ptrs = b
                     .as_chunks::<4>()
                     .0
@@ -225,7 +228,10 @@ impl<'a> Zone<'a> {
         let mut assets_off = 0;
         let assets = match assets_ptr {
             Ptr::Follow => {
-                let (at, b) = stream.load(4, asset_count * 8)?;
+                let len = asset_count
+                    .checked_mul(8)
+                    .ok_or(ZoneError::Invalid("asset count"))?;
+                let (at, b) = stream.load(4, len)?;
                 assets_off = at.offset;
                 let mut out = Vec::with_capacity(asset_count as usize);
                 for c in b.as_chunks::<8>().0 {
@@ -514,5 +520,35 @@ mod tests {
         ff.extend(e.finish().unwrap());
         let r = Zone::open(&ff[..]).and_then(|z| z.decode(&KeepAll, |_| {}));
         assert!(matches!(r, Err(ZoneError::BlockOverflow { .. })), "{r:?}");
+    }
+
+    /// A fastfile whose XAssetList declares `strings`/`assets` counts with
+    /// both pointers inline, followed by a little padding.
+    fn with_counts(strings: u32, assets: u32) -> Vec<u8> {
+        let mut x = Vec::new();
+        le(&mut x, &[64, 0, 200, 0, 0, 0, 52, 0, 0, 0, 0]);
+        le(&mut x, &[strings, 0xFFFF_FFFF, assets, 0xFFFF_FFFF]);
+        x.extend([0u8; 48]);
+        let mut z = ZlibEncoder::new(Vec::new(), Compression::default());
+        z.write_all(&x).unwrap();
+        let mut out = b"IWffu100".to_vec();
+        out.extend(5u32.to_le_bytes());
+        out.extend(z.finish().unwrap());
+        out
+    }
+
+    #[test]
+    fn oversized_script_string_count_is_invalid() {
+        let r = Zone::open(&with_counts(0x4000_0001, 0)[..]).map(drop);
+        assert!(
+            matches!(r, Err(ZoneError::Invalid("script string count"))),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn oversized_asset_count_is_invalid() {
+        let r = Zone::open(&with_counts(0, 0x2000_0001)[..]).map(drop);
+        assert!(matches!(r, Err(ZoneError::Invalid("asset count"))), "{r:?}");
     }
 }

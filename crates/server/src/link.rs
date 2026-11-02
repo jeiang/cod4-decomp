@@ -147,6 +147,10 @@ pub struct EntExtra {
     /// `trigger_damage`: `accumulate` and `threshold` of the map.
     pub damage_accumulate: i32,
     pub damage_threshold: i32,
+    /// `laseron`: the laser sight flag (`s.lerp.eFlags & 0x4000`), drawn by clients through night vision.
+    pub laser: bool,
+    /// `enableaimassist`: a brush model the melee aim assist may target (`s.lerp.eFlags & 0x800`).
+    pub aim_assist: bool,
 }
 
 impl Default for EntExtra {
@@ -168,6 +172,8 @@ impl Default for EntExtra {
             hurt_next: 0,
             damage_accumulate: 0,
             damage_threshold: 0,
+            laser: false,
+            aim_assist: false,
         }
     }
 }

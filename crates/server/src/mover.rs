@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// The mover push (`G_MoverTeam`, `G_MoverPush`, `G_TryPushingEntity`) translated in part from KisakCOD (game/g_mover.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
+// The mover push (`G_MoverTeam`, `G_MoverPush`, `G_TryPushingEntity`) translated in part from KisakCOD (game/g_mover.cpp), and `vibrate` (`ScriptEntCmd_Vibrate`) from KisakCOD (game/g_scr_mover.cpp); GPL-3.0, copyright the KisakCOD contributors and Activision.
 //! Script movers: `moveto`, `rotateto` and friends as trajectories the frame loop advances.
 //!
 //! A move is up to three phases: accelerate for `accel` seconds, cruise, decelerate for
@@ -402,6 +402,39 @@ pub fn rotate_velocity(g: &mut Game, e: EntRef, a: Args) -> R {
         ent.angles = cur;
     }
     g.relink(n);
+    Ok(Value::Undefined)
+}
+
+/// `vibrate(direction, amplitude, period, time)`: `ScriptEntCmd_Vibrate` (KisakCOD `game/g_scr_mover.cpp:796-852`).
+/// The angles swing on a sine of `period` seconds, pitch by the impulse along the mover's forward axis and roll by
+/// it along its right axis, until `time` seconds and one more period are over; then they settle back where they
+/// were and `rotatedone` is notified, as for any rotation.
+pub fn vibrate(g: &mut Game, e: EntRef, a: Args) -> R {
+    let n = mover_ent(g, e)?;
+    if a.len() != 4 {
+        return Err("illegal call to vibrate()\n".into());
+    }
+    let impulse = scale(normalized(a.vector(0)?), a.float(1)?);
+    let period = a.float(2)?;
+    let time = a.float(3)?;
+    let now = g.level.time;
+    if let Some(ent) = g.ent_mut(n) {
+        let (forward, right, _) = math::angle_vectors(&ent.angles);
+        // `AnglesToAxis` gives the left axis, `-right`, and the roll is minus the impulse along it.
+        let swing = [
+            math::dot(&forward, &impulse),
+            0.0,
+            math::dot(&right, &impulse),
+        ];
+        ent.mv.ang.p3 = ent.angles;
+        ent.mv.ang.tr = Trajectory {
+            kind: TrType::Sine,
+            time: now + (time * 1000.0) as i32,
+            duration: (period * 1000.0) as i32,
+            base: ent.angles,
+            delta: swing,
+        };
+    }
     Ok(Value::Undefined)
 }
 

@@ -233,6 +233,10 @@ struct Bolted {
 struct ScriptBolt {
     id: Option<u64>,
     entity: u16,
+    /// The entity's model when the event came ([`ClientEvent::PlayFxOnTag`]); the bolt starts only on that model.
+    model: u16,
+    /// What was drawn under the number this frame had that model.
+    same_model: bool,
     name: String,
     tag: String,
     frame: Option<Frame>,
@@ -373,6 +377,27 @@ pub struct Drawn {
     pub tracers: usize,
     /// How far the camera shaking turns the view (pitch, yaw, roll in degrees); set by the caller.
     pub sway: [f32; 3],
+}
+
+/// Where `tag` is on the first of the posed `models` that has it, in the world (`CG_DObjGetWorldTagMatrix`).
+pub fn model_tag_frame(models: &[ModelInstance], content: &Content, tag: &str) -> Option<Frame> {
+    models.iter().find_map(|m| {
+        let names = content.model_bone_names(m.model.name.as_deref()?)?;
+        let i = names.iter().position(|n| n.eq_ignore_ascii_case(tag))?;
+        let (quat, trans) = m
+            .bones
+            .get(i)
+            .map(|b| (b.quat, b.trans))
+            .or_else(|| m.model.base_mat.get(i).map(|b| (b.quat, b.trans)))?;
+        let axes = sim::skel::quat::axes(&quat);
+        let (f, r, u) = sim::pm::math::angle_vectors(&m.angles);
+        let axis = [Vec3::from(f), -Vec3::from(r), Vec3::from(u)];
+        let world = |v: [f32; 3]| axis[0] * v[0] + axis[1] * v[1] + axis[2] * v[2];
+        Some(Frame {
+            origin: Vec3::from(m.origin) + world(trans),
+            axis: axes.map(world),
+        })
+    })
 }
 
 impl Effects {
@@ -650,10 +675,17 @@ impl Effects {
                     self.missing.insert(name.clone());
                 }
             },
-            ClientEvent::PlayFxOnTag { entity, name, tag } => {
+            ClientEvent::PlayFxOnTag {
+                entity,
+                model,
+                name,
+                tag,
+            } => {
                 self.script_bolts.push(ScriptBolt {
                     id: None,
                     entity: *entity,
+                    model: *model,
+                    same_model: false,
                     name: name.clone(),
                     tag: tag.clone(),
                     frame: None,
@@ -1101,9 +1133,11 @@ impl Effects {
     }
 
     /// Begins a rendered pose frame; only tags actually resolved this frame may move an attachment. A bolt is judged
-    /// only once [`Effects::script_model_tags`] poses its entity: events are read from the newest snapshot, but
-    /// entities are drawn `INTERP_DELAY_MS` behind it, so an entity spawned with its `playfxontag` (an airstrike's
-    /// `tag_origin` model) is not drawn yet. Stock reads the event as the snapshot becomes current, when the
+    /// only once [`Effects::script_model_tags`] poses its entity with the model the event came with: events are read
+    /// from the newest snapshot, but entities are drawn `INTERP_DELAY_MS` behind it, so an entity spawned with its
+    /// `playfxontag` (an airstrike's `tag_origin` model) is not drawn yet, and a number the event's snapshot gave to
+    /// another entity (a killcam's replayed past against the live world, `CG_TransitionKillcam` resetting nothing on
+    /// the way in) may still be drawn as that one. Stock reads the event as the snapshot becomes current, when the
     /// entity's DObj exists (`CG_PlayBoltedEffect`, cg_event.cpp:46-61).
     pub fn begin_script_tags(&mut self) {
         for b in &mut self.script_bolts {
@@ -1112,30 +1146,24 @@ impl Effects {
         }
     }
 
-    /// Resolves requested tags against the exact posed model instances submitted to the renderer.
-    pub fn script_model_tags(&mut self, entity: u16, models: &[ModelInstance], content: &Content) {
+    /// Resolves requested tags against the exact posed model instances submitted to the renderer for `entity`, whose
+    /// drawn state has model `model` (configstring index).
+    pub fn script_model_tags(
+        &mut self,
+        entity: u16,
+        model: u16,
+        models: &[ModelInstance],
+        content: &Content,
+    ) {
         for bolt in self.script_bolts.iter_mut().filter(|b| b.entity == entity) {
+            bolt.same_model = bolt.model == model;
+            // Not started and drawn as another entity or model: it waits. A playing effect follows whatever the number
+            // is drawn as and stops once the tag is gone (`FX_UpdateEffectBolt`).
+            if bolt.id.is_none() && !bolt.same_model {
+                continue;
+            }
             bolt.attempted = true;
-            let frame = models.iter().find_map(|m| {
-                let names = content.model_bone_names(m.model.name.as_deref()?)?;
-                let i = names
-                    .iter()
-                    .position(|n| n.eq_ignore_ascii_case(&bolt.tag))?;
-                let (quat, trans) = m
-                    .bones
-                    .get(i)
-                    .map(|b| (b.quat, b.trans))
-                    .or_else(|| m.model.base_mat.get(i).map(|b| (b.quat, b.trans)))?;
-                let axes = sim::skel::quat::axes(&quat);
-                let (f, r, u) = sim::pm::math::angle_vectors(&m.angles);
-                let axis = [Vec3::from(f), -Vec3::from(r), Vec3::from(u)];
-                let world = |v: [f32; 3]| axis[0] * v[0] + axis[1] * v[1] + axis[2] * v[2];
-                Some(Frame {
-                    origin: Vec3::from(m.origin) + world(trans),
-                    axis: axes.map(world),
-                })
-            });
-            bolt.frame = frame;
+            bolt.frame = model_tag_frame(models, content, &bolt.tag);
         }
     }
 
@@ -1162,12 +1190,14 @@ impl Effects {
                 return false;
             }
             if b.attempted && b.frame.is_none() {
-                self.bolt_stats.missing_tags += 1;
                 if let Some(id) = b.id {
-                    // A tag that resolved before and no longer does: the model changed under the effect.
+                    // A tag that resolved before and no longer does: the number is drawn as another model now. A tag
+                    // is missing only from the model the event named.
                     self.fx.stop(id);
                     self.bolt_stats.stopped += 1;
+                    self.bolt_stats.missing_tags += u64::from(b.same_model);
                 } else {
+                    self.bolt_stats.missing_tags += 1;
                     logging::dedup!(
                         WARN,
                         "bolt-tag",

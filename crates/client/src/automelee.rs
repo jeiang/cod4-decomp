@@ -23,14 +23,41 @@ const RADIUS: f32 = 10.0;
 /// What a player is shot at: how far up the box the chest is.
 const CHEST: f32 = 0.75;
 
-/// An enemy that could be the target of a swing.
+/// An enemy, or a brush model a script made a target (`enableaimassist`), that could be the target of a swing.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Target {
     pub number: u16,
-    /// The feet.
+    /// The feet of a player, the origin of a brush model.
     pub origin: Vec3,
-    /// How tall the body is in its stance.
-    pub height: f32,
+    /// The box around `origin` (`AimTarget_GetTargetBounds`).
+    pub mins: Vec3,
+    pub maxs: Vec3,
+    /// Where the swing is aimed: a player's chest, a brush model's centre (`AimTarget_GetTargetCenter`).
+    pub aim: Vec3,
+}
+
+impl Target {
+    /// A player whose body is `height` tall in its stance.
+    pub fn player(number: u16, origin: Vec3, height: f32) -> Self {
+        Self {
+            number,
+            origin,
+            mins: Vec3::new(-RADIUS, -RADIUS, 0.0),
+            maxs: Vec3::new(RADIUS, RADIUS, height),
+            aim: origin + Vec3::Z * (height * CHEST),
+        }
+    }
+
+    /// A brush model at `origin` with the inline model's bounds (`CM_ModelBounds`; the turn is not applied).
+    pub fn brush(number: u16, origin: Vec3, mins: Vec3, maxs: Vec3) -> Self {
+        Self {
+            number,
+            origin,
+            mins,
+            maxs,
+            aim: origin + (mins + maxs) * 0.5,
+        }
+    }
 }
 
 /// A target as seen from the view (`AimScreenTarget`).
@@ -70,9 +97,9 @@ pub fn screen_targets(view: &View, targets: &[Target]) -> Vec<Screen> {
             for i in 0..8 {
                 let corner = t.origin
                     + Vec3::new(
-                        if i & 1 == 0 { -RADIUS } else { RADIUS },
-                        if i & 2 == 0 { -RADIUS } else { RADIUS },
-                        if i & 4 == 0 { 0.0 } else { t.height },
+                        if i & 1 == 0 { t.mins.x } else { t.maxs.x },
+                        if i & 2 == 0 { t.mins.y } else { t.maxs.y },
+                        if i & 4 == 0 { t.mins.z } else { t.maxs.z },
                     );
                 // `AimAssist_XfmWorldPointToClipSpace`: a corner behind the eye is left out.
                 let d = corner - view.eye;
@@ -107,7 +134,7 @@ pub fn screen_targets(view: &View, targets: &[Target]) -> Vec<Screen> {
             let (cx, cy) = ((mins[0] + maxs[0]) * 0.5, (mins[1] + maxs[1]) * 0.5);
             Some(Screen {
                 number: t.number,
-                aim: t.origin + Vec3::Z * (t.height * CHEST),
+                aim: t.aim,
                 dist_sqr: (t.origin - view.feet).length_squared(),
                 mins,
                 maxs,
@@ -223,11 +250,21 @@ mod tests {
     }
 
     fn target(number: u16, x: f32, y: f32) -> Target {
-        Target {
-            number,
-            origin: Vec3::new(x, y, 0.0),
-            height: 70.0,
-        }
+        Target::player(number, Vec3::new(x, y, 0.0), 70.0)
+    }
+
+    #[test]
+    fn a_brush_model_target_is_boxed_by_its_bounds_and_aimed_at_its_centre() {
+        let b = Target::brush(
+            40,
+            Vec3::new(80.0, 0.0, 0.0),
+            Vec3::new(-8.0, -16.0, 0.0),
+            Vec3::new(8.0, 16.0, 64.0),
+        );
+        let s = screen_targets(&view(), &[b]);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].number, 40);
+        assert_eq!(s[0].aim, Vec3::new(80.0, 0.0, 32.0));
     }
 
     #[test]

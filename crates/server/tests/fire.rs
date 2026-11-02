@@ -280,6 +280,31 @@ fn live_events(g: &Game, kind: u8) -> Vec<net::entity::EntityState> {
         .collect()
 }
 
+/// A bullet into a player corpse strikes flesh, as into the player (KisakCOD `game/bullet.cpp:58-67`).
+#[test]
+fn a_bullet_into_a_corpse_strikes_flesh() {
+    use server::tempev::ev;
+    let (mut g, mut vm) = arena(&[], 0, vec![rifle()]);
+    let shooter = add_player(&mut g, &mut vm, [0.0; 3], 0.0, Team::Allies);
+    let victim = add_player(&mut g, &mut vm, [40.0, 0.0, 0.0], 180.0, Team::Axis);
+    let body = g
+        .clone_player(&mut vm, victim, 5000, "pb_death_run_onfront")
+        .expect("corpse");
+    // The player leaves; only the corpse is in the line of fire.
+    g.ent_mut(victim).unwrap().contents = 0;
+    g.relink(victim);
+    fire_weapon(&mut g, &mut vm, shooter, "ak47_mp");
+    let hits = live_events(&g, ev::BULLET_IMPACT);
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert!(
+        hits[0].origin[0] > 20.0,
+        "struck the corpse at {:?}",
+        hits[0].origin
+    );
+    assert_eq!(hits[0].event_parm, 7, "flesh, not the corpse's surface 0");
+    assert!(g.ent(body).unwrap().x.corpse.is_some());
+}
+
 #[test]
 fn the_last_round_and_a_bolt_actions_case_are_announced() {
     use server::tempev::{FIRE_LAST_SHOT, ev};
@@ -869,7 +894,7 @@ fn flight_path(
 ) -> Vec<[f32; 3]> {
     let infos = vec![sidewinder(), lock_on_launcher(), hellfire(), rpg()];
     let (mut g, mut vm) = arena(&[], 0, infos);
-    for (name, defaults) in server::missile::MISSILE_CVARS {
+    for (name, defaults, _) in server::missile::MISSILE_CVARS {
         g.cvars.register(name, defaults, 0);
     }
     let shooter = add_player(&mut g, &mut vm, [-500.0, 0.0, 0.0], 0.0, Team::Allies);
@@ -1443,7 +1468,9 @@ fn a_blast_hurts_by_how_much_of_the_player_it_reaches() {
 
 fn run_script(g: &mut Game, vm: Vm, src: &str, func: &str) -> Vm {
     use server::script::{Dispatch, ScriptHost};
-    let prog = compile(&[("t.gsc", src)], &Builtins::stock_mp(), Options::default()).unwrap();
+    // `developer_script`, for the developer-only `getentbynum` in `/# ... #/` blocks.
+    let opts = Options { developer: true };
+    let prog = compile(&[("t.gsc", src)], &Builtins::stock_mp(), opts).unwrap();
     let f = prog.find("t", func).unwrap();
     let dispatch = Dispatch::new(&prog);
     drop(vm);
@@ -1619,7 +1646,7 @@ fn the_engine_sends_no_obituary_of_its_own_and_the_script_one_carries_its_argume
     };
     assert!(obits(&g).is_empty(), "death alone is not a kill-feed line");
     let src = format!(
-        "go() {{ obituary(getentbynum({b}), getentbynum({a}), \"rifle_mp\", \"MOD_HEAD_SHOT\"); }}"
+        "go() {{ /# obituary(getentbynum({b}), getentbynum({a}), \"rifle_mp\", \"MOD_HEAD_SHOT\"); #/ }}"
     );
     let _ = run_script(&mut g, vm, &src, "go");
     let o = obits(&g);
@@ -1767,7 +1794,7 @@ fn pool(surface: i32, extra: Vec<BrushSpec>, models: Vec<Vec<BrushSpec>>) -> (Ga
     };
     let (mut g, vm) = arena(&[], 0, vec![rpg()]);
     g.world = Some(World::new(map.build()));
-    for (name, defaults) in server::missile::MISSILE_CVARS {
+    for (name, defaults, _) in server::missile::MISSILE_CVARS {
         g.cvars.register(name, defaults, 0);
     }
     (g, vm)

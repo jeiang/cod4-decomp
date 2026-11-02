@@ -63,6 +63,10 @@ budget *args:
 budget-table *args:
     python3 scripts/budget-table.py "$@"
 
+# Report how run bundles and CI bear on a PR's head (read only, not a merge approval)
+evidence-report *args:
+    python3 scripts/evidence-report.py "$@"
+
 # Fetch and build the SM3 cross-check drivers
 crosscheck-tools *args:
     scripts/build-crosscheck-tools.sh "$@"
@@ -70,6 +74,11 @@ crosscheck-tools *args:
 # Generate the wavelet tables from an iw3mp.exe
 wavelet-tables exe:
     python3 scripts/gen-wavelet-tables.py "$@"
+
+# Test scripts/slot-guard.py and scripts/remote-linux.sh's logs locally (no host needed)
+script-tests:
+    python3 scripts/slot-guard.test.py
+    python3 scripts/remote-linux.test.py
 
 # Linux test host
 
@@ -93,6 +102,36 @@ slot-exec n ref +cmd:
 serial ref stages="":
     COD4E_LINUX_HOST={{host}} scripts/remote-linux.sh "$1" -- ${2:+--stage "$2"}
 
+# Install scripts/slot-guard.py as the Linux host's ~/Projects/cod4e/bin/slot-guard, with a GC-rooted python3
+slot-guard-install:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ssh {{host}} "bash -c 'mkdir -p ~/Projects/cod4e/bin && cat > ~/Projects/cod4e/bin/.slot-guard.py.new'" < scripts/slot-guard.py
+    ssh {{host}} bash -s <<'EOF'
+    set -euo pipefail
+    b=~/Projects/cod4e/bin
+    nix build --out-link $b/python3 nixpkgs#python3
+    printf '#!/usr/bin/env bash\nexec %q %q "$@"\n' "$b/python3/bin/python3" "$b/slot-guard.py" > $b/.slot-guard.new
+    chmod 755 $b/.slot-guard.new
+    mv -f $b/.slot-guard.py.new $b/slot-guard.py
+    mv -f $b/.slot-guard.new $b/slot-guard
+    $b/slot-guard version
+    EOF
+
+# Lease slot n to an owner (coordinator); prints a new token unless COD4E_SLOT_TOKEN gives one
+slot-lease n owner *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    { printf 'export COD4E_SLOT_TOKEN=%q\n' "${COD4E_SLOT_TOKEN:-}"
+      printf '~/Projects/cod4e/bin/slot-guard acquire %s\n' "$(printf '%q ' "$@")"; } | ssh {{host}} bash -s
+
+# Release slot n's lease with its COD4E_SLOT_TOKEN, or `--force` (coordinator) once no guarded run is live
+slot-release n *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    { printf 'export COD4E_SLOT_TOKEN=%q\n' "${COD4E_SLOT_TOKEN:-}"
+      printf '~/Projects/cod4e/bin/slot-guard release %s\n' "$(printf '%q ' "$@")"; } | ssh {{host}} bash -s
+
 # Run a bash command on the Linux host in ~/Projects/cod4e
 host +cmd:
     @ssh {{host}} bash -s <<< "cd ~/Projects/cod4e && $*"
@@ -111,6 +150,7 @@ host-status:
     for n in 1 2 3; do
       if flock -n $r/.slot-$n.lock true; then echo "slot $n free"; else echo "slot $n busy"; fi
     done
+    if [ -x $r/bin/slot-guard ]; then $r/bin/slot-guard version; $r/bin/slot-guard status; else echo "slot-guard not installed"; fi
     pgrep -af 'cod4e-harness|cod4e-server|/cod4e |sway|chromium|iw3mp' || echo "no harness processes"
     echo "VRAM used: $(( $(cat /sys/class/drm/card1/device/mem_info_vram_used) / 1048576 )) MiB"
     echo "embed: $(curl -s -m 5 http://127.0.0.1:8189/health || echo down)"

@@ -145,19 +145,20 @@ const GUIDED_JAVELIN: i32 = 3;
 const HELLFIRE_MAX_SLOPE: f32 = 0.5;
 const HELLFIRE_UP_ACCEL: f32 = 1000.0;
 
-/// The missile tuning dvars (`missileJav*`, `missileWaterMaxDepth`), with the defaults the multiplayer binary registers.
-pub const MISSILE_CVARS: &[(&str, &str)] = &[
-    ("missileJavClimbHeightDirect", "10000"),
-    ("missileJavClimbAngleDirect", "85"),
-    ("missileJavClimbCeilingDirect", "0"),
-    ("missileJavTurnRateDirect", "60"),
-    ("missileJavAccelClimb", "300"),
-    ("missileJavAccelDescend", "3000"),
-    ("missileJavSpeedLimitClimb", "1000"),
-    ("missileJavSpeedLimitDescend", "6000"),
-    ("missileJavTurnDecel", "0.05"),
-    ("missileJavClimbToOwner", "700"),
-    ("missileWaterMaxDepth", "60"),
+/// The missile tuning dvars (`missileJav*`, `missileWaterMaxDepth`), with the defaults the multiplayer binary registers
+/// and the top of each one's range (all from 0; KisakCOD `game/g_missile.cpp:95-206`).
+pub const MISSILE_CVARS: &[(&str, &str, f32)] = &[
+    ("missileJavClimbHeightDirect", "10000", f32::MAX),
+    ("missileJavClimbAngleDirect", "85", f32::MAX),
+    ("missileJavClimbCeilingDirect", "0", f32::MAX),
+    ("missileJavTurnRateDirect", "60", f32::MAX),
+    ("missileJavAccelClimb", "300", f32::MAX),
+    ("missileJavAccelDescend", "3000", f32::MAX),
+    ("missileJavSpeedLimitClimb", "1000", f32::MAX),
+    ("missileJavSpeedLimitDescend", "6000", f32::MAX),
+    ("missileJavTurnDecel", "0.05", 1.0),
+    ("missileJavClimbToOwner", "700", f32::MAX),
+    ("missileWaterMaxDepth", "60", f32::MAX),
 ];
 
 /// `VecToQuat`: the orientation looking along `dir`, as `[x, y, z, w]`.

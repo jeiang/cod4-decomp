@@ -27,6 +27,7 @@ mod effects;
 mod events;
 mod flythrough;
 mod fog;
+mod fscmds;
 #[cfg(not(target_arch = "wasm32"))]
 mod fx_selftest;
 mod gfx;
@@ -35,6 +36,7 @@ mod hud;
 mod hudstate;
 mod input;
 mod kick;
+mod laser;
 #[cfg_attr(target_arch = "wasm32", path = "listen_web.rs")]
 mod listen;
 mod loader;

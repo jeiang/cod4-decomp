@@ -47,6 +47,7 @@ pub const TABLE: &[(&str, Impl<MethFn>)] = &[
         "rotatevelocity",
         r(|g, _, e, a| mover::rotate_velocity(g, e, a)),
     ),
+    ("vibrate", r(|g, _, e, a| mover::vibrate(g, e, a))),
     ("playsound", r(super::sound::play_sound)),
     ("playloopsound", r(super::sound::play_loop_sound)),
     ("stoploopsound", r(super::sound::stop_loop_sound)),

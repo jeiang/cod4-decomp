@@ -18,12 +18,66 @@ pub const ROM: u32 = 64;
 pub const CHEAT: u32 = 128;
 /// `DVAR_CODINFO`: published to the clients as a key/value pair in the `CODINFO` configstrings.
 pub const CODINFO: u32 = 256;
+/// `DVAR_EXTERNAL`: made by a command (`dvar_bool`, `dvar_int`, `dvar_float`), not by the engine; `writedefaults`
+/// leaves it out.
+pub const EXTERNAL: u32 = 0x4000;
 
-/// The values a variable accepts (`DvarLimits`).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Limit {
+/// What a registered variable holds and the values it accepts (`dvarType_t` with its `DvarLimits`). A value is
+/// read as the type (`Dvar_StringToValue`), refused outside the range (`Dvar_ValueInDomain`) and kept as the type
+/// prints it (`Dvar_ValueToString`: `"1"`/`"0"`, `%i`, `%g`), KisakCOD `universal/dvar.cpp:396-440,479,1848`.
+/// An enum (`dedicated`) is an `Int` over its indexes.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum Kind {
+    Bool,
     Int(i32, i32),
     Float(f32, f32),
+    /// Two floats, `"x y"`, each in the range.
+    Vec2(f32, f32),
+    #[default]
+    String,
+}
+
+impl Kind {
+    /// `value` as this type stores it, or `None` when it is outside the range.
+    pub fn read(self, value: &str) -> Option<String> {
+        let floats = |v: &str| {
+            let mut w = v.split_whitespace().map(parse_float);
+            [w.next().unwrap_or(0.0), w.next().unwrap_or(0.0)]
+        };
+        match self {
+            Kind::String => Some(value.to_owned()),
+            Kind::Bool => Some(if parse_int(value) != 0 { "1" } else { "0" }.to_owned()),
+            Kind::Int(lo, hi) => {
+                let n = parse_int(value);
+                (lo..=hi).contains(&n).then(|| n.to_string())
+            }
+            Kind::Float(lo, hi) => {
+                let x = parse_float(value);
+                (lo..=hi).contains(&x).then(|| fmt_g(x))
+            }
+            Kind::Vec2(lo, hi) => {
+                let [x, y] = floats(value);
+                ((lo..=hi).contains(&x) && (lo..=hi).contains(&y))
+                    .then(|| format!("{} {}", fmt_g(x), fmt_g(y)))
+            }
+        }
+    }
+
+    /// `value` as this type stores it, held to the range (`Dvar_ClampValueToDomain`): what a value set before the
+    /// registration becomes when the variable is registered.
+    fn clamp(self, value: &str) -> String {
+        match self {
+            Kind::String | Kind::Bool => self.read(value).unwrap_or_default(),
+            Kind::Int(lo, hi) => parse_int(value).clamp(lo, hi).to_string(),
+            Kind::Float(lo, hi) => fmt_g(parse_float(value).clamp(lo, hi)),
+            Kind::Vec2(lo, hi) => {
+                let mut w = value.split_whitespace().map(parse_float);
+                let mut c = || fmt_g(w.next().unwrap_or(0.0).clamp(lo, hi));
+                let x = c();
+                format!("{x} {}", c())
+            }
+        }
+    }
 }
 
 /// Why [`Cvars::set_checked`] refused a value, worded as the original's console.
@@ -56,8 +110,8 @@ pub struct Cvar {
     pub flags: u32,
     /// A `LATCH` variable takes a new value at the next map load.
     pub latched: Option<String>,
-    /// The range a new value must be in (checked for every write that is not the engine's own).
-    pub limit: Option<Limit>,
+    /// The type and range a new value must have (checked for every write that is not the engine's own).
+    pub kind: Kind,
     /// Registered by the engine (as opposed to created by a bare `set`).
     pub registered: bool,
 }
@@ -78,16 +132,30 @@ impl Cvars {
         Self::default()
     }
 
-    /// Registers `name` with a default. A value set earlier is kept; flags are merged.
+    /// Registers `name` as a string with a default. A value set earlier is kept; flags are merged.
     pub fn register(&mut self, name: &str, default: &str, flags: u32) {
+        self.register_kind(name, Kind::String, default, flags);
+    }
+
+    /// Registers `name` with its type and range (`Dvar_Register*`). A value set earlier is kept, read as the type
+    /// and held to the range (`Dvar_MakeExplicitType`); flags are merged.
+    pub fn register_kind(&mut self, name: &str, kind: Kind, default: &str, flags: u32) {
+        let default = kind.read(default).unwrap_or_else(|| default.to_owned());
+        let default = default.as_str();
         match self.vars.get_mut(&key(name)) {
             Some(v) => {
                 v.default = default.to_owned();
                 v.flags |= flags;
                 v.registered = true;
                 v.name = name.to_owned();
-                if flags & ROM != 0 {
-                    v.value = default.to_owned();
+                v.kind = kind;
+                v.value = if flags & ROM != 0 {
+                    default.to_owned()
+                } else {
+                    kind.clamp(&v.value)
+                };
+                if let Some(l) = v.latched.take() {
+                    v.latched = Some(kind.clamp(&l));
                 }
             }
             None => {
@@ -99,7 +167,7 @@ impl Cvars {
                         default: default.to_owned(),
                         flags,
                         latched: None,
-                        limit: None,
+                        kind,
                         registered: true,
                     },
                 );
@@ -120,8 +188,18 @@ impl Cvars {
         self.get(name).map_or("", |v| v.value.as_str())
     }
 
+    /// The value as an integer. A Float or Vec2 dvar is read as its float and truncated, as the engine's
+    /// `(int)dvar->current.value` does (KisakCOD `game_mp/g_active_mp.cpp:1153` for `g_gravity`): its stored `%g`
+    /// text can be `1e+06`, which `atoi` would read as 1. Any other is read as `atoi`. Scripts' `getdvarint` reads
+    /// the string with `atoi` (`game_mp/g_scr_main_mp.cpp:890-899`), not through this.
     pub fn int(&self, name: &str) -> i32 {
-        parse_int(self.string(name))
+        let Some(v) = self.get(name) else {
+            return 0;
+        };
+        match v.kind {
+            Kind::Float(..) | Kind::Vec2(..) => parse_float(&v.value) as i32,
+            _ => parse_int(&v.value),
+        }
     }
 
     pub fn float(&self, name: &str) -> f32 {
@@ -130,13 +208,6 @@ impl Cvars {
 
     pub fn bool(&self, name: &str) -> bool {
         self.int(name) != 0
-    }
-
-    /// Gives `name` the range of values it accepts.
-    pub fn set_limit(&mut self, name: &str, limit: Limit) {
-        if let Some(v) = self.vars.get_mut(&key(name)) {
-            v.limit = Some(limit);
-        }
     }
 
     /// Sets a value from a script or the engine's own commands. `ROM` and `INIT` variables and values outside
@@ -189,7 +260,7 @@ impl Cvars {
             default: String::new(),
             flags: 0,
             latched: None,
-            limit: None,
+            kind: Kind::String,
             registered: false,
         });
         if v.flags & ROM != 0 {
@@ -198,22 +269,17 @@ impl Cvars {
         if v.flags & INIT != 0 {
             return Err(Refused::WriteProtected(v.name.clone()));
         }
-        let in_range = match v.limit {
-            Some(Limit::Int(lo, hi)) => (lo..=hi).contains(&parse_int(value)),
-            Some(Limit::Float(lo, hi)) => (lo..=hi).contains(&parse_float(value)),
-            None => true,
-        };
-        if !in_range {
+        let Some(value) = v.kind.read(value) else {
             return Err(Refused::NotValid {
                 name: v.name.clone(),
                 value: value.to_owned(),
             });
-        }
+        };
         if external && v.flags & CHEAT != 0 && !cheats {
             return Err(Refused::CheatProtected(v.name.clone()));
         }
-        Self::store(&mut self.modified, v, value, false);
-        apply_logging(name, value);
+        Self::store(&mut self.modified, v, &value, false);
+        apply_logging(name, &value);
         Ok(())
     }
 
@@ -225,7 +291,7 @@ impl Cvars {
             default: String::new(),
             flags: 0,
             latched: None,
-            limit: None,
+            kind: Kind::String,
             registered: false,
         });
         Self::store(&mut self.modified, v, value, true);
@@ -340,6 +406,34 @@ pub fn parse_int(s: &str) -> i32 {
     t[..end].parse().unwrap_or(0)
 }
 
+/// `%g`: six significant digits, trailing zeros dropped, an exponent below 1e-4 or from 1e6 on.
+pub fn fmt_g(x: f32) -> String {
+    let x = f64::from(x);
+    if x == 0.0 || !x.is_finite() {
+        return if x == 0.0 {
+            "0".to_owned()
+        } else {
+            x.to_string()
+        };
+    }
+    let trim = |s: String| {
+        if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.').to_owned()
+        } else {
+            s
+        }
+    };
+    let sci = format!("{x:.5e}");
+    let (mantissa, exp) = sci.split_once('e').unwrap_or((&sci, "0"));
+    let exp: i32 = exp.parse().unwrap_or(0);
+    if (-4..6).contains(&exp) {
+        trim(format!("{:.*}", (5 - exp) as usize, x))
+    } else {
+        let sign = if exp < 0 { '-' } else { '+' };
+        format!("{}e{sign}{:02}", trim(mantissa.to_owned()), exp.abs())
+    }
+}
+
 /// `atof`: leading float, 0 when there is none.
 pub fn parse_float(s: &str) -> f32 {
     let t = s.trim_start();
@@ -430,8 +524,7 @@ mod tests {
             Err(Refused::WriteProtected("sv_cheats".into()))
         );
         assert!(!c.set("sv_cheats", "0"), "a script cannot either");
-        c.register("sv_fps", "30", 0);
-        c.set_limit("sv_fps", Limit::Int(10, 1000));
+        c.register_kind("sv_fps", Kind::Int(10, 1000), "30", 0);
         assert!(matches!(
             c.set_external("sv_fps", "5"),
             Err(Refused::NotValid { .. })
@@ -439,8 +532,7 @@ mod tests {
         assert!(!c.set("sv_fps", "1001"));
         assert!(c.set("sv_fps", "60"));
         assert_eq!(c.int("sv_fps"), 60);
-        c.register("g_voteAbstainWeight", "0.5", 0);
-        c.set_limit("g_voteAbstainWeight", Limit::Float(0.0, 1.0));
+        c.register_kind("g_voteAbstainWeight", Kind::Float(0.0, 1.0), "0.5", 0);
         assert!(!c.set("g_voteAbstainWeight", "1.5"));
         c.register("pickupPrints", "0", CHEAT);
         c.force("sv_cheats", "0");
@@ -468,6 +560,73 @@ mod tests {
         c.set("sv_hostname", "b");
         assert_eq!(c.take_modified(), SERVERINFO);
         assert_eq!(c.take_modified(), 0);
+    }
+
+    #[test]
+    fn a_typed_value_is_kept_as_its_type_prints_it() {
+        let mut c = Cvars::new();
+        c.register_kind("sv_voice", Kind::Bool, "0", 0);
+        assert!(c.set("sv_voice", "7"));
+        assert_eq!(c.string("sv_voice"), "1", "Dvar_StringToBool: atoi != 0");
+        assert!(c.set("sv_voice", "x"));
+        assert_eq!(c.string("sv_voice"), "0");
+        c.register_kind("sv_reconnectlimit", Kind::Int(0, 1800), "3", 0);
+        assert!(c.set("sv_reconnectlimit", "60s"));
+        assert_eq!(c.string("sv_reconnectlimit"), "60", "%i of atoi");
+        c.register_kind("g_gravity", Kind::Float(1.0, f32::MAX), "800", 0);
+        assert!(c.set("g_gravity", "0800.50"));
+        assert_eq!(c.string("g_gravity"), "800.5", "%g of atof");
+        c.register_kind(
+            "bg_bobAmplitudeProne",
+            Kind::Vec2(0.0, 1.0),
+            "0.02 0.005",
+            0,
+        );
+        assert!(!c.set("bg_bobAmplitudeProne", "0.5 2"));
+        assert!(c.set("bg_bobAmplitudeProne", "0.5"));
+        assert_eq!(c.string("bg_bobAmplitudeProne"), "0.5 0");
+    }
+
+    #[test]
+    fn a_value_set_before_registration_is_read_as_the_type_and_held_to_the_range() {
+        let mut c = Cvars::new();
+        c.set("sv_maxclients", "99");
+        c.set("g_antilag", "yes");
+        c.register_kind("sv_maxclients", Kind::Int(1, 64), "32", 0);
+        c.register_kind("g_antilag", Kind::Bool, "1", 0);
+        assert_eq!(c.string("sv_maxclients"), "64");
+        assert_eq!(c.string("g_antilag"), "0");
+    }
+
+    #[test]
+    fn an_integer_read_of_a_float_dvar_takes_its_exponent_form_whole() {
+        let mut c = Cvars::new();
+        c.register_kind("g_gravity", Kind::Float(1.0, f32::MAX), "800", 0);
+        assert!(c.set("g_gravity", "1000000"));
+        assert_eq!(c.string("g_gravity"), "1e+06");
+        assert_eq!(c.int("g_gravity"), 1_000_000);
+        assert!(c.set("g_gravity", "799.9"));
+        assert_eq!(c.int("g_gravity"), 799, "truncated, as (int) casts");
+        c.set("loose", "1e+06");
+        assert_eq!(c.int("loose"), 1, "an untyped variable is read as atoi");
+    }
+
+    #[test]
+    fn fmt_g_prints_as_printf_does() {
+        for (x, want) in [
+            (0.0, "0"),
+            (0.5, "0.5"),
+            (800.0, "800"),
+            (15000.0, "15000"),
+            (0.007, "0.007"),
+            (1e-8, "1e-08"),
+            (123456.0, "123456"),
+            (1234567.0, "1.23457e+06"),
+            (-2.5, "-2.5"),
+            (f32::MAX, "3.40282e+38"),
+        ] {
+            assert_eq!(fmt_g(x), want, "{x}");
+        }
     }
 
     #[test]
