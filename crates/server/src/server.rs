@@ -379,6 +379,10 @@ pub struct Server {
     rcon_throttle: Throttle,
     /// Lines typed on the server's own terminal (see [`Self::attach_console`]).
     console: Option<std::sync::mpsc::Receiver<String>>,
+    /// The opt-in dev control channel, serviced only by this server's thread.
+    pub(crate) control: Option<devctrl::Channel>,
+    /// When each waiting control request was first offered.
+    pub(crate) control_waits: std::collections::HashMap<u64, Instant>,
     /// The game type the running level was started with (`sv.gametype`).
     gametype: String,
     /// The directory `g_log` names a file in.
@@ -734,6 +738,8 @@ impl Server {
             redirect: None,
             rcon_throttle: Throttle::default(),
             console: None,
+            control: None,
+            control_waits: Default::default(),
             gametype: String::new(),
             log_dir,
             masters_allowed: false,
@@ -3354,6 +3360,7 @@ impl Server {
 
     pub fn run_frames(&mut self, n: u32) {
         for _ in 0..n {
+            self.service_control();
             self.svs_time += self.frame_ms;
             let sample = self.run_frame();
             self.place_heli_view();
@@ -3432,6 +3439,7 @@ impl Server {
             while let Some(line) = self.console.as_ref().and_then(|c| c.try_recv().ok()) {
                 self.cbuf.add_text(&line);
             }
+            self.service_control();
             self.exec_buffer();
             self.cbuf.end_frame();
             if self.quit {

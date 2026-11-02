@@ -5637,6 +5637,22 @@ impl crate::control::Control for ControlHost<'_> {
         state_document(self.cli, self.st, &parts)
     }
 
+    fn server_state(&mut self, seq: u64) -> Option<Result<Value, String>> {
+        if self.st.listen.is_none() {
+            return Some(Ok(Value::Null));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let req = serde_json::Map::from_iter([("op".to_owned(), json!("state"))]);
+            crate::listen::request(seq, &req)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = seq;
+            Some(Ok(Value::Null))
+        }
+    }
+
     fn binds_of(&self, command: &str) -> Vec<String> {
         self.st
             .input

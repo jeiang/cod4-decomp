@@ -57,6 +57,7 @@ pub mod net_vote;
 pub mod script_pool;
 pub mod selftest;
 pub mod server;
+pub mod server_control;
 pub mod web_client;
 pub mod web_join;
 pub mod web_match;

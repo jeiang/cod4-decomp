@@ -4,8 +4,9 @@
 //! `cod4e-server [--install dir] [+set name value] [+exec server.cfg] [+map mp_crash]`; the install is
 //! found as `install::detect` does (`--install`, `COD4_PATH`, the path `cod4e` remembered, Steam, `./COD4`). The `--webtransport` family of flags turns on the endpoint for
 //! browser clients; each is shorthand for setting a cvar. Lines on stdin run as console commands;
-//! with `rcon_password` set, `rcon` packets do the same from the network. With `sv_public 1` and `sv_master1`..
-//! `sv_master5` set it announces itself to those master servers (`cod4e-master`).
+//! with `rcon_password` set, `rcon` packets do the same from the network. `--control port` opens the opt-in
+//! line-JSON dev control channel on loopback TCP; `--control-file path` writes its bound address. With `sv_public`
+//! 1 and `sv_master1`..`sv_master5` set it announces itself to those master servers (`cod4e-master`).
 
 #![cfg_attr(test, allow(clippy::print_stderr, clippy::print_stdout))]
 
@@ -69,10 +70,69 @@ fn take_install(args: Vec<String>) -> Result<(Vec<String>, Option<PathBuf>), Str
     Ok((rest, dir))
 }
 
+/// The opt-in dev control listener requested on the command line.
+struct ControlOptions {
+    port: u16,
+    addr_file: Option<PathBuf>,
+}
+
+/// Removes the dev control options before they reach `Server::boot`.
+///
+/// Unlike the client, the dedicated server reserves stdin and stdout for its console and log, so there is no
+/// `--control-stdio` mode. An address file is meaningful only with a listener.
+fn take_control(args: Vec<String>) -> Result<(Vec<String>, Option<ControlOptions>), String> {
+    let mut rest = Vec::new();
+    let mut port = None;
+    let mut addr_file = None;
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        let (name, inline) = match a.split_once('=') {
+            Some((n, v)) => (n.to_owned(), Some(v.to_owned())),
+            None => (a.clone(), None),
+        };
+        match name.as_str() {
+            "--control-stdio" => {
+                return Err(
+                    "--control-stdio is not available: stdin/stdout are the server console/log"
+                        .into(),
+                );
+            }
+            "--control" => {
+                let value = inline
+                    .or_else(|| it.next())
+                    .filter(|v| !v.is_empty())
+                    .ok_or("--control needs a value")?;
+                port = Some(value.parse().map_err(|_| {
+                    format!("invalid --control port {value:?}: expected 0..=65535")
+                })?);
+            }
+            "--control-file" => {
+                let value = inline
+                    .or_else(|| it.next())
+                    .filter(|v| !v.is_empty())
+                    .ok_or("--control-file needs a value")?;
+                addr_file = Some(PathBuf::from(value));
+            }
+            _ => rest.push(a),
+        }
+    }
+    if port.is_none() && addr_file.is_some() {
+        return Err("--control-file needs --control".into());
+    }
+    Ok((rest, port.map(|port| ControlOptions { port, addr_file })))
+}
+
 // Argument errors, `--help` and "install not found" are the command line's own output, not diagnostics.
 #[allow(clippy::print_stdout, clippy::print_stderr)]
 fn main() -> ExitCode {
-    let (args, explicit) = match take_install(std::env::args().skip(1).collect()) {
+    let (args, control) = match take_control(std::env::args().skip(1).collect()) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let (args, explicit) = match take_install(args) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("{e}");
@@ -92,7 +152,9 @@ fn main() -> ExitCode {
         println!(
             "usage: cod4e-server [--install dir] [+set name value] [+exec file.cfg] [+map name]\n\
              \x20      [--webtransport [host:]port [--wt-cert cert.pem --wt-key key.pem] [--wt-info info.json]]\n\
-             install: --install, $COD4_PATH, the folder cod4e remembered, Steam, ./COD4"
+             \x20      [--control port [--control-file address-file]]\n\
+             install: --install, $COD4_PATH, the folder cod4e remembered, Steam, ./COD4\n\
+             control: line JSON on loopback TCP; port 0 picks a free port (off by default)"
         );
         return ExitCode::SUCCESS;
     }
@@ -122,6 +184,17 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if let Some(options) = control {
+        let transport =
+            match devctrl::TcpTransport::bind(options.port, options.addr_file.as_deref()) {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::error!(error = %e, "the control channel did not open");
+                    return ExitCode::FAILURE;
+                }
+            };
+        s.attach_control(devctrl::Channel::new(Box::new(transport)));
+    }
     // Whatever is typed on the terminal runs as a console command (`status`, `kick name`, `map x`).
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -162,5 +235,50 @@ mod tests {
         let (_, dir) = take_install(args("--install=/x")).unwrap();
         assert_eq!(dir, Some(PathBuf::from("/x")));
         assert!(take_install(args("+map x --install")).is_err());
+    }
+
+    #[test]
+    fn control_flags_are_opt_in_and_leave_the_game_arguments() {
+        let (rest, control) = take_control(args("+map mp_crash +set sv_hostname test")).unwrap();
+        assert!(control.is_none());
+        assert_eq!(rest, args("+map mp_crash +set sv_hostname test"));
+
+        let (rest, control) = take_control(args(
+            "+map mp_crash --control 0 --control-file /tmp/server-control.addr",
+        ))
+        .unwrap();
+        assert_eq!(rest, args("+map mp_crash"));
+        let control = control.unwrap();
+        assert_eq!(control.port, 0);
+        assert_eq!(
+            control.addr_file,
+            Some(PathBuf::from("/tmp/server-control.addr"))
+        );
+
+        let (_, control) =
+            take_control(args("--control=28999 --control-file=control.addr")).unwrap();
+        let control = control.unwrap();
+        assert_eq!(control.port, 28999);
+        assert_eq!(control.addr_file, Some(PathBuf::from("control.addr")));
+    }
+
+    #[test]
+    fn control_flags_reject_missing_or_inconsistent_values() {
+        for argv in [
+            "--control",
+            "--control=",
+            "--control nope",
+            "--control 65536",
+            "--control-file",
+            "--control-file=",
+            "--control-file control.addr",
+            "--control-stdio",
+            "--control-stdio=true",
+        ] {
+            assert!(
+                take_control(args(argv)).is_err(),
+                "arguments should be rejected: {argv}"
+            );
+        }
     }
 }

@@ -33,10 +33,11 @@ nix develop -c just harness stages              # list stages
 nix develop -c just harness diff a.zip b.zip    # compare two bundles
 ```
 
-A running client can be driven from outside through its dev control channel (`--control <port>`, off unless asked;
-see `docs/control-channel.md`), which injects the player's own input, reads the state document (menu, entities,
-scoreboard, sounds, ...), waits on it and captures the presented frame. The `control-channel` stage runs that
-acceptance.
+A running client or dedicated server can be driven from outside through its dev control channel (`--control <port>`,
+off unless asked; see `docs/control-channel.md`). The client channel injects the player's own input, reads the state
+document (menu, entities, scoreboard, sounds, and the listen server's authoritative `server` section), waits on it
+and captures the presented frame. The dedicated channel reads and asserts authoritative state and runs server
+console lines. The `control-channel` and `server-control` stages run that acceptance.
 
 Linux harness displays keep a virtual keyboard and pointer attached to their private headless sway seat
 (`scripts/headless-seat.py`): windows receive focus and can lock the pointer for real mouse-look input even without
