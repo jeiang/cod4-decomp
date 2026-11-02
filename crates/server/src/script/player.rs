@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// `updatescores`, `updatedmscores` and `getclanid` translated in part from KisakCOD (game_mp/g_scr_main_mp.cpp; GPL-3.0,
+// copyright the KisakCOD contributors and Activision).
 //! Player builtins (`PlayerCmd_*`) and the client fields scripts read and write
 //! (`self.sessionstate`, `self.score`, ...; `g_client_fields.cpp` of the original).
 

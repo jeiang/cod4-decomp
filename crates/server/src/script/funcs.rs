@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// `asin`, `acos`, `getsubstr`, `strtok`, `addtestclient`, `spawnturret`, `precacheturret` and `Scr_PlayFXOnTag` translated in part from KisakCOD (game_mp/g_scr_main_mp.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
+// `asin`, `acos`, `getsubstr`, `strtok`, `addtestclient`, `spawnturret`, `precacheturret`, `Scr_PlayFXOnTag`, `setclientnamemode`, `updateclientnames` and `grenadeexplosioneffect` translated in part from KisakCOD (game_mp/g_scr_main_mp.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! Builtin functions (no entity receiver).
 
 use std::rc::Rc;

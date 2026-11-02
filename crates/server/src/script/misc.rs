@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// `devaddpitch`, `devaddyaw` and `devaddroll` translated from KisakCOD (game/g_scr_mover.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
+// `devaddpitch`, `devaddyaw` and `devaddroll` translated from KisakCOD (game/g_scr_mover.cpp), and `laseron`/`laseroff`,
+// `enableaimassist`/`disableaimassist` and the turret arcs from KisakCOD (game_mp/g_scr_main_mp.cpp); GPL-3.0,
+// copyright the KisakCOD contributors and Activision.
 //! The remaining builtins: server administration, the developer file functions, queries with
 //! fixed answers on a dedicated server, and the names that only matter once their milestone
 //! lands (accepted and logged once).

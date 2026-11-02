@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// The mover push (`G_MoverTeam`, `G_MoverPush`, `G_TryPushingEntity`) translated in part from KisakCOD (game/g_mover.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
+// The mover push (`G_MoverTeam`, `G_MoverPush`, `G_TryPushingEntity`) translated in part from KisakCOD (game/g_mover.cpp), and `vibrate` (`ScriptEntCmd_Vibrate`) from KisakCOD (game/g_scr_mover.cpp); GPL-3.0, copyright the KisakCOD contributors and Activision.
 //! Script movers: `moveto`, `rotateto` and friends as trajectories the frame loop advances.
 //!
 //! A move is up to three phases: accelerate for `accel` seconds, cruise, decelerate for

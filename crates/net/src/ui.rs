@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// `clientscore` and the single-row scoreboard sort translated in part from KisakCOD (cgame_mp/cg_servercmds_mp.cpp;
+// GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! What the server tells a client's user interface, and the store the client reads it from.
 //!
 //! The client crate consumes this module only: it never parses a reliable command or a snapshot
