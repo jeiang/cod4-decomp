@@ -142,7 +142,8 @@ pub(super) fn until_top(c: &mut Driven, name: &str, limit: Duration) -> Result<(
 
 /// Clicks the top menu's button labelled `text` (the install's localized label; empty for none) or, wanting that, the
 /// one named `name`: a shown item that is not only decoration, so a locked copy or a preview of the same name is
-/// passed over. Returns what matched, for a failure to name.
+/// passed over. A list button whose label is drawn by a decoration item of its row (the class popups' weapon rows)
+/// is the live item under that label. Returns what matched, for a failure to name.
 fn press(c: &mut Driven, name: &str, text: &str) -> Result<String, String> {
     let menu = c.state("menu")?;
     let top = menu["open"]
@@ -156,6 +157,14 @@ fn press(c: &mut Driven, name: &str, text: &str) -> Result<String, String> {
         .flatten()
         .filter(|it| it["menu"] == top && it["visible"] == true)
         .collect();
+    let rect = |it: &Value| -> Option<[f64; 4]> {
+        let r: Vec<f64> = it["rect"]
+            .as_array()?
+            .iter()
+            .filter_map(Value::as_f64)
+            .collect();
+        r.try_into().ok()
+    };
     let label = |it: &Value| {
         let kind = if it["decoration"] == true {
             " (decoration)"
@@ -181,15 +190,41 @@ fn press(c: &mut Driven, name: &str, text: &str) -> Result<String, String> {
         .copied()
         .filter(|it| it["decoration"] == false)
         .collect();
+    // The live item whose rectangle holds the middle of a shown label's, the smallest such: its row's button.
+    let under_label = || {
+        shown
+            .iter()
+            .copied()
+            .filter(|it| by_text(it))
+            .find_map(|l| {
+                let [x, y, w, h] = rect(l)?;
+                let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+                live.iter()
+                    .copied()
+                    .filter(|it| {
+                        rect(it).is_some_and(|[bx, by, bw, bh]| {
+                            bx <= cx && cx <= bx + bw && by <= cy && cy <= by + bh
+                        })
+                    })
+                    .min_by(|a, b| {
+                        let area = |it: &Value| rect(it).map_or(f64::MAX, |[_, _, w, h]| w * h);
+                        area(a).total_cmp(&area(b))
+                    })
+            })
+    };
     let Some(it) = live
         .iter()
         .copied()
         .find(|it| by_text(it))
         .or_else(|| live.iter().copied().find(|it| by_name(it)))
+        .or_else(under_label)
     else {
         return Err(format!(
             "{top} shows no live button {text:?} or {name:?}; it shows {:?}",
-            shown.iter().map(|it| label(it)).collect::<Vec<_>>()
+            shown
+                .iter()
+                .map(|it| format!("{} at {}", label(it), it["rect"]))
+                .collect::<Vec<_>>()
         ));
     };
     let matched: Vec<String> = shown
@@ -221,10 +256,9 @@ fn spawn(c: &mut Driven, limit: Duration) -> Result<(), String> {
 /// The class built in Create a Class's menus, from the main menu back to it.
 fn build_class(c: &mut Driven, text: &HashMap<String, String>) -> Result<(), String> {
     let t = |k: &str| text[k].as_str();
-    c.step("name custom class 5 and give the profile experience", |c| {
+    c.step("name custom class 5", |c| {
         until_top(c, HOME, Duration::from_secs(60))?;
         c.console("set customclass5 P90")?;
-        c.console(&format!("statset {} {}", EXPERIENCE.0, EXPERIENCE.1))?;
         let name = c.ask(json!({"cmd": "cvar", "name": "customclass5"}))?;
         if name["value"] != "P90" {
             return Err(format!("customclass5 is {}", name["value"]));
@@ -272,6 +306,9 @@ fn build_class(c: &mut Driven, text: &HashMap<String, String>) -> Result<(), Str
 fn drive(c: &mut Driven, text: &HashMap<String, String>) -> Result<(), String> {
     build_class(c, text)?;
     c.step("start a server and join with custom class 5", |c| {
+        // The class menus lock every weapon above the rank the experience gives (the P90 is a late unlock), so the
+        // profile keeps its top-rank experience while the class is built and is given the stage's own only now.
+        c.console(&format!("statset {} {}", EXPERIENCE.0, EXPERIENCE.1))?;
         c.console("set ui_netGametypeName war")?;
         c.click("Start New Server")?;
         until_top(c, "createserver", Duration::from_secs(20))?;

@@ -273,13 +273,21 @@ fn in_match(c: &mut Driven, custom3: &str) -> Result<(), String> {
         )
         .map(|_| ())
     })?;
+    // The `cgame` section is not one a `wait` builds (`control::PARTS`): it is read by name until it answers.
     c.step("the level's sound faded in over snd_levelFadeTime", |c| {
-        c.until(
-            json!({"cgame.levelfade": "in 100"}),
-            Duration::from_secs(5),
-            "the level's sound did not fade in over 100 ms",
-        )
-        .map(|_| ())
+        let end = Instant::now() + Duration::from_secs(5);
+        loop {
+            let fade = c.lookup("cgame.levelfade")?;
+            if fade == "in 100" {
+                return Ok(());
+            }
+            if Instant::now() > end {
+                return Err(format!(
+                    "the level's sound did not fade in over 100 ms: cgame.levelfade is {fade}"
+                ));
+            }
+            c.pause(Duration::from_millis(100))?;
+        }
     })?;
     c.step("the Pause key is refused", |c| {
         says(
