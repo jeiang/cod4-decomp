@@ -457,7 +457,6 @@ impl Game {
         }
         let per_point = self.cvars.float("player_dmgtimer_timePerPoint");
         let max_time = self.cvars.float("player_dmgtimer_maxTime");
-        let now = self.level.time;
         let c = self.client_mut(target).expect("checked above");
         c.ps.damage_timer += (damage as f32 * per_point) as i32;
         c.ps.damage_timer = c.ps.damage_timer.min(max_time as i32);
@@ -481,12 +480,6 @@ impl Game {
         let attacker = self.ent_obj(vm, d.attacker);
         // `waittill("damage", amount, attacker)`.
         vm.notify_entity(target, "damage", &[Value::Int(damage), attacker]);
-        let at = self.ent(target).map_or([0.0; 3], |e| e.origin);
-        self.tempev.add(now, crate::tempev::ev::PLAYER_PAIN, |s| {
-            s.origin = at;
-            s.client = target;
-            s.event_parm = damage.clamp(0, 255) as u8;
-        });
         if health > 0 {
             return Ok(());
         }

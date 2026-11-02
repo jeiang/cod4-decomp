@@ -54,6 +54,8 @@ pub struct Metrics {
     /// `cg_scoreboardItemHeight` and `BannerHeight`: a player row and a team banner.
     pub item_h: f32,
     pub banner_h: f32,
+    /// `cg_scoreboardScrollStep`: lines one wheel notch or page key moves the list (`CG_ScrollScoreboardUp`/`Down`).
+    pub scroll_step: usize,
     /// `cg_scoreboardPingText`: the ping as a number in the last column.
     pub ping_text: bool,
     /// `cg_scoreboardPingGraph`: the ping as bars right of the list.
@@ -102,6 +104,7 @@ impl Metrics {
             h: layout::float(c, "cg_scoreboardHeight", 435.0, 0.0, f32::MAX),
             item_h: layout::int(c, "cg_scoreboardItemHeight", 18, 1, 1000) as f32,
             banner_h: layout::int(c, "cg_scoreboardBannerHeight", 35, 1, 100) as f32,
+            scroll_step: layout::int(c, "cg_scoreboardScrollStep", 3, 1, 8) as usize,
             ping_text: flag("cg_scoreboardPingText", true),
             ping_graph: flag("cg_scoreboardPingGraph", false),
             ping_w: layout::float(c, "cg_scoreboardPingWidth", 0.036, 0.0, 1.0),
@@ -141,6 +144,14 @@ impl Metrics {
     /// The lowest a line may reach.
     pub fn bottom(&self) -> f32 {
         self.top() + self.h - 3.0 - 2.0 - 14.0 - 1.0
+    }
+
+    /// How many rows fit under the first banner (`CenterViewOnClient`'s `viewmax`).
+    pub fn view_max(&self) -> usize {
+        let bottom = self.top() + self.h - 3.0 - 2.0 - 14.0;
+        let list = bottom - (self.top() + 3.0 + 2.0 + 24.0 + 1.0) - 1.0;
+        let room = list - self.banner_h - self.item_h - 4.0;
+        (room / (self.item_h + 4.0)).max(0.0) as usize
     }
 
     /// The ping bars of a row `ping` ms away, from the list's right edge `x` and the row's top `y`
@@ -375,6 +386,30 @@ fn fit(ui: &Ui, text: &str, width: f32) -> f32 {
 /// Banner and row lines the list holds, the most it scrolls.
 pub fn scoreboard_lines(rows: &[ScoreLine], own_team: u8, m: &Metrics) -> usize {
     plan(rows, own_team, 1, m).total
+}
+
+/// The line the list opens at (`CenterViewOnClient`): the viewer's place among their team's rows, scrolled so it
+/// sits mid-view when it is past the last row in view; the top for a spectator or a viewer near the top.
+pub fn centred_top(rows: &[ScoreLine], own: u16, own_team: u8, m: &Metrics) -> usize {
+    if own_team == 3 {
+        return 1;
+    }
+    let line = 1 + rows
+        .iter()
+        .filter(|r| r.team == own_team)
+        .take_while(|r| r.client != own)
+        .count();
+    let view_max = m.view_max();
+    if line > view_max {
+        line - view_max / 2 + 1
+    } else {
+        1
+    }
+}
+
+/// A line of the list does not fit under the last one drawn from `top` (`scoresOffBottom`): the list scrolls down.
+pub fn scores_off_bottom(rows: &[ScoreLine], own_team: u8, top: usize, m: &Metrics) -> bool {
+    plan(rows, own_team, top, m).off_bottom
 }
 
 /// How many player rows the scoreboard shows for these rows scrolled to `top`.
@@ -815,6 +850,33 @@ mod tests {
             100.0
         );
         assert_eq!(with(&[("cg_scoreboardItemHeight", "0")]).item_h, 1.0);
+    }
+
+    /// `CenterViewOnClient`: the list opens on the viewer's row once it is past the rows in view.
+    #[test]
+    fn the_list_opens_centred_on_the_viewer() {
+        let m = Metrics::default();
+        // (435 - 19 - 30 - 1 - 35 - 18 - 4) / (18 + 4) rows fit under the first banner.
+        assert_eq!(m.view_max(), 14);
+        let mut rows: Vec<_> = (0..30).map(|i| row(i, 2)).collect();
+        rows.insert(0, row(40, 1));
+        assert_eq!(centred_top(&rows, 5, 2, &m), 1, "near the top");
+        assert_eq!(
+            centred_top(&rows, 14, 2, &m),
+            15 - 7 + 1,
+            "line 15 is past the view"
+        );
+        assert_eq!(centred_top(&rows, 25, 2, &m), 26 - 7 + 1);
+        assert_eq!(
+            centred_top(&rows, 25, 3, &m),
+            1,
+            "a spectator opens at the top"
+        );
+        let p = plan(&rows, 2, centred_top(&rows, 25, 2, &m), &m);
+        assert!(
+            p.items.iter().any(|i| i.kind == Kind::Row(26)),
+            "the viewer's row is drawn"
+        );
     }
 
     #[test]
