@@ -184,8 +184,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             failures.push(format!("{name}: want {want}, got {got:?}"));
         }
     }
-    // The drawings are published by the next frame and outlive it (duration 3 frames).
-    server.run_for(Duration::from_millis(100));
+    // The drawings are published by the next frame and last 3 frames; a timed run would catch up several frames
+    // after the checks and could age them out, so run exactly one.
+    server.run_frames(1);
     let d = &server.game.debug_draw;
     if d.shown_lines.len() <= lines_before || !d.shown_strings.iter().any(|s| s.text == "harness") {
         failures.push(format!(
