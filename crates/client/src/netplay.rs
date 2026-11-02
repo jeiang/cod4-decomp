@@ -2639,8 +2639,12 @@ impl NetPlay {
                             out.push(m);
                         }
                     }
-                    self.effects
-                        .script_model_tags(e.number, &out[before..], &self.lib.content);
+                    self.effects.script_model_tags(
+                        e.number,
+                        e.model,
+                        &out[before..],
+                        &self.lib.content,
+                    );
                     drawn += 1;
                     self.c.script_model_parts_max =
                         self.c.script_model_parts_max.max(out.len() - before);
@@ -2721,8 +2725,12 @@ impl NetPlay {
             m.origin = e.origin;
             m.angles = e.angles;
             m.light_origin = e.origin;
-            self.effects
-                .script_model_tags(e.number, std::slice::from_ref(&m), &self.lib.content);
+            self.effects.script_model_tags(
+                e.number,
+                e.model,
+                std::slice::from_ref(&m),
+                &self.lib.content,
+            );
             out.push(m);
         }
         out
@@ -2764,8 +2772,12 @@ impl NetPlay {
                 continue;
             };
             // A script's `playfxontag` on the projectile rides its model, as on its DObj.
-            self.effects
-                .script_model_tags(e.number, std::slice::from_ref(&m), &self.lib.content);
+            self.effects.script_model_tags(
+                e.number,
+                e.model,
+                std::slice::from_ref(&m),
+                &self.lib.content,
+            );
             // Not drawn until its launch time (a rocket leaves the tube before it shows).
             let until_launch = ((e.eflags.wrapping_sub(st as u32) << 8) as i32) >> 8;
             if until_launch <= 0 {
@@ -2823,8 +2835,12 @@ impl NetPlay {
             if let Some(r) = rotors {
                 m.bones = r.pose(self.rotor_clock).to_vec();
             }
-            self.effects
-                .script_model_tags(e.number, std::slice::from_ref(&m), &self.lib.content);
+            self.effects.script_model_tags(
+                e.number,
+                e.model,
+                std::slice::from_ref(&m),
+                &self.lib.content,
+            );
             out.push(m);
         }
         self.c.vehicles_seen = seen;
@@ -3033,7 +3049,7 @@ impl NetPlay {
             }
             let instances = r.player.instances(e.origin);
             self.effects
-                .script_model_tags(e.number, &instances, &self.lib.content);
+                .script_model_tags(e.number, e.model, &instances, &self.lib.content);
             if e.client != own || show_own {
                 drawn += 1;
                 self.c.players_drawn.insert(e.client);
