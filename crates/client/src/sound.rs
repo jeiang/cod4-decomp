@@ -61,6 +61,28 @@ pub fn mix_of(cvars: &crate::input::Cvars) -> (u32, bool) {
     (fade, reverb)
 }
 
+/// `snd_levelFadeTime`'s default: the ms every entity channel takes to fade in when a level starts.
+pub const LEVEL_FADE_MS: u32 = 250;
+
+/// `snd_levelFadeTime` (ms, 0 to 5000). A CHEAT dvar like [`mix_of`]'s: without `sv_cheats` the stock 250 stands.
+pub fn level_fade_of(cvars: &crate::input::Cvars) -> u32 {
+    if !cvars.bool("sv_cheats") {
+        return LEVEL_FADE_MS;
+    }
+    cvars
+        .get("snd_levelFadeTime")
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .map_or(LEVEL_FADE_MS, |v| v.clamp(0, 5000) as u32)
+}
+
+/// The latest level fade-in, for the report: its length and how loud the quietest channel was after 300 ms.
+struct FadeWatch {
+    ms: u32,
+    /// Frame time since the fade began, ms.
+    elapsed: f32,
+    after_300ms: Option<f32>,
+}
+
 /// `snd_enveffectsprio_shellshock`, and the channel volume priority of `snd_channelvolprio_shellshock`.
 const SHOCK_REVERB: usize = 2;
 const SHOCK_VOLUMES: u8 = 3;
@@ -107,6 +129,9 @@ pub struct ClientSound {
     breath: crate::breath::Breath,
     /// What the held breath dips each channel to, by channel name; others take the stock 0.5.
     breath_volumes: Vec<(String, f32)>,
+    /// A level began (`SND_MapInit`) before the tables were ready: its fade, in ms, starts when they are.
+    level_fade: Option<u32>,
+    fade_watch: Option<FadeWatch>,
 }
 
 /// Who an event belongs to.
@@ -156,6 +181,8 @@ impl ClientSound {
             entity_loops: HashMap::new(),
             breath: crate::breath::Breath::default(),
             breath_volumes: Vec::new(),
+            level_fade: None,
+            fade_watch: None,
         }
     }
 
@@ -232,7 +259,36 @@ impl ClientSound {
             }
         }
         match &mut self.state {
-            State::Ready(s) => Some(s),
+            State::Ready(s) => {
+                if let Some(ms) = self.level_fade.take() {
+                    s.level_fade(ms);
+                    self.fade_watch = Some(FadeWatch {
+                        ms,
+                        elapsed: 0.0,
+                        after_300ms: None,
+                    });
+                }
+                Some(s)
+            }
+            _ => None,
+        }
+    }
+
+    /// `SND_MapInit` when a level starts: every entity channel fades in from silence over `fade_ms`
+    /// (`snd_levelFadeTime`); with the tables still loading, from when they are ready. The stock stop of every
+    /// sound that goes with it comes from a fresh mixer for a new map, and from the server's `stopsounds` for a
+    /// restarted one.
+    pub fn map_init(&mut self, fade_ms: u32) {
+        self.level_fade = Some(fade_ms);
+        self.fade_watch = None;
+        self.ready();
+    }
+
+    /// The latest level fade-in: its configured milliseconds, the quietest channel's volume in the first chunk mixed
+    /// after it began, and after 300 ms of frames (`None` until then). `None` before it began.
+    pub fn level_fade(&self) -> Option<(u32, f32, Option<f32>)> {
+        match (&self.state, &self.fade_watch) {
+            (State::Ready(s), Some(w)) => Some((w.ms, s.stats().level_fade_start(), w.after_300ms)),
             _ => None,
         }
     }
@@ -267,7 +323,15 @@ impl ClientSound {
         s.set_listener(eye, yaw);
         #[cfg(target_arch = "wasm32")]
         s.pump();
-        s.tick(Duration::from_secs_f32(dt.clamp(0.0, 0.25)));
+        let dt = dt.clamp(0.0, 0.25);
+        s.tick(Duration::from_secs_f32(dt));
+        let lowest = s.stats().channel_volume_min();
+        if let Some(w) = self.fade_watch.as_mut() {
+            w.elapsed += dt * 1000.0;
+            if w.after_300ms.is_none() && w.elapsed >= 300.0 {
+                w.after_300ms = Some(lowest);
+            }
+        }
         for l in std::mem::take(&mut self.pending) {
             self.run(&l);
         }
@@ -1074,6 +1138,13 @@ impl ClientSound {
                     "explosion_cues": s.played.aliases.iter().filter(|(k, _)| k.contains("explo")).map(|(_, v)| v).sum::<u64>(),
                     "top_aliases": top.iter().take(12).map(|(k, v)| json!([k, v])).collect::<Vec<_>>(),
                     "dropped_before_ready": dropped,
+                    // `SND_MapInit`'s fade-in of the level begun last: the quietest channel's volume in the first
+                    // mixed chunk, and after 300 ms of frames (null until then).
+                    "level_fade": self.fade_watch.as_ref().map(|w| json!({
+                        "ms": w.ms,
+                        "start": st.level_fade_start(),
+                        "after_300ms": w.after_300ms,
+                    })),
                 })
             }
             State::Loading(_) => json!({"ready": false, "dropped_before_ready": dropped}),
@@ -2008,11 +2079,17 @@ mod tests {
             ("sv_cheats", "0"),
             ("snd_slaveFadeTime", "100"),
             ("snd_enableReverb", "0"),
+            ("snd_levelFadeTime", "1000"),
         ];
         assert_eq!(mix_of(&cvars(&[])), (500, true));
         assert_eq!(mix_of(&cvars(&set)), (500, true));
+        assert_eq!(level_fade_of(&cvars(&[])), 250);
+        assert_eq!(level_fade_of(&cvars(&set)), 250);
         let on: Vec<_> = set.iter().copied().chain([("sv_cheats", "1")]).collect();
         assert_eq!(mix_of(&cvars(&on)), (100, false));
+        assert_eq!(level_fade_of(&cvars(&on)), 1000);
+        let long = [("sv_cheats", "1"), ("snd_levelFadeTime", "9999")];
+        assert_eq!(level_fade_of(&cvars(&long)), 5000);
     }
 
     #[test]

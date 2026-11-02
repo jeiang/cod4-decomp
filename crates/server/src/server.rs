@@ -1989,7 +1989,7 @@ impl Server {
                 };
                 let index = self.game.weapons.index(weapon);
                 let ps = &self.game.client(n).ok_or("devgrenade: no such client")?.ps;
-                let start = crate::fire::view_origin(ps);
+                let start = crate::fire::view_origin(ps, &self.game.pm_params.bob);
                 let (fwd, _, _) = sim::pm::math::angle_vectors(&ps.viewangles);
                 let speed = arg(3).map_or(500.0, cvar::parse_float);
                 let toss = fwd.map(|v| v * speed);

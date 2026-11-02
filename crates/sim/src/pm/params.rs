@@ -64,6 +64,8 @@ pub struct Params {
     // Aim down sights.
     pub player_ads_exit_delay: i32,
     pub player_scope_exit_on_damage: bool,
+    /// The view and gun bob (`bg_bobMax`, `bg_bobAmplitude*`).
+    pub bob: super::bob::Bob,
     /// The dvars the weapon code reads (breath, melee, burst cooldown, penetration, perks).
     pub weapon: WeaponParams,
     /// Mantle animation tracks; mantling is unavailable until set.
@@ -116,6 +118,7 @@ impl Default for Params {
             player_melee_charge_friction: 1200.0,
             player_ads_exit_delay: 0,
             player_scope_exit_on_damage: false,
+            bob: super::bob::Bob::default(),
             weapon: WeaponParams::default(),
             mantle_anims: None,
         }
@@ -129,6 +132,8 @@ enum Tunable<'a> {
     Ranged(&'a mut f32, f32, f32),
     Int(&'a mut i32),
     Bool(&'a mut bool),
+    /// Two floats, `"x y"`, each held to the range (`min`, `max`).
+    Vec2(&'a mut [f32; 2], f32, f32),
 }
 
 impl Tunable<'_> {
@@ -137,14 +142,21 @@ impl Tunable<'_> {
             Tunable::Float(v) | Tunable::Ranged(v, ..) => v.to_string(),
             Tunable::Int(v) => v.to_string(),
             Tunable::Bool(v) => u8::from(**v).to_string(),
+            Tunable::Vec2(v, ..) => format!("{} {}", v[0], v[1]),
         }
     }
 
     /// Takes the value `text` gives; text that is no number leaves it as it was (the original's `atof`/`atoi`
-    /// would give 0, but a dvar only holds what its registration accepts).
+    /// would give 0, but a dvar only holds what its registration accepts). A two-float value takes its
+    /// components in order and a missing second one is 0, as `Dvar_StringToVec2` reads them.
     fn set(&mut self, text: &str) {
         let text = text.trim();
-        let Ok(n) = text.parse::<f32>() else {
+        let mut words = text.split_whitespace().map(str::parse::<f32>);
+        let first = match self {
+            Tunable::Vec2(..) => words.next(),
+            _ => Some(text.parse::<f32>()),
+        };
+        let Some(Ok(n)) = first else {
             tracing::warn!(
                 value = text,
                 "tunable value is not a number, kept as it was"
@@ -156,6 +168,10 @@ impl Tunable<'_> {
             Tunable::Ranged(v, lo, hi) => **v = n.clamp(*lo, *hi),
             Tunable::Int(v) => **v = n as i32,
             Tunable::Bool(v) => **v = n != 0.0,
+            Tunable::Vec2(v, lo, hi) => {
+                let y = words.next().and_then(Result::ok).unwrap_or(0.0);
+                **v = [n.clamp(*lo, *hi), y.clamp(*lo, *hi)];
+            }
         }
     }
 }
@@ -164,7 +180,7 @@ impl Params {
     /// Every tunable with the dvar it is, as `Jump_RegisterDvars`, `Mantle_RegisterDvars`, `BG_RegisterDvars`,
     /// `BG_RegisterPerks` and `G_RegisterDvars` name them.
     fn tunables(&mut self) -> Vec<(&'static str, Tunable<'_>)> {
-        use Tunable::{Bool, Float, Int, Ranged};
+        use Tunable::{Bool, Float, Int, Ranged, Vec2};
         vec![
             ("friction", Float(&mut self.friction)),
             ("stopspeed", Float(&mut self.stopspeed)),
@@ -283,6 +299,22 @@ impl Params {
             (
                 "player_scopeExitOnDamage",
                 Bool(&mut self.player_scope_exit_on_damage),
+            ),
+            // `BG_RegisterDvars`: the bob of the eye and the gun, cheat protected. The amplitudes are
+            // (horizontal, vertical) per unit of speed.
+            ("bg_bobMax", Ranged(&mut self.bob.max, 0.0, 36.0)),
+            (
+                "bg_bobAmplitudeStanding",
+                Vec2(&mut self.bob.standing, 0.0, 1.0),
+            ),
+            (
+                "bg_bobAmplitudeDucked",
+                Vec2(&mut self.bob.ducked, 0.0, 1.0),
+            ),
+            ("bg_bobAmplitudeProne", Vec2(&mut self.bob.prone, 0.0, 1.0)),
+            (
+                "bg_bobAmplitudeSprinting",
+                Vec2(&mut self.bob.sprinting, 0.0, 1.0),
             ),
             // The weapon dvars (`BG_RegisterDvars`, `BG_RegisterPerks`, `G_RegisterDvars`), all cheat protected.
             (

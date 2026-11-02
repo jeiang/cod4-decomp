@@ -18,7 +18,7 @@
 
 use assets::zone::weapon::WeaponDef;
 use glam::Vec3;
-use sim::pm::bob::{BOB_MAX, MIN_EYE, bob_cycle, bob_speed, horizontal_bob, vertical_bob};
+use sim::pm::bob::{MIN_EYE, bob_cycle, bob_speed, horizontal_bob, vertical_bob};
 use sim::pm::math::{add_lean_to_position, angle_vectors};
 use sim::pm::{Params, PlayerState, ef, ev};
 use sim::weapon::gun::{GunParams, view_bob};
@@ -162,7 +162,7 @@ impl Camera {
             ads_view_bob_mult: w.ads_view_bob_mult,
             ..GunParams::default()
         };
-        view_bob(f.ps, bob_speed(f.ps, f.now), &p)
+        view_bob(f.ps, bob_speed(f.ps, f.now), &p, &f.params.bob)
     }
 
     /// `CG_OffsetFirstPersonView` for one frame. Nothing changes for a dead player, in a turret or at the
@@ -198,8 +198,9 @@ impl Camera {
         let step = f.step;
         let dip = self.dip_at(f.now);
         let (cycle, speed) = (bob_cycle(ps), bob_speed(ps, f.now));
-        let rise = vertical_bob(ps, cycle, speed, BOB_MAX);
-        let side = horizontal_bob(ps, cycle, speed, BOB_MAX);
+        let bob = &f.params.bob;
+        let rise = vertical_bob(ps, bob, cycle, speed, bob.max);
+        let side = horizontal_bob(ps, bob, cycle, speed, bob.max);
         let view = [f.aim[0] + angles[0], f.aim[1] + angles[1], angles[2]];
         let (_, right, _) = angle_vectors(&view);
         // Relative to the logical eye.
@@ -502,6 +503,8 @@ mod tests {
         assert_eq!(v, View::default());
     }
 
+    const STOCK: sim::pm::bob::Bob = sim::pm::bob::Bob::STOCK;
+
     #[test]
     fn bob_follows_the_cycle_and_is_capped() {
         let ps = walking();
@@ -511,7 +514,7 @@ mod tests {
                 bob_cycle: c,
                 ..ps.clone()
             };
-            let z = vertical_bob(&p, bob_cycle(&p), 190.0, BOB_MAX);
+            let z = vertical_bob(&p, &STOCK, bob_cycle(&p), 190.0, STOCK.max);
             seen = [seen[0].min(z), seen[1].max(z)];
         }
         // Standing: 190 * 0.007 = 1.33 amplitude, times the 0.75 and the two harmonics' peak.
@@ -522,11 +525,12 @@ mod tests {
             pm_flags: sim::pm::pmf::SPRINTING,
             ..ps.clone()
         };
+        let (bob, max) = (&STOCK, STOCK.max);
         assert!(
-            vertical_bob(&sprint, 0.3, 300.0, BOB_MAX).abs()
-                > vertical_bob(&ps, 0.3, 300.0, BOB_MAX).abs()
+            vertical_bob(&sprint, bob, 0.3, 300.0, max).abs()
+                > vertical_bob(&ps, bob, 0.3, 300.0, max).abs()
         );
-        assert!(vertical_bob(&ps, 0.3, 1.0e6, BOB_MAX).abs() <= BOB_MAX);
+        assert!(vertical_bob(&ps, bob, 0.3, 1.0e6, max).abs() <= max);
     }
 
     #[test]

@@ -257,6 +257,8 @@ pub struct ViewModel {
     motion: GunState,
     params: GunParams,
     hit: Hit,
+    /// The bob dvars the gun bobs by (`bg_bobAmplitude*`).
+    bob: sim::pm::bob::Bob,
     /// The server time the shell shock ends at, 0 for none.
     shock_end: i32,
     /// The magazine of the weapon is empty: it rests in its empty pose.
@@ -398,6 +400,7 @@ impl ViewModel {
             motion: GunState::default(),
             params: GunParams::from_def(weapon),
             hit: Hit::default(),
+            bob: sim::pm::bob::Bob::STOCK,
             shock_end: 0,
             clip_empty: false,
             note_sounds: weapon
@@ -463,6 +466,11 @@ impl ViewModel {
     /// given.
     pub fn set_felt(&mut self, hit: Hit, shock_end: i32) {
         (self.hit, self.shock_end) = (hit, shock_end);
+    }
+
+    /// The bob dvars the server gave (`bg_bobAmplitude*`).
+    pub fn set_bob(&mut self, bob: sim::pm::bob::Bob) {
+        self.bob = bob;
     }
 
     /// The weapon has a recoil spring (it can aim down sights).
@@ -580,6 +588,7 @@ impl ViewModel {
         let frame = GunFrame {
             ps,
             p: &self.params,
+            bob: &self.bob,
             xyspeed: sim::pm::bob::bob_speed(ps, ps.command_time),
             frametime: dt,
             time: ps.command_time,
