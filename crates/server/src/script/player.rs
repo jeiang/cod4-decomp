@@ -581,13 +581,19 @@ fn show_scoreboard(g: &mut Game, _: &mut Vm, e: EntRef, _: Args) -> R {
 }
 
 /// `updatescores`: `PlayerCmd_UpdateScores` (KisakCOD `game_mp/g_client_script_cmd_mp.cpp:3365-3393`) sends the
-/// player the allies and axis scores. Here the team scores travel in their configstrings, which every client keeps
-/// and which `setteamscore` sets at once, so this makes sure they hold the current scores.
+/// player the allies and axis scores. These are commands to that player, not a configstring update: the stock game
+/// sends both every time, including when the values are unchanged.
 fn update_scores(g: &mut Game, _: &mut Vm, e: EntRef, _: Args) -> R {
-    client_of(g, e)?;
-    let (allies, axis) = (g.team_score[2], g.team_score[1]);
-    g.set_configstring(net::ui::cs::SCORES_ALLIES, &allies.to_string());
-    g.set_configstring(net::ui::cs::SCORES_AXIS, &axis.to_string());
+    let n = client_of(g, e)?;
+    for (index, score) in [
+        (net::ui::cs::SCORES_ALLIES, g.team_score[2]),
+        (net::ui::cs::SCORES_AXIS, g.team_score[1]),
+    ] {
+        g.send(
+            crate::ui::Dest::Client(n),
+            net::ui::ServerCmd::ConfigStrings(vec![(index, score.to_string())]),
+        );
+    }
     Ok(Value::Undefined)
 }
 

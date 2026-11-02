@@ -22,6 +22,7 @@ t_vibrate_short() { self vibrate((0, 1, 0), 10, 2); }
 t_name_mode(m) { setclientnamemode(m); }
 t_update_names() { updateclientnames(); }
 t_clanid() { return self getclanid(); }
+t_scores() { self updatescores(); }
 t_dm() { self updatedmscores(); }
 "#;
 
@@ -184,6 +185,43 @@ fn getclanid_is_the_string_zero() {
         Value::Str(s) => assert_eq!(&*s, "0"),
         v => panic!("not a string: {v:?}"),
     }
+}
+
+#[test]
+fn updatescores_sends_both_current_scores_even_when_the_configstrings_already_match() {
+    let mut r = Rig::new();
+    let me = r.player("me", 3);
+    r.g.team_score[2] = 17;
+    r.g.team_score[1] = 23;
+    r.g.set_configstring(net::ui::cs::SCORES_ALLIES, "17");
+    r.g.set_configstring(net::ui::cs::SCORES_AXIS, "23");
+    r.g.ui.out.clear();
+    r.call("t_scores", Some(me), &[]).unwrap();
+    let sent: Vec<_> =
+        r.g.ui
+            .out
+            .iter()
+            .flat_map(|o| {
+                let ServerCmd::ConfigStrings(values) = &o.cmd else {
+                    return Vec::new();
+                };
+                values
+                    .iter()
+                    .map(|(index, value)| (o.to, *index, value.clone()))
+                    .collect()
+            })
+            .collect();
+    assert_eq!(
+        sent,
+        [
+            (
+                Dest::Client(me),
+                net::ui::cs::SCORES_ALLIES,
+                "17".to_owned()
+            ),
+            (Dest::Client(me), net::ui::cs::SCORES_AXIS, "23".to_owned()),
+        ]
+    );
 }
 
 #[test]

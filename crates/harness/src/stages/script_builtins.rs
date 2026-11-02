@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! The script builtins on a running stock level: a check script, compiled against the stock builtin table, runs
 //! on the live game after the level's own scripts have initialised. It exercises the developer-only builtins
-//! (print channels, asserts, the debug drawings; #409), the precache rules (#374), the client name modes (#410) and
+//! (print channels, asserts, the debug drawings; #409), the precache rules (#374), the client name modes and the
+//! per-player team scores (#410) and
 //! the laser, aim assist, turret arc, vibrate and grenade effect builtins (#411), and every line must give the stock
 //! result (KisakCOD `game_mp/g_scr_main_mp.cpp`, `game/g_scr_mover.cpp`).
 use crate::stage::{StageCtx, StageReport, Status};
-use gsc::{Builtins, CallOutcome, Options, Value, Vm, compile};
+use gsc::{Builtins, CallOutcome, EntClass, Options, Value, Vm, compile};
 use server::script::{Dispatch, ScriptHost};
 use server::server::Server;
+use server::ui::Dest;
 use std::io;
 use std::time::Duration;
 
@@ -36,6 +38,7 @@ t_loadfx_late() { return loadfx("harness/none"); }
 t_precacheshader_late() { precacheshader("white"); }
 t_name_mode_bad() { setclientnamemode("sideways"); }
 t_update_names_auto() { updateclientnames(); }
+t_scores() { self updatescores(); }
 t_vibrate_short() { e = spawn("script_model", (0, 0, 0)); e vibrate((0, 1, 0), 1, 1); }
 t_aim_assist_model() { e = spawn("script_model", (0, 0, 0)); e enableaimassist(); }
 t_arc_not_turret() { e = spawn("script_model", (0, 0, 0)); e setleftarc(10); }
@@ -77,6 +80,7 @@ const CHECKS: &[(&str, Expect)] = &[
         "t_update_names_auto",
         Expect::Error("Only works in [manual_change] mode"),
     ),
+    ("t_scores", Expect::Undefined),
     (
         "t_vibrate_short",
         Expect::Error("illegal call to vibrate()\n"),
@@ -111,7 +115,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         Ok(s) => s,
         Err(e) => return Ok(StageReport::new(NAME, Status::Failed).with_reason(e)),
     };
-    for line in ["set g_gametype dm", "map mp_crash"] {
+    for line in ["set g_gametype dm", "map mp_crash", "bots 1"] {
         if let Err(e) = server.exec_line(line) {
             return Ok(StageReport::new(NAME, Status::Failed).with_reason(format!("{line}: {e}")));
         }
@@ -148,6 +152,23 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             return Ok(StageReport::new(NAME, Status::Failed).with_reason(format!("{e:?}")));
         }
     };
+    // A real bot, connected through the level's own callbacks, receives the score commands.
+    let Some(score_player) = server
+        .game
+        .connected_clients()
+        .find(|(_, c)| c.bot)
+        .map(|(n, _)| n)
+    else {
+        return Ok(StageReport::new(NAME, Status::Failed).with_reason("bots 1 connected no bot"));
+    };
+    // Start with both published values already current: `updatescores` must still send both commands (#410).
+    server.game.team_score[2] = 17;
+    server.game.team_score[1] = 23;
+    server
+        .game
+        .set_configstring(net::ui::cs::SCORES_ALLIES, "17");
+    server.game.set_configstring(net::ui::cs::SCORES_AXIS, "23");
+    server.game.ui.out.clear();
     let lines_before = server.game.debug_draw.shown_lines.len();
     let mut laser = None;
     for ((name, expect), f) in CHECKS.iter().zip(funcs) {
@@ -159,7 +180,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             game: &mut server.game,
             dispatch: &dispatch,
         };
-        let got = match vm.call(&mut host, f, None, &[]) {
+        let this = (*name == "t_scores").then(|| vm.entity(score_player, EntClass::Entity));
+        let got = match vm.call(&mut host, f, this, &[]) {
             Ok(CallOutcome::Finished(v)) => Ok(v),
             Ok(CallOutcome::Pending) => Err("waited".to_owned()),
             Err(e) => Err(e.message),
@@ -183,6 +205,37 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             };
             failures.push(format!("{name}: want {want}, got {got:?}"));
         }
+    }
+    let scores: Vec<_> = server
+        .game
+        .ui
+        .out
+        .iter()
+        .filter(|o| o.to == Dest::Client(score_player))
+        .flat_map(|o| {
+            let net::ui::ServerCmd::ConfigStrings(values) = &o.cmd else {
+                return Vec::new();
+            };
+            values
+                .iter()
+                .filter(|(index, _)| {
+                    matches!(
+                        *index,
+                        net::ui::cs::SCORES_ALLIES | net::ui::cs::SCORES_AXIS
+                    )
+                })
+                .map(|(index, value)| (*index, value.clone()))
+                .collect()
+        })
+        .collect();
+    let want_scores = [
+        (net::ui::cs::SCORES_ALLIES, "17".to_owned()),
+        (net::ui::cs::SCORES_AXIS, "23".to_owned()),
+    ];
+    if scores != want_scores {
+        failures.push(format!(
+            "updatescores with already-current values sent {scores:?}, want {want_scores:?}"
+        ));
     }
     // The drawings are published by the next frame and last 3 frames; a timed run would catch up several frames
     // after the checks and could age them out, so run exactly one.
