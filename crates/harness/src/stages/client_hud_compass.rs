@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Snapshot firing-event compass parity (#406). Bots stand still and use real weapon usercmds.
 //! An unsilenced shot must hold its rendered mark for the independently observed audio playback length,
-//! then fade for compassSoundPingFadeTime; a silenced shot must not ping. The frag case (an offhand throw raises
-//! no fire event, so no ping) returns once the listen-server bot throws (#486); until then the client unit test in
-//! `netplay/hud.rs` covers the `WEAPTYPE_GRENADE` rule.
+//! then fade for compassSoundPingFadeTime; a silenced shot must not ping. The frag case: an offhand throw raises no
+//! fire event, so it pings nothing; the listen-server bot's throw is proven by the `grenade` entity on the server.
 //! Reference: KisakCOD MP 1.8 (GPL-3.0), cgame/cg_weapons.cpp:2552-2558,
 //! cgame_mp/cg_compassfriendlies_mp.cpp:246,589-600. 1.7 unverified.
 use crate::control::Driven;
@@ -226,9 +225,7 @@ fn watch_for_grenade(c: &mut Driven, bot: u64, d: Duration) -> Result<(bool, Vec
     let (mut seen, mut trace) = (false, Vec::<String>::new());
     while Instant::now() < end {
         let ents = c.ask(json!({"cmd": "server", "op": "state", "what": "entities"}))?;
-        seen |= ents
-            .as_array()
-            .is_some_and(|l| l.iter().any(|e| e["classname"] == json!("grenade")));
+        seen |= grenade_in(&ents);
         let p = server_client(c, bot)?;
         let line = format!(
             "state {} weapon {} flags {} offhand {} fuse {} pm_flags {} buttons {}",
@@ -246,6 +243,14 @@ fn watch_for_grenade(c: &mut Driven, bot: u64, d: Duration) -> Result<(bool, Vec
         c.pause(Duration::from_millis(100))?;
     }
     Ok((seen, trace))
+}
+
+/// Whether the server's entity list (`state entities`; a section that is not an object comes back as the reply's
+/// `value`) holds a thrown grenade (#486: read as the bare reply it never did, so every throw looked missing).
+fn grenade_in(reply: &Value) -> bool {
+    reply["value"]
+        .as_array()
+        .is_some_and(|l| l.iter().any(|e| e["classname"] == json!("grenade")))
 }
 
 /// The frag case: the bot, 96 units along x from the person, throws a frag through the offhand path. The throw must be
@@ -522,5 +527,26 @@ mod tests {
         assert!(duration_verdict(1649, 1649, (3425, 0), 2000).is_err());
         assert!(duration_verdict(1649, 1649, (3000, 3100), 2000).is_err());
         assert!(duration_verdict(1649, 1649, (3900, 4200), 2000).is_err());
+    }
+
+    #[test]
+    fn a_grenade_is_found_in_the_replys_value() {
+        let reply = json!({"id": 3, "ok": true, "value": [
+            {"classname": "player", "number": 0},
+            {"classname": "grenade", "number": 70},
+        ]});
+        assert!(grenade_in(&reply));
+        let none = json!({"id": 4, "ok": true, "value": [{"classname": "player", "number": 0}]});
+        assert!(!grenade_in(&none));
+    }
+
+    #[test]
+    fn a_frag_must_be_thrown_count_no_shot_and_ping_nothing() {
+        assert!(frag_verdict(true, 0, c(2, 1, 9), c(2, 1, 9)).is_ok());
+        assert!(frag_verdict(false, 0, c(2, 1, 9), c(2, 1, 9)).is_err());
+        assert!(frag_verdict(true, 1, c(2, 1, 9), c(2, 1, 9)).is_err());
+        assert!(frag_verdict(true, 0, c(2, 1, 9), c(3, 1, 9)).is_err());
+        assert!(frag_verdict(true, 0, c(2, 1, 9), c(2, 2, 9)).is_err());
+        assert!(frag_verdict(true, 0, c(2, 1, 9), c(2, 1, 10)).is_err());
     }
 }
