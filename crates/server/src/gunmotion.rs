@@ -10,7 +10,7 @@
 //! server aims an aimed shot along kicks in its own direction after each shot.
 
 use sim::Vec3;
-use sim::pm::bob::bob_speed;
+use sim::pm::bob::{Bob, bob_speed};
 use sim::weapon::WeaponInfo;
 use sim::weapon::gun::{GunFrame, GunState, ViewFx, shell_shock_sway_scale};
 
@@ -29,8 +29,8 @@ pub struct GunMotion {
 
 impl Client {
     /// Advances the gun's springs and the view's effects for one usercmd of `msec`, from the state before the
-    /// command's movement, and works out the aim of the shots it fires.
-    pub fn gun_step(&mut self, info: Option<&WeaponInfo>, msec: i32) {
+    /// command's movement, and works out the aim of the shots it fires. `bob` is the bob dvars.
+    pub fn gun_step(&mut self, info: Option<&WeaponInfo>, msec: i32, bob: &Bob) {
         let ps = &self.ps;
         let m = &mut self.gun;
         let Some(info) = info else {
@@ -42,12 +42,13 @@ impl Client {
         m.fx.step(ps, p);
         let time = ps.command_time;
         let xyspeed = bob_speed(ps, time);
-        let view = compose_view(ps.viewangles, m.fx.view_angles(ps, p, xyspeed));
+        let view = compose_view(ps.viewangles, m.fx.view_angles(ps, p, bob, xyspeed));
         let ss = shell_shock_sway_scale(p.sway_shell_shock_scale, m.shock_end - time);
         m.state.sway(ps, p, ss, msec);
         let angles = m.state.weapon_angles(&GunFrame {
             ps,
             p,
+            bob,
             xyspeed,
             frametime: msec as f32 * 0.001,
             time,
@@ -120,17 +121,18 @@ mod tests {
     fn an_aimed_shot_follows_the_gun_while_the_spring_is_kicked_and_a_hip_shot_does_not() {
         let info = rifle();
         let mut still = client(1.0);
-        still.gun_step(Some(&info), 8);
+        let bob = Bob::default();
+        still.gun_step(Some(&info), 8, &bob);
         let rest = forward(&still);
         let mut kicked = client(1.0);
         kicked.gun.state.kick([-300.0, 0.0]);
-        kicked.gun_step(Some(&info), 8);
+        kicked.gun_step(Some(&info), 8, &bob);
         let moved = forward(&kicked);
         let dot: f32 = rest.iter().zip(moved).map(|(a, b)| a * b).sum();
         assert!(dot < 0.9999, "the kicked gun moved the shot: {dot}");
         let mut hip = client(0.0);
         hip.gun.state.kick([-300.0, 0.0]);
-        hip.gun_step(Some(&info), 8);
+        hip.gun_step(Some(&info), 8, &bob);
         assert_eq!(
             hip.fire_angles(),
             hip.ps.viewangles,
@@ -141,7 +143,7 @@ mod tests {
     #[test]
     fn a_weapon_without_info_shoots_along_the_view() {
         let mut c = client(1.0);
-        c.gun_step(None, 8);
+        c.gun_step(None, 8, &Bob::default());
         assert_eq!(c.fire_angles(), c.ps.viewangles);
     }
 

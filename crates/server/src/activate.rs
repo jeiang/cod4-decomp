@@ -46,7 +46,7 @@ impl Game {
         let (Some(c), Some(world)) = (self.client(n), self.world.as_ref()) else {
             return Vec::new();
         };
-        let eye = view_origin(&c.ps);
+        let eye = view_origin(&c.ps, &self.pm_params.bob);
         let (fwd, _, _) = sim::pm::math::angle_vectors(&c.ps.viewangles);
         let lo: Vec3 = std::array::from_fn(|i| eye[i] - SCAN_RADIUS[i]);
         let hi: Vec3 = std::array::from_fn(|i| eye[i] + SCAN_RADIUS[i]);

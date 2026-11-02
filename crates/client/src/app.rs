@@ -1112,7 +1112,8 @@ impl Viewer {
         }
         if let Some(n) = net.as_mut() {
             n.set_profile(&stats);
-            // A direct join began before the config was read: its userinfo takes the `name` the configs set now.
+            // A direct join began before the config was read: its sound fade and userinfo take the configured values.
+            n.map_init(crate::sound::level_fade_of(&input.cvars));
             let (rate, snaps) = netplay_rates(&input);
             n.set_userinfo(&player_name(&self.cli, &input), rate, snaps);
         }
@@ -1725,6 +1726,7 @@ impl Viewer {
             let t_net = Instant::now();
             net.set_volume(crate::sound::volume_of(&st.input.cvars));
             net.set_sound_mix(crate::sound::mix_of(&st.input.cvars));
+            net.set_level_fade_time(crate::sound::level_fade_of(&st.input.cvars));
             net.set_client_side_effects(crate::ambient::enabled_by(&st.input.cvars));
             net.set_voice(st.input.cvar("cl_voice").is_none_or(|v| v.trim() != "0"));
             net.set_demo_paused(
@@ -3844,6 +3846,23 @@ fn script_step(st: &mut State) -> bool {
                             });
                         p.map(|(x, y)| format!("{x} {y}"))
                     }
+                    // `in <ms>` when the level's sound faded in (`SND_MapInit`): the quietest channel under half
+                    // volume in the first mixed chunk and back at full after 300 ms; otherwise the two volumes.
+                    "levelfade" => {
+                        st.net
+                            .as_ref()
+                            .and_then(|n| n.level_fade())
+                            .map(|(ms, start, after)| match after {
+                                Some(after) if start < 0.5 && after >= 0.99 => format!("in {ms}"),
+                                _ => format!("{ms}ms start {start:.2} after_300ms {after:?}"),
+                            })
+                    }
+                    // `1` when the eye bobbed more than a tenth of a unit since `bobmark` (`bg_bobMax`,
+                    // `bg_bobAmplitude*`), `0` when it did not.
+                    "eyebob" => st
+                        .net
+                        .as_ref()
+                        .map(|n| u8::from(n.eye_bob() > 0.1).to_string()),
                     "subtitle" => sh.map(|s| {
                         u8::from(s.st.feed.active(crate::hud::SUBTITLE, s.st.live.time)).to_string()
                     }),
@@ -3886,6 +3905,13 @@ fn script_step(st: &mut State) -> bool {
                 st.fx_mark = n.fx_counts();
             }
             done(st.net.is_some(), sc, "fx marked".into());
+        }
+        // `bobmark` starts the eye bob probe over; `cgis=eyebob <0|1>` afterwards says whether the eye bobbed.
+        "bobmark" => {
+            if let Some(n) = st.net.as_mut() {
+                n.bob_mark();
+            }
+            done(st.net.is_some(), sc, "bob marked".into());
         }
         // A bullet of the weapon in hand strikes a player 64 units ahead on the next frame (`hitflesh`): the flesh
         // impact effect, or the no-blood one with `cg_blood` off.
@@ -4565,7 +4591,9 @@ fn recover_surface(
     if st.loading.is_some() {
         return Ok(SurfaceAction::Retry);
     }
-    if st.gpu.lost().is_some() {
+    // A device lost under a frame can fail the acquisition before a plain poll reports it; wait for it here, which
+    // also lets wgpu release the surface's images before recovery drops the surface.
+    if st.gpu.lost_waiting().is_some() {
         return Ok(SurfaceAction::DeviceLost);
     }
     if matches!(outcome, C::Timeout | C::Occluded) {
@@ -5017,6 +5045,7 @@ fn finish_load(
         let name = player_name(cli, &st.input);
         let mut net =
             NetPlay::connect(library, &data, addr, &name, &password, limits, false, sound)?;
+        net.map_init(crate::sound::level_fade_of(&st.input.cvars));
         if let Some(path) = st.pending_demo.take() {
             net.play_demo(&path)?;
         }

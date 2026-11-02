@@ -214,6 +214,7 @@ const CHEAT: &[(&str, &str)] = &[
     ("r_dof_tweak", "0"),
     ("snd_slaveFadeTime", "500"),
     ("snd_enableReverb", "1"),
+    ("snd_levelFadeTime", "250"),
     ("ragdoll_max_life", "4500"),
     ("ragdoll_jointlerp_time", "3000"),
     ("ragdoll_explode_force", "18000"),

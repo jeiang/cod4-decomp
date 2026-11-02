@@ -12,9 +12,10 @@
 //! The cgame and renderer dvars of #369 are checked on the way: untouched registration defaults are observed before
 //! writes, and the menu-started match resets cheat dvars and refuses protected writes. A `devmap` match then checks
 //! live near/far/depthhack, outdoor, sun, film, glow and blur settings without restarting the renderer, including
-//! sun-flare source defaults, overrides and persistence after their gate closes. The view model, HUD, shellshock,
-//! unlit scene, frame counter, subtitles, blood and brass retain their player-path checks. Needs a display and the
-//! install; skips without.
+//! sun-flare source defaults, overrides and persistence after their gate closes. In that match walking bobs the eye,
+//! and after `set bg_bobMax 0` on the host walking does not (#408). The view model, HUD, shellshock, unlit scene,
+//! frame counter, subtitles, blood and brass retain their player-path checks. Needs a display and the install; skips
+//! without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
 use super::client_session::{run_client, verdict};
@@ -142,6 +143,9 @@ set=set r_zFeather 1,set=set r_drawWater 1,set=set r_texFilterAnisoMin 1,set=set
 set=set r_aspectRatio auto,vidrestart,wait=2,gfxis=zfeather 1,gfxis=water 1,\
 gfxis=aa 1,gfxis=specular 1,gfxis=dof 1,gfxis=blur 0,holdkey=mouse2,releasekey=mouse2,wait=2,gfxis=blur 1,\
 holdkey=mouse2,releasekey=mouse2,wait=1,gfxis=glow 1,gfxis=shadows 1,gfxis=aspect 0.00,shot=gfx-off,\
+bobmark,holdkey=w,wait=1.5,releasekey=w,holdkey=s,wait=1.5,releasekey=s,cgis=eyebob 1,\
+console=set bg_bobMax 0,wait=1,bobmark,holdkey=w,wait=1.5,releasekey=w,holdkey=s,wait=1.5,releasekey=s,cgis=eyebob 0,\
+console=set bg_bobMax 8,wait=1,\
 losedevice,renderer=90,ingame=120,wait=2,gfxis=aa 1,shot=recovered";
 
 /// Share of pixels a light must brighten, and by how much (of 255, in luma).
