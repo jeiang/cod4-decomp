@@ -38,8 +38,10 @@ const SMOOTH_STEP: f32 = 40.0;
 /// Waiting for the game to give a client a body depends on the match start, not the runner; the
 /// limit only stops a hung run.
 const SPAWN_LIMIT: Duration = Duration::from_secs(180);
-/// How long after every client has a body the server turns `g_smoothClients` off: within each client's frames.
-const UNSMOOTH_AFTER: Duration = Duration::from_secs(4);
+/// Moving players each client must have seen extrapolated (`g_smoothClients 1`) before the server turns it off, and
+/// the latest after every client has a body that it does so anyway: within each client's frames.
+const SMOOTHED_SEEN: u64 = 20;
+const UNSMOOTH_LATEST: Duration = Duration::from_secs(7);
 
 /// What a client needs to predict its own movement: the map's collision and the movement rules.
 #[derive(Clone)]
@@ -126,6 +128,7 @@ fn client(
     rules: &Rules,
     stop: &AtomicBool,
     ready: &AtomicUsize,
+    smoothed: &AtomicUsize,
 ) -> Result {
     let mut r = Result::default();
     let mut boxes = PlayerBoxes::new(rules.clipmap.clone());
@@ -284,7 +287,12 @@ fn client(
             {
                 match e.pos_type {
                     net::entity::tr::LINEAR_STOP if r.interpolate > 0 => r.smoothed_again += 1,
-                    net::entity::tr::LINEAR_STOP => r.linear_stop += 1,
+                    net::entity::tr::LINEAR_STOP => {
+                        r.linear_stop += 1;
+                        if r.linear_stop == SMOOTHED_SEEN {
+                            smoothed.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
                     net::entity::tr::INTERPOLATE => r.interpolate += 1,
                     _ => r.other_pos_type += 1,
                 }
@@ -441,10 +449,12 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     };
     let stop = Arc::new(AtomicBool::new(false));
     let ready = Arc::new(AtomicUsize::new(0));
+    let smoothed = Arc::new(AtomicUsize::new(0));
     let handles: Vec<_> = (0..CLIENTS)
         .map(|i| {
-            let (stop, ready, rules) = (stop.clone(), ready.clone(), rules.clone());
-            std::thread::spawn(move || client(addr, i, &rules, &stop, &ready))
+            let (stop, ready, smoothed, rules) =
+                (stop.clone(), ready.clone(), smoothed.clone(), rules.clone());
+            std::thread::spawn(move || client(addr, i, &rules, &stop, &ready, &smoothed))
         })
         .collect();
     let flier = {
@@ -473,8 +483,12 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         if all_ready.is_none() && ready.load(Ordering::SeqCst) == CLIENTS {
             all_ready = Some(Instant::now());
         }
-        // The clients have seen the stock default extrapolate the players; now the other trajectory type.
-        if !unsmoothed && all_ready.is_some_and(|t| t.elapsed() >= UNSMOOTH_AFTER) {
+        // Once every client has seen moving players under the stock default (the match start holds them still for a
+        // while), the other trajectory type; at the latest a while before the clients stop.
+        if !unsmoothed
+            && (smoothed.load(Ordering::SeqCst) == CLIENTS
+                || all_ready.is_some_and(|t| t.elapsed() >= UNSMOOTH_LATEST))
+        {
             unsmoothed = true;
             if let Err(e) = server.exec_line("set g_smoothClients 0") {
                 unsmooth_failed = Some(format!("set g_smoothClients 0: {e}"));
