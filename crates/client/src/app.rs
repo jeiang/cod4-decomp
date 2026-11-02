@@ -310,9 +310,9 @@ fn drop_renderer(st: &mut State) {
     }
 }
 
-/// What the renderers of the run could not build, for `client.json` and `ui-script.json`: `material_failures` is
-/// asserted empty by the harness (a material whose draws are skipped was invisible to every stage before, #375),
-/// `image_failures` are reported.
+/// What the renderers of the run could not build, for `client.json` and the `render` state section:
+/// `material_failures` is asserted empty by the harness (a material whose draws are skipped was invisible to every
+/// stage before, #375), `image_failures` are reported.
 fn render_report(st: &State) -> Value {
     let mut materials = st.material_failures.clone();
     let mut images = st.image_failures.clone();
@@ -439,15 +439,10 @@ struct State {
     listen: Option<Listen>,
     tour: Option<flythrough::Tour>,
     ui_tour: Option<UiTour>,
-    script: Option<UiScript>,
-    /// A screenshot to take after the next paint (name without extension).
-    shot_request: Option<String>,
     /// `screenshot` or `screenshotJpeg` ran: the next frame is written to the screenshots folder.
     screenshot: Option<crate::screenshot::Request>,
     /// Where the numbered screenshots go on from (the original's `lastNumber`).
     screenshot_next: u32,
-    /// `shotd=`: the screenshot waits for a frame that copied the scene for distortion.
-    shot_gate: bool,
     /// The last frame copied the scene for distortion materials.
     distortion_now: bool,
     /// Input events waiting for this frame's dispatch: the window's and the control channel's, in arrival order.
@@ -488,14 +483,10 @@ struct State {
     load_gaps: Option<LoadGaps>,
     /// What the last load measured, for the report.
     load_report: Option<Value>,
-    /// The next session answers the team and class menus by itself (a script's `start=` step).
-    autojoin_next: bool,
     /// The film block the last vision set gave, before the `r_brightness`/`r_contrast`/`r_desaturation` tweaks.
     film_base: Option<render::art::Film>,
     /// The glow block the last vision set gave, before the `r_glowTweak*` overrides.
     glow_base: Option<render::art::Glow>,
-    /// Effect counts at an `fxmark` step: `cgis=fx:<kind> +n` then reads how often the kind played since.
-    fx_mark: HashMap<String, u64>,
     /// Milliseconds the last frame spent in the network frame, the renderer, getting the surface texture, presenting,
     /// the input and polls before the network frame, the late warm-up, and the UI painted between the renderer
     /// and the present (`PHASES`), to explain a slow gap.
@@ -603,116 +594,6 @@ const WARM_LATE_BUDGET: Duration = Duration::from_millis(2);
 
 /// Frames a tour menu is shown before its screenshot (fades and expressions settle).
 const TOUR_FRAMES: u32 = 6;
-
-/// A `throw` step in progress: the grenade counts of the HUD and the missiles seen when it pressed the key, and
-/// whether it has let go yet.
-struct Throw {
-    before: (Option<i32>, Option<i32>),
-    missiles: usize,
-    released: bool,
-}
-
-impl Throw {
-    /// Whether the grenade left the hand: the key was let go, a count dropped, a missile entity appeared and the
-    /// player is alive. A frag that cooked off in the hand drops the count and kills the player; a count that
-    /// changed with no missile is a pickup or a class change.
-    fn thrown(&self, now: (Option<i32>, Option<i32>), missiles: usize, dead: bool) -> bool {
-        self.released && now != self.before && missiles > self.missiles && !dead
-    }
-}
-
-/// Whether the player's team `have` satisfies a `team=<want>` step: a number is that team; `same` the one
-/// `team=save` kept; `other` the opposite side, which only a player on a side (1 or 2) can be on, so a spectator
-/// (3) or an unassigned player (0) satisfies neither `other` nor a side.
-fn team_matches(want: &str, have: &str, saved: Option<&str>) -> bool {
-    let side = |t: &str| t == "1" || t == "2";
-    match want {
-        "other" => saved.is_some_and(|t| side(t) && side(have) && t != have),
-        "same" => saved == Some(have),
-        _ => have == want,
-    }
-}
-
-#[cfg(test)]
-mod step_tests {
-    use super::*;
-
-    #[test]
-    fn the_other_team_is_the_other_side_not_the_spectators() {
-        assert!(team_matches("other", "1", Some("2")));
-        assert!(team_matches("other", "2", Some("1")));
-        assert!(
-            !team_matches("other", "3", Some("2")),
-            "dying is not a side switch"
-        );
-        assert!(!team_matches("other", "0", Some("2")));
-        assert!(!team_matches("other", "2", Some("2")));
-        assert!(
-            !team_matches("other", "1", Some("3")),
-            "a saved spectator has no other side"
-        );
-        assert!(!team_matches("other", "1", None));
-        assert!(team_matches("same", "2", Some("2")));
-        assert!(!team_matches("same", "2", None));
-        assert!(team_matches("2", "2", None));
-    }
-
-    #[test]
-    fn a_throw_needs_the_release_a_count_drop_a_missile_and_a_live_player() {
-        let t = Throw {
-            before: (Some(1), Some(1)),
-            missiles: 4,
-            released: true,
-        };
-        assert!(t.thrown((Some(0), Some(1)), 5, false));
-        assert!(
-            !t.thrown((Some(0), Some(1)), 5, true),
-            "cooked off in the hand"
-        );
-        assert!(
-            !t.thrown((Some(0), Some(1)), 4, false),
-            "no missile appeared"
-        );
-        assert!(
-            !t.thrown((Some(1), Some(1)), 5, false),
-            "someone else's grenade"
-        );
-        let held = Throw {
-            released: false,
-            ..t
-        };
-        assert!(
-            !held.thrown((Some(0), Some(1)), 5, false),
-            "still holding the key"
-        );
-    }
-}
-
-/// `--ui-script`: steps that drive the menus like a player. Each step that waits across frames keeps its own state
-/// here: one shared field let `team=save` stand in for the map `maprotate` started from (#375).
-struct UiScript {
-    /// What `respawn` and `loc` carry between frames (the death seen; the hint count the step began from).
-    marker: Option<String>,
-    /// The team `team=save` remembered.
-    team_saved: Option<String>,
-    /// The map a `maprotate` step started from.
-    rotate_from: Option<String>,
-    /// The `throw` step under way.
-    throw: Option<Throw>,
-    /// What `cvar=save` and `round=next` remembered, by name.
-    saved: HashMap<String, String>,
-    /// A `killcam` or `dead` step has seen the player die: a later `respawn` step counts that death, since the
-    /// player may already be back when it starts (the killcam is short and the steps before it take seconds).
-    died: bool,
-    steps: Vec<String>,
-    index: usize,
-    /// When the current step began and, for waits, how long it may take.
-    began: Instant,
-    results: Vec<Value>,
-}
-
-/// How long a `throw` step holds the key before letting go: long enough for the pin, short of any fuse.
-const THROW_HOLD: f32 = 0.6;
 
 /// A device that has run this long since its predecessor was lost starts the count of losses again.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -1218,26 +1099,8 @@ impl Viewer {
             },
             last_server: self.cli.connect.clone(),
             listen,
-            script: self.cli.ui_script.as_ref().map(|s| UiScript {
-                marker: None,
-                team_saved: None,
-                rotate_from: None,
-                throw: None,
-                saved: HashMap::new(),
-                died: false,
-                steps: s
-                    .split(',')
-                    .map(|x| x.trim().to_owned())
-                    .filter(|x| !x.is_empty())
-                    .collect(),
-                index: 0,
-                began: Instant::now(),
-                results: Vec::new(),
-            }),
-            shot_request: None,
             screenshot: None,
             screenshot_next: 0,
-            shot_gate: false,
             distortion_now: false,
             events: Vec::new(),
             control: crate::control::open(&self.cli),
@@ -1258,8 +1121,6 @@ impl Viewer {
             load_gametype: String::new(),
             load_gaps: None,
             load_report: None,
-            autojoin_next: false,
-            fx_mark: HashMap::new(),
             film_base: None,
             glow_base: None,
             prev_cost: [0.0; 7],
@@ -1267,8 +1128,7 @@ impl Viewer {
             surface_stalled_ms: 0.0,
             surface_retried: false,
             presented: false,
-            surface_stall_limit: (self.cli.timed() || self.cli.ui_script.is_some())
-                .then_some(SURFACE_STALL),
+            surface_stall_limit: self.cli.timed().then_some(SURFACE_STALL),
             fresh_surface: false,
             gpu_log: std::mem::take(&mut self.gpu_log),
             material_failures: BTreeMap::new(),
@@ -1638,10 +1498,7 @@ impl Viewer {
         }
         sync_os_cursor(st);
         // In a match the pointer is the game's whenever no menu wants it; a click is not required.
-        let in_match = st.net.is_some()
-            && st.renderer.is_some()
-            && !self.cli.timed()
-            && self.cli.ui_script.is_none();
+        let in_match = st.net.is_some() && st.renderer.is_some() && !self.cli.timed();
         // The browser grants a lock only to a page the player just touched.
         #[cfg(target_arch = "wasm32")]
         let may_ask = crate::web::user_active();
@@ -1692,7 +1549,7 @@ impl Viewer {
             && let Some(net) = st.net.as_mut()
         {
             let f = if self.cli.autoplay {
-                // The bot drives; only the grenade keys stay a script's (`throw=`).
+                // The bot drives; only the grenade keys stay the player's (the control channel presses them).
                 let keys = st.input.frame(dt).buttons;
                 InputFrame {
                     buttons: keys & (buttons::FRAG | buttons::SMOKE),
@@ -1891,7 +1748,7 @@ impl Viewer {
                     }
                 }
                 sh.tick(&mut st.input);
-                let scores = f.held_other.iter().any(|c| c == "scores") || sh.st.scores_forced;
+                let scores = f.held_other.iter().any(|c| c == "scores");
                 if scores != sh.st.game.scoreboard {
                     sh.st.game.scoreboard = scores;
                     if scores {
@@ -2294,38 +2151,6 @@ impl Viewer {
                 sh.print_console(&text);
             }
         }
-        let shot_ready = !st.shot_gate || st.distortion_now;
-        if shot_ready && let Some(name) = st.shot_request.take() {
-            st.shot_gate = false;
-            let out = self.cli.out.clone().unwrap_or_default();
-            if let Err(e) = std::fs::create_dir_all(&out) {
-                tracing::error!(dir = %out.display(), error = %e, "cannot create the output directory");
-            }
-            let lit = save_png(
-                &st.gpu,
-                &frame.texture,
-                st.config.format,
-                &out.join(format!("{name}.png")),
-            );
-            if let Err(e) = &lit {
-                tracing::error!(shot = %name, error = %e, "screenshot failed");
-            }
-            let ok = lit.is_ok();
-            let hud = st.shell.as_ref().map(|s| s.st.game.hud.report());
-            if let Some(sc) = st.script.as_mut() {
-                sc.results.push(json!({"step": format!("shot={name}"), "ok": ok, "hud": hud,
-                    "lit_fraction": lit.as_ref().ok(), "menus": st.shell.as_ref().map(|s| s.ui.open_menus().join(",")),
-                    "weapon": st.net.as_ref().map(NetPlay::weapon),
-                    "missiles": st.net.as_ref().map(NetPlay::missiles),
-                    "explosions": st.net.as_ref().map(NetPlay::explosions)}));
-                sc.index += 1;
-                sc.began = Instant::now();
-            }
-        }
-        if st.script.is_some() && script_step(st) {
-            write_script_report(st, self.cli.out.clone().unwrap_or_default(), false);
-            el.exit();
-        }
         // A capture the channel asked for is taken from the frame that was just drawn (with `after` `distortion`, from
         // the first one that copied the scene for a distortion material); its request answers on the next pass of the
         // channel. In the browser the page reads the canvas, which the present blits to: the capture follows it.
@@ -2437,10 +2262,6 @@ impl Viewer {
             match a {
                 Action::Reconnect => {}
                 Action::Quit => {
-                    // A scripted run that reaches Quit has proved the exit path.
-                    if st.script.is_some() {
-                        write_script_report(st, self.cli.out.clone().unwrap_or_default(), true);
-                    }
                     el.exit();
                 }
                 Action::StartServer {
@@ -2566,13 +2387,6 @@ impl Viewer {
                         Ok(executable) => match std::fs::canonicalize(executable) {
                             Ok(executable) => {
                                 self.start_singleplayer = Some(executable);
-                                if st.script.is_some() {
-                                    write_script_report(
-                                        st,
-                                        self.cli.out.clone().unwrap_or_default(),
-                                        true,
-                                    );
-                                }
                                 el.exit();
                             }
                             Err(err) => show_error(
@@ -2769,41 +2583,10 @@ fn record_gpu(slots: &mut Vec<Option<f64>>, finished: Vec<(u64, f64)>) {
     }
 }
 
-/// Writes `ui-script.json` and ends the script; `quit` when the run ended through the Quit command.
-fn write_script_report(st: &mut State, out: PathBuf, quit: bool) {
-    let Some(sc) = st.script.take() else { return };
-    let ok = sc.results.iter().all(|r| r["ok"] == Value::Bool(true));
-    let gpu_health = st.gpu_log.report(&st.gpu);
-    let report = json!({
-        "gpu_health": gpu_health,
-        "render": render_report(st),
-        "status": if ok { "ok" } else { "failed" },
-        "quit": quit,
-        "steps": sc.results,
-        "missing_images": st.shell.as_ref().map(|s| s.missing().to_vec()),
-        "hud_draw": st.shell.as_ref().map(|s| s.st.hud_stats.report()),
-        "open_menus": st.shell.as_ref().map(|s| s.ui.open_menus().join(",")),
-        "net": st.net.as_mut().map(NetPlay::report),
-        "hud": st.shell.as_ref().map(|s| s.st.game.hud.report()),
-        "map": st.map_name,
-        "load": st.load_report,
-        "objectives": {"plants": listen::objectives().0, "defuses": listen::objectives().1, "airstrikes": listen::objectives().2, "helicopters": listen::objectives().3, "heli_shots": listen::objectives().4},
-    });
-    if let Err(e) = std::fs::create_dir_all(&out).and_then(|()| {
-        std::fs::write(
-            out.join("ui-script.json"),
-            serde_json::to_vec_pretty(&report).unwrap_or_default(),
-        )
-    }) {
-        tracing::error!(dir = %out.display(), error = %e, "cannot write ui-script.json");
-    }
-}
-
-/// How long a capture waits for a frame that copied the scene for a distortion material (`shotd=`, and a channel
-/// capture `after` `distortion`).
+/// How long a channel capture `after` `distortion` waits for a frame that copied the scene for a distortion material.
 const DISTORTION_SHOT_WAIT: Duration = Duration::from_secs(10);
 
-/// The graphics facts of the `gfx` state section, by the names `gfxis=` checks ([`gfx_value`]).
+/// The graphics facts of the `gfx` state section ([`gfx_value`]).
 const GFX_FACTS: &[&str] = &[
     "aa",
     "aa_max",
@@ -2834,7 +2617,7 @@ const GFX_FACTS: &[&str] = &[
     "pace",
 ];
 
-/// The cgame facts of the `cgame` state section, by the names `cgis=` checks ([`cgame_value`]).
+/// The cgame facts of the `cgame` state section ([`cgame_value`]).
 const CGAME_FACTS: &[&str] = &[
     "gun",
     "hud2d",
@@ -2864,7 +2647,7 @@ fn facts(names: &[&str], value: impl Fn(&str) -> Option<String>) -> Value {
     )
 }
 
-/// What the graphics settings came to, by the names of the `gfx` state section and of `gfxis=`: the renderer's and
+/// What the graphics settings came to, by the names of the `gfx` state section: the renderer's and
 /// the surface's own state. `None` where the fact needs a world renderer and none is up.
 fn gfx_value(st: &State, name: &str) -> Option<String> {
     match name {
@@ -2872,7 +2655,7 @@ fn gfx_value(st: &State, name: &str) -> Option<String> {
             .renderer
             .as_ref()
             .map(|r| r.samples(st.config.format).to_string()),
-        // The most samples the adapter offers for the scene's colour and depth, whatever was asked (`gfxis=aa max`).
+        // The most samples the adapter offers for the scene's colour and depth, whatever was asked.
         "aa_max" => {
             let beyond_spec = st
                 .gpu
@@ -2924,7 +2707,7 @@ fn gfx_value(st: &State, name: &str) -> Option<String> {
             .as_ref()
             .map(|r| u8::from(r.settings.shadows != render::ShadowMode::Off).to_string()),
         // The sampler filtering the materials were made with: `r_texFilterAnisoMin` and `Max`, and
-        // `r_texFilterMipMode` as its enum index (`gfxis=aniso 2 4`, `gfxis=mipmode 2`).
+        // `r_texFilterMipMode` as its enum index.
         "aniso" => st
             .renderer
             .as_ref()
@@ -3077,7 +2860,7 @@ fn gfx_value(st: &State, name: &str) -> Option<String> {
     }
 }
 
-/// What the cgame dvars came to last frame, by the names of the `cgame` state section and of `cgis=`: what was drawn
+/// What the cgame dvars came to last frame, by the names of the `cgame` state section: what was drawn
 /// or played, not the dvar's value. `None` where the fact needs what is not up (a match, a world renderer).
 fn cgame_value(st: &State, name: &str) -> Option<String> {
     let sh = st.shell.as_ref();
@@ -3163,7 +2946,7 @@ fn cgame_value(st: &State, name: &str) -> Option<String> {
 }
 
 /// The client's dev hooks: what a stage's scenario sets up that no key or menu of the player's reaches, run by the
-/// `--ui-script` step and the control channel's `dev` request of the same name with the step's argument.
+/// control channel's `dev` request of the same name with its argument.
 fn dev_hook(st: &mut State, op: &str, arg: &str) -> Result<(), String> {
     match op {
         // The graphics device is destroyed under the client, as a driver reset does it: the next frame must find it
@@ -3197,852 +2980,6 @@ fn dev_hook(st: &mut State, op: &str, arg: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// One frame of the `--ui-script`; `true` once every step has run. The script is out of the state while its step
-/// runs, so a step may read the whole state ([`gfx_value`], [`dev_hook`]).
-fn script_step(st: &mut State) -> bool {
-    let Some(mut sc) = st.script.take() else {
-        return true;
-    };
-    let finished = run_script_step(st, &mut sc);
-    st.script = Some(sc);
-    finished
-}
-
-fn run_script_step(st: &mut State, sc: &mut UiScript) -> bool {
-    let Some(step) = sc.steps.get(sc.index).cloned() else {
-        return true;
-    };
-    let (key, arg) = step
-        .split_once('=')
-        .map_or((step.as_str(), ""), |(k, v)| (k, v));
-    let waited = sc.began.elapsed().as_secs_f32();
-    let done = |ok: bool, sc: &mut UiScript, note: String| {
-        sc.results
-            .push(json!({"step": step, "ok": ok, "note": note, "secs": waited}));
-        sc.index += 1;
-        sc.began = Instant::now();
-    };
-    match key {
-        "click" => {
-            let Some(sh) = st.shell.as_mut() else {
-                return true;
-            };
-            let ok = sh.click(&mut st.input, arg);
-            let open = sh.ui.open_menus().join(",");
-            done(ok, sc, format!("open: {open}"));
-        }
-        // The same through the pointer, as a player's mouse does it.
-        "mouse" => {
-            let Some(sh) = st.shell.as_mut() else {
-                return true;
-            };
-            let ok = sh.mouse_click(&mut st.input, arg);
-            let open = sh.ui.open_menus().join(",");
-            done(ok, sc, format!("open: {open}"));
-        }
-        // `see=Controls+Options` fails unless the top menu shows every one of the items; `nosee=` the reverse.
-        "see" | "nosee" => {
-            let Some(sh) = st.shell.as_mut() else {
-                return true;
-            };
-            let wrong: Vec<&str> = arg
-                .split('+')
-                .filter(|w| sh.has_item(&mut st.input, w) != (key == "see"))
-                .collect();
-            let open = sh.ui.open_menus().join(",");
-            done(
-                wrong.is_empty(),
-                sc,
-                format!("{key} wrong: {wrong:?}; open: {open}"),
-            );
-        }
-        // `live=Voice Chat+Multiplayer Options` fails unless an item of the top menu that is not decoration shows
-        // each text and takes the pointer; `locked=Create a Class` unless each shows only as decoration or disabled.
-        "live" | "locked" => {
-            let Some(sh) = st.shell.as_mut() else {
-                return true;
-            };
-            let wrong: Vec<String> = arg
-                .split('+')
-                .filter_map(|w| {
-                    let s = sh.item_state(&mut st.input, w);
-                    (s != Some(key == "live")).then(|| format!("{w}: {s:?}"))
-                })
-                .collect();
-            let open = sh.ui.open_menus().join(",");
-            done(
-                wrong.is_empty(),
-                sc,
-                format!("{key} wrong: {wrong:?}; open: {open}"),
-            );
-        }
-        // `values=options_game` fails while a visible yes/no, list or enumeration control of that open menu shows no
-        // setting (its dvar unset, or holding none of the list's values).
-        "values" => {
-            let Some(sh) = st.shell.as_mut() else {
-                return true;
-            };
-            let unset = sh.unset_values(&mut st.input, arg);
-            done(
-                unset.is_empty(),
-                sc,
-                format!("{arg}: controls with no setting: {unset:?}"),
-            );
-        }
-        // `build=1.7.568` fails unless the last frame drew that build number over the menus; `build=` that it drew none.
-        "build" => {
-            let Some(sh) = st.shell.as_ref() else {
-                return true;
-            };
-            let drawn = sh.ui.build_drawn.clone();
-            done(
-                drawn.as_deref().unwrap_or("") == arg,
-                sc,
-                format!("build number drawn: {drawn:?}"),
-            );
-        }
-        "open" | "close" => {
-            let Some(sh) = st.shell.as_mut() else {
-                return true;
-            };
-            if key == "open" {
-                sh.open(&mut st.input, arg);
-            } else {
-                sh.close_by_name(&mut st.input, arg);
-            }
-            done(true, sc, format!("open: {}", sh.ui.open_menus().join(",")));
-        }
-        "wait" => {
-            if waited >= arg.parse::<f32>().unwrap_or(1.0) {
-                done(true, sc, String::new());
-            }
-        }
-        "menu" => {
-            let (name, secs) = arg
-                .split_once(':')
-                .map_or((arg, 60.0), |(n, s)| (n, s.parse().unwrap_or(60.0)));
-            let open = st.shell.as_ref().is_some_and(|s| s.ui.is_open(name));
-            if open {
-                done(true, sc, String::new());
-            } else if waited > secs {
-                let have = st
-                    .shell
-                    .as_ref()
-                    .map(|s| s.ui.open_menus().join(","))
-                    .unwrap_or_default();
-                done(false, sc, format!("timed out; open: {have}"));
-            }
-        }
-        // A listen server on the map, joined with the team and class answered by itself (`start=mp_crash`);
-        // `devmap=mp_crash` is the same with cheats on, as the console's `devmap`.
-        "start" | "devmap" => {
-            let Some(sh) = st.shell.as_mut() else {
-                return true;
-            };
-            sh.st.actions.push(Action::StartServer {
-                map: arg.to_owned(),
-                gametype: "war".to_owned(),
-                cheats: key == "devmap",
-            });
-            st.autojoin_next = true;
-            done(true, sc, String::new());
-        }
-        "ingame" => {
-            let secs: f32 = arg.parse().unwrap_or(120.0);
-            if st.net.as_ref().is_some_and(NetPlay::spawned) {
-                done(true, sc, String::new());
-            } else if waited > secs {
-                done(false, sc, "timed out".into());
-            }
-        }
-        // Waits for something the HUD shows: `killcam`, `dead`, `intermission` (the match is over), `feed` (a message
-        // window has a line up), each for at most `=secs` seconds.
-        "killcam" | "dead" | "intermission" | "feed" => {
-            let live = st.shell.as_ref().map(|s| (&s.st.live, &s.st.feed));
-            let reached = live.is_some_and(|(l, f)| match key {
-                "killcam" => l.killcam,
-                "dead" => l.dead,
-                "intermission" => l.intermission,
-                _ => (0..crate::hud::WINDOWS).any(|w| f.active(w, l.time)),
-            });
-            if reached {
-                sc.died |= matches!(key, "killcam" | "dead");
-                done(true, sc, String::new());
-            } else if waited > arg.parse::<f32>().unwrap_or(120.0) {
-                done(false, sc, "timed out".into());
-            }
-        }
-        // Waits for the player to die and come back (`respawn=300`: at most that many seconds): once alive again with
-        // health and out of the killcam, the low-health overlay must be off (`CG_Respawn` resets it).
-        "respawn" => {
-            let Some(sh) = st.shell.as_ref() else {
-                return true;
-            };
-            let h = &sh.st.game.hud;
-            if sc.marker.is_none() && (h.pm_dead || sc.died) {
-                sc.marker = Some("dead".into());
-            }
-            if sc.marker.is_some() && h.live && !h.pm_dead && !sh.st.live.killcam && h.health > 0 {
-                let alpha = h.overlay.alpha(h.now);
-                done(
-                    alpha == 0.0,
-                    sc,
-                    format!("overlay alpha {alpha} after respawn"),
-                );
-            } else if waited > arg.parse::<f32>().unwrap_or(300.0) {
-                done(false, sc, "timed out".into());
-            }
-        }
-        // `scores=on` holds the scoreboard up as the Tab key would, `scores=off` lets go.
-        "scores" => {
-            if let Some(sh) = st.shell.as_mut() {
-                sh.st.scores_forced = arg != "off";
-            }
-            done(true, sc, String::new());
-        }
-        // `loc=MESSAGE_KEY:HINT_KEY`: puts a bare-key message (as `iprintlnbold(&"KEY")` sends it) through the print,
-        // announcement and chat paths and holds a use-trigger hint of the second key until it has been drawn. Fails if
-        // either shows as a key, or the hint was never drawn.
-        "loc" => {
-            let Some(sh) = st.shell.as_mut() else {
-                return true;
-            };
-            let (msg, hint) = arg.split_once(':').unwrap_or((arg, ""));
-            let drawn = |sh: &Shell| sh.st.game.hud.drawn.get(&72).copied().unwrap_or(0);
-            if sc.marker.is_none() {
-                sc.marker = Some(drawn(sh).to_string());
-                use net::ui::{PrintKind, UiEvent};
-                for ev in [
-                    UiEvent::Print {
-                        kind: PrintKind::Bold,
-                        text: msg.to_owned(),
-                    },
-                    UiEvent::Announce {
-                        text: msg.to_owned(),
-                    },
-                    UiEvent::Chat {
-                        team: false,
-                        client: 0,
-                        tag: net::ui::chat_tag::NORMAL,
-                        text: msg.to_owned(),
-                    },
-                ] {
-                    sh.apply(&mut st.input, ev);
-                }
-            }
-            let before: u32 = sc
-                .marker
-                .as_deref()
-                .and_then(|m| m.parse().ok())
-                .unwrap_or(0);
-            let h = &mut sh.st.game.hud;
-            // Dated a second ahead: the hint lasts 100 ms, and a slow frame must not outrun it.
-            (h.cursor_hint, h.cursor_hint_time) = (2, h.now + 1000);
-            h.cursor_hint_text = hint.to_owned();
-            let hint_drawn = drawn(sh) > before;
-            if hint_drawn || waited > 10.0 {
-                let shown = crate::hud::localize(&sh.ui.assets, msg);
-                let h = &sh.st.game.hud;
-                let unresolved = &sh.st.hud_stats.unresolved;
-                let ok = shown != msg
-                    && hint_drawn
-                    && unresolved.is_empty()
-                    && h.unresolved_text.is_empty();
-                done(
-                    ok,
-                    sc,
-                    format!(
-                        "message {shown:?}; hint drawn {hint_drawn}; unresolved {unresolved:?} {:?}",
-                        h.unresolved_text
-                    ),
-                );
-                sc.marker = None;
-            }
-        }
-        // Escape as the menus get it (`key=escape`).
-        "key" => {
-            if let Some(sh) = st.shell.as_mut()
-                && arg == "escape"
-            {
-                sh.key(&mut st.input, UiKey::Escape);
-            }
-            done(arg == "escape", sc, format!("key {arg}"));
-        }
-        // Presses and releases a key as a player's hand does (`holdkey=mouse2` aims down the sights). A key the
-        // config binds to nothing does nothing, so it fails the step instead of reporting a press that went nowhere.
-        "holdkey" | "releasekey" => {
-            let bound = st.input.bound(arg).map(str::to_owned);
-            match bound {
-                Some(cmd) => {
-                    st.input.key(arg, key == "holdkey");
-                    done(true, sc, format!("{key} {arg} ({cmd})"));
-                }
-                None => done(false, sc, format!("{key} {arg}: the key is not bound")),
-            }
-        }
-        // Throws a grenade as a player does (`throw=g:10`: the key, at most that many seconds): presses the key,
-        // lets go after [`THROW_HOLD`], then waits until the HUD's grenade count dropped, a missile entity appeared
-        // and the player is still alive. Holding until the count dropped let a frag cook off in the hand and count
-        // as a throw (#375).
-        "throw" => {
-            let (name, secs) = arg
-                .split_once(':')
-                .map_or((arg, 10.0), |(k, s)| (k, s.parse().unwrap_or(10.0)));
-            let (now, dead) = st.shell.as_ref().map_or(((None, None), true), |s| {
-                let h = &s.st.game.hud;
-                (
-                    (
-                        h.frag.as_ref().map(|o| o.ammo),
-                        h.second.as_ref().map(|o| o.ammo),
-                    ),
-                    h.pm_dead || h.health <= 0,
-                )
-            });
-            let missiles = st.net.as_ref().map_or(0, NetPlay::missiles_appeared);
-            match sc.throw.as_mut() {
-                None => {
-                    if st.input.bound(name).is_none() {
-                        done(false, sc, format!("{name} is not bound"));
-                    } else {
-                        sc.throw = Some(Throw {
-                            before: now,
-                            missiles,
-                            released: false,
-                        });
-                        st.input.key(name, true);
-                    }
-                }
-                Some(t) if !t.released && waited >= THROW_HOLD => {
-                    t.released = true;
-                    st.input.key(name, false);
-                }
-                Some(t) => {
-                    let thrown = t.thrown(now, missiles, dead);
-                    if thrown {
-                        let note = format!(
-                            "{:?} -> {now:?}, {} new missile(s)",
-                            t.before,
-                            missiles - t.missiles
-                        );
-                        sc.throw = None;
-                        done(true, sc, note);
-                    } else if waited > secs {
-                        st.input.key(name, false);
-                        let note = format!(
-                            "no throw: counts {:?} -> {now:?}, {} new missile(s), dead {dead}",
-                            t.before,
-                            missiles - t.missiles
-                        );
-                        sc.throw = None;
-                        done(false, sc, note);
-                    }
-                }
-            }
-        }
-        // Waits until no menu is open: the game has the keyboard and mouse back (`nomenu=5`).
-        "nomenu" => {
-            let open = st.shell.as_ref().map(|s| s.ui.open_menus().join(","));
-            if open.as_deref().is_none_or(str::is_empty) {
-                done(true, sc, String::new());
-            } else if waited > arg.parse::<f32>().unwrap_or(10.0) {
-                done(false, sc, format!("timed out; open: {open:?}"));
-            }
-        }
-        // Waits until the server says the player is on team `n` (1 axis, 2 allies, 3 spectator): `team=2:20`.
-        // `team=save` remembers the team; `team=other:secs` waits for the other side (a spectator or an unassigned
-        // player is on neither, so dying does not satisfy it, #375), `team=same:secs` for the remembered one.
-        // `weapon=<name>:secs` waits for the weapon in hand whose name starts with `<name>` (`m16_gl` is the rifle,
-        // `gl_m16` its launcher raised; a part anywhere in the name matched the rifle for the launcher, #375).
-        "team" | "weapon" => {
-            let (want, secs) = arg
-                .split_once(':')
-                .map_or((arg, 20.0), |(n, s)| (n, s.parse().unwrap_or(20.0)));
-            let saved = sc.team_saved.clone();
-            let have = if key == "team" {
-                st.shell
-                    .as_ref()
-                    .map_or(String::new(), |s| s.st.live.own_team.to_string())
-            } else {
-                st.net.as_ref().map(NetPlay::weapon).unwrap_or_default()
-            };
-            let matched = if key == "team" {
-                team_matches(want, &have, saved.as_deref())
-            } else {
-                have.starts_with(want)
-            };
-            if key == "team" && want == "save" {
-                sc.team_saved = Some(have.clone());
-                done(true, sc, format!("team {have}"));
-            } else if matched {
-                done(true, sc, format!("{key} {have}"));
-            } else if waited > secs {
-                done(false, sc, format!("timed out; {key} is {have:?}"));
-            }
-        }
-        // A dvar the server set on the client (`setclientdvar`), remembered and compared across rounds:
-        // `cvar=save cg_objectiveText` keeps its value; `cvar=same cg_objectiveText:5` and `cvar=other ...:5` wait up
-        // to the seconds for the value to be the remembered one, or a different one.
-        "cvar" => {
-            let (what, rest) = arg.split_once(' ').unwrap_or((arg, ""));
-            let (name, secs) = rest
-                .split_once(':')
-                .map_or((rest, 5.0), |(n, s)| (n, s.parse().unwrap_or(5.0)));
-            let have = st.input.cvar(name).unwrap_or("").to_owned();
-            let saved = sc.saved.get(name).cloned();
-            match what {
-                "save" => {
-                    sc.saved.insert(name.to_owned(), have.clone());
-                    done(true, sc, format!("{name} is {have:?}"));
-                }
-                "same" | "other" => {
-                    let ok = saved
-                        .as_ref()
-                        .is_some_and(|s| (*s == have) == (what == "same"));
-                    if ok {
-                        done(true, sc, format!("{name} is {have:?}"));
-                    } else if waited > secs {
-                        done(
-                            false,
-                            sc,
-                            format!("timed out; {name} is {have:?}, saved {saved:?}"),
-                        );
-                    }
-                }
-                _ => done(false, sc, format!("unknown cvar step {what:?}")),
-            }
-        }
-        // Waits for the next level to begin (a round restart or a map change) since the step started (`round=next:150`):
-        // the player is then out of the world again until the server spawns them (`ingame=` waits for that).
-        "round" => {
-            let (_, secs) = arg
-                .split_once(':')
-                .map_or((arg, 150.0), |(n, s)| (n, s.parse().unwrap_or(150.0)));
-            let have = st.net.as_ref().map_or(0, NetPlay::levels);
-            let from = sc
-                .saved
-                .entry("round".into())
-                .or_insert_with(|| have.to_string())
-                .parse::<u32>()
-                .unwrap_or(have);
-            if have > from {
-                sc.saved.remove("round");
-                done(true, sc, format!("level {from} -> {have}"));
-            } else if waited > secs {
-                sc.saved.remove("round");
-                done(false, sc, format!("timed out; still in level {have}"));
-            }
-        }
-        // Waits until a counter of the listen server reaches a minimum: `counter=helicopters:1:60` (the name, the
-        // minimum and the seconds; names are plants, defuses, airstrikes, helicopters, heli_shots).
-        "counter" => {
-            let mut parts = arg.split(':');
-            let name = parts.next().unwrap_or("");
-            let min: u64 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(1);
-            let secs: f32 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(30.0);
-            let o = listen::objectives();
-            let have = match name {
-                "plants" => Some(o.0),
-                "defuses" => Some(o.1),
-                "airstrikes" => Some(o.2),
-                "helicopters" => Some(o.3),
-                "heli_shots" => Some(o.4),
-                _ => None,
-            };
-            match have {
-                None => done(false, sc, format!("unknown counter {name}")),
-                Some(n) if n >= min => done(true, sc, format!("{name} {n}")),
-                Some(n) if waited > secs => done(false, sc, format!("timed out; {name} is {n}")),
-                Some(_) => {}
-            }
-        }
-        "togglemenu" => {
-            // Escape in a match: the server's script main menu.
-            if let Some(sh) = st.shell.as_mut() {
-                let menu = st.input.cvar("g_scriptMainMenu").unwrap_or("").to_owned();
-                sh.open(&mut st.input, &menu);
-            }
-            done(true, sc, String::new());
-        }
-        "home" => {
-            // Back at the front end: no match, the main menu open.
-            let secs: f32 = arg.parse().unwrap_or(20.0);
-            let home = st.net.is_none()
-                && st.renderer.is_none()
-                && st.shell.as_ref().is_some_and(|s| s.ui.is_open("main"));
-            if home {
-                done(true, sc, String::new());
-            } else if waited > secs {
-                let open = st.shell.as_ref().map(|s| s.ui.open_menus().join(","));
-                done(
-                    false,
-                    sc,
-                    format!(
-                        "timed out; net {} renderer {} open {open:?}",
-                        st.net.is_some(),
-                        st.renderer.is_some()
-                    ),
-                );
-            }
-        }
-        // A cvar's value against a localized string's (`cvarloc=customclass3 CLASS_CUSTOM3`).
-        "cvarloc" => {
-            let (name, key) = arg.split_once(' ').unwrap_or((arg, ""));
-            let want = st
-                .shell
-                .as_ref()
-                .and_then(|s| s.ui.assets.translate_ref(key))
-                .map(|t| t.to_string())
-                .unwrap_or_default();
-            let have = st.input.cvar(name).unwrap_or("").to_owned();
-            done(
-                !want.is_empty() && have == want,
-                sc,
-                format!("{name} is {have:?}, {key} is {want:?}"),
-            );
-        }
-        // The view pitch in degrees (negative looks down), within a range (`pitchis=-90 -20`).
-        "pitchis" => {
-            let mut it = arg
-                .split_whitespace()
-                .map(|v| v.parse::<f32>().unwrap_or(0.0));
-            let (lo, hi) = (it.next().unwrap_or(0.0), it.next().unwrap_or(0.0));
-            let pitch = st.pitch.to_degrees();
-            done(
-                (lo..=hi).contains(&pitch),
-                sc,
-                format!("pitch {pitch:.1} (want {lo}..{hi})"),
-            );
-        }
-        // A character key to the menus, as a key press reaches an open menu (`uikey=1`).
-        "uikey" => {
-            if let (Some(sh), Some(c)) = (st.shell.as_mut(), arg.chars().next()) {
-                sh.key(&mut st.input, UiKey::Char(c));
-            }
-            done(true, sc, format!("key {arg}"));
-        }
-        // A cvar's registered value (`cvaris=ui_netGametypeName dom`), including untouched defaults, engine map
-        // seeds and protected writes; numbers compare within rounding, words exactly.
-        "cvaris" => {
-            let (name, want) = arg.split_once(' ').unwrap_or((arg, ""));
-            let have = st.input.cvar(name).unwrap_or("").to_owned();
-            done(
-                scenario_value_matches(&have, want),
-                sc,
-                format!("{name} is {have:?}"),
-            );
-        }
-        // The stance the stance commands latched: `stanceis=prone`.
-        "stanceis" => {
-            let have = st.input.stance_name();
-            done(have == arg, sc, format!("stance is {have}"));
-        }
-        // The rows a list shows: `rows=2 1` is exactly one, `rows=2 +1` at least one; a list may take up to the
-        // seconds after the colon (`rows=2 +1:15`, default 5) to get there, as a refresh takes its time.
-        "rows" => {
-            let (feeder, rest) = arg.split_once(' ').unwrap_or((arg, "0"));
-            let (want, secs) = rest
-                .split_once(':')
-                .map_or((rest, 5.0), |(w, s)| (w, s.parse().unwrap_or(5.0)));
-            let have = st.shell.as_mut().map_or(0, |sh| {
-                sh.feeder_rows(&mut st.input, feeder.parse().unwrap_or(0))
-            });
-            let ok = match want.strip_prefix('+') {
-                Some(n) => have >= n.parse().unwrap_or(1),
-                None => have.to_string() == want,
-            };
-            if ok || waited > secs {
-                done(ok, sc, format!("feeder {feeder} has {have} rows"));
-            }
-        }
-        // A server added to the favorites (`favorite=127.0.0.1:28999`), as the join menu's New Favorite does.
-        "favorite" => {
-            let added = serverlist::resolve(arg).map(|a| {
-                if let Some(sh) = st.shell.as_mut() {
-                    sh.st.servers.add_favorite(a);
-                }
-            });
-            done(added.is_ok(), sc, format!("{added:?}"));
-        }
-        // A console line, as typed: `set=set scr_war_scorelimit 3`.
-        "set" => {
-            st.input.exec_line(arg);
-            done(true, sc, String::new());
-        }
-        // A line typed at the console (`console=callvote map_restart`), as Enter sends it.
-        "console" => {
-            if let Some(sh) = st.shell.as_mut() {
-                sh.console_line(&mut st.input, arg);
-            }
-            done(true, sc, String::new());
-        }
-        // A chat line typed into the field and sent with Enter, as T or Y and the keys do it
-        // (`chat=hello`, `teamchat=hello`).
-        "chat" | "teamchat" => {
-            if let Some(sh) = st.shell.as_mut() {
-                sh.st.console.open_chat(key == "teamchat");
-                for c in arg.chars() {
-                    sh.console_key(&mut st.input, UiKey::Char(c));
-                }
-                sh.console_key(&mut st.input, UiKey::Enter);
-            }
-            done(true, sc, String::new());
-        }
-        // Waits until the scoreboard lists at least this many players (`players=13:30`, at most that many seconds):
-        // the server's own roster, not what is in view. It holds the scoreboard up meanwhile and lets go after.
-        "players" => {
-            let (n, secs) = arg
-                .split_once(':')
-                .map_or((arg, 10.0), |(n, s)| (n, s.parse().unwrap_or(10.0)));
-            let want = n.parse::<usize>().unwrap_or(usize::MAX);
-            if let Some(sh) = st.shell.as_mut() {
-                if sh.st.live.scores.len() >= want {
-                    sh.st.scores_forced = false;
-                    done(true, sc, String::new());
-                } else if waited > secs {
-                    sh.st.scores_forced = false;
-                    let have = sh.st.live.scores.len();
-                    done(
-                        false,
-                        sc,
-                        format!("timed out; {have} of {want} players listed"),
-                    );
-                } else {
-                    sh.st.scores_forced = true;
-                }
-            }
-        }
-        // Waits until a line with this text is in the console's output (`saw=hello:10`, at most that many seconds):
-        // a chat line or a print the server sent.
-        "saw" => {
-            let (text, secs) = arg
-                .rsplit_once(':')
-                .map_or((arg, 10.0), |(t, s)| (t, s.parse().unwrap_or(10.0)));
-            let seen = st
-                .shell
-                .as_ref()
-                .is_some_and(|s| s.st.feed.console.iter().any(|l| l.contains(text)));
-            if seen {
-                done(true, sc, String::new());
-            } else if waited > secs {
-                done(false, sc, format!("timed out; no line with {text:?}"));
-            }
-        }
-        // As `saw=`, but not a typed line's echo (`] …`): what the server or the engine answered
-        // (`sawreply=zz_word:5`).
-        "sawreply" => {
-            let (text, secs) = arg
-                .rsplit_once(':')
-                .map_or((arg, 10.0), |(t, s)| (t, s.parse().unwrap_or(10.0)));
-            let seen = st.shell.as_ref().is_some_and(|s| {
-                s.st.feed
-                    .console
-                    .iter()
-                    .any(|l| l.contains(text) && !l.starts_with("] "))
-            });
-            if seen {
-                done(true, sc, String::new());
-            } else if waited > secs {
-                done(false, sc, format!("timed out; no reply line with {text:?}"));
-            }
-        }
-        // Assert an output line is absent now, after the scenario waited for the command to finish.
-        "notsaw" => {
-            let seen = st
-                .shell
-                .as_ref()
-                .is_some_and(|s| s.st.feed.console.iter().any(|l| l.contains(arg)));
-            done(!seen, sc, format!("console contains {arg:?}: {seen}"));
-        }
-        // A line for the listen server's console, as typed there: `server=devtele human bombzone`.
-        "server" => {
-            listen::send(arg);
-            done(true, sc, String::new());
-        }
-        // `renderer=secs` waits for the world to be drawable again (after `losedevice`, [`dev_hook`]).
-        "renderer" => {
-            if st.renderer.is_some() {
-                done(true, sc, String::new());
-            } else if waited > arg.parse::<f32>().unwrap_or(60.0) {
-                done(false, sc, "no renderer".into());
-            }
-        }
-        // `vid_restart` as the graphics menu's Apply does it.
-        "vidrestart" => {
-            if let Some(sh) = st.shell.as_mut() {
-                sh.st.actions.push(Action::VidRestart);
-            }
-            done(true, sc, String::new());
-        }
-        // What the graphics settings came to (`gfxis=aa 4`, `gfxis=specular 0`, `gfxis=aspect 1.78`,
-        // `gfxis=fullscreen 0`, `gfxis=uncapped 1`): the renderer's and the surface's own state ([`gfx_value`]).
-        "gfxis" => {
-            let (name, want) = arg.split_once(' ').unwrap_or((arg, ""));
-            let have = gfx_value(st, name);
-            // `gfxis=aa max`: the most samples the adapter offers for the scene's colour and depth, whatever was asked.
-            let want = if (name, want) == ("aa", "max") {
-                gfx_value(st, "aa_max").unwrap_or_default()
-            } else {
-                want.to_owned()
-            };
-            // `gfxis=dlights 1+`: at least that many, for a count the scene's own lights add to.
-            match have {
-                Some(h) => {
-                    let ok = match want.strip_suffix('+') {
-                        Some(min) => match (h.parse::<u64>(), min.parse::<u64>()) {
-                            (Ok(h), Ok(min)) => h >= min,
-                            _ => false,
-                        },
-                        None => scenario_value_matches(&h, &want),
-                    };
-                    done(ok, sc, format!("{name} is {h}"));
-                }
-                None => done(false, sc, format!("gfxis: unknown or unavailable {name:?}")),
-            }
-        }
-        // A persistent stat, as the menus' `statset` would write it (`stat=2301 77`), and its check (`statis=2301 77`).
-        "stat" | "statis" => {
-            let mut it = arg.split_whitespace().map(|v| v.parse::<i32>().ok());
-            let (i, v) = match (it.next(), it.next()) {
-                (Some(Some(i)), Some(Some(v))) => (i, v),
-                _ => (-1, 0),
-            };
-            let slot = st.shell.as_mut().and_then(|sh| {
-                sh.st
-                    .stats
-                    .get_mut(usize::try_from(i).unwrap_or(usize::MAX))
-            });
-            match (key, slot) {
-                ("stat", Some(s)) => {
-                    *s = v;
-                    done(true, sc, String::new());
-                }
-                ("statis", Some(s)) => {
-                    let ok = *s == v;
-                    done(ok, sc, format!("stat {i} is {s}"));
-                }
-                _ => done(
-                    false,
-                    sc,
-                    format!("usage: {key}=<index> <value> (got {arg:?})"),
-                ),
-            }
-        }
-        // Joins a server like the menus' `connect` (`connect=127.0.0.1:28960`).
-        "connect" => {
-            if let Some(sh) = st.shell.as_mut() {
-                sh.st.actions.push(Action::Join(arg.to_owned()));
-            }
-            done(true, sc, String::new());
-        }
-        // Waits until the client is in map `name` with a connection (`map=mp_crash:60`).
-        "map" => {
-            let (name, secs) = arg
-                .split_once(':')
-                .map_or((arg, 60.0), |(n, s)| (n, s.parse().unwrap_or(60.0)));
-            if st.net.is_some() && st.map_name.eq_ignore_ascii_case(name) {
-                done(true, sc, String::new());
-            } else if waited > secs {
-                done(false, sc, format!("timed out; map is {:?}", st.map_name));
-            }
-        }
-        // Waits until the server has rotated to a different map than the one the step began in (`maprotate=300`).
-        // The step starts only once a map is loaded: with none there is nothing to rotate away from.
-        "maprotate" => {
-            let secs: f32 = arg.parse().unwrap_or(300.0);
-            if sc.rotate_from.is_none() && !st.map_name.is_empty() {
-                sc.rotate_from = Some(st.map_name.clone());
-            }
-            match sc.rotate_from.clone() {
-                Some(from)
-                    if st.net.is_some() && !st.map_name.is_empty() && st.map_name != from =>
-                {
-                    sc.rotate_from = None;
-                    done(true, sc, format!("{from} -> {}", st.map_name));
-                }
-                Some(from) if waited > secs => {
-                    sc.rotate_from = None;
-                    done(false, sc, format!("timed out; still in {from}"));
-                }
-                None if waited > secs => done(false, sc, "timed out; no map was loaded".into()),
-                _ => {}
-            }
-        }
-        // `shotd=<name>`: the screenshot of the first frame that copied the scene for a distortion material.
-        "shotd" => {
-            if st.shot_request.is_none() {
-                st.shot_gate = true;
-                st.shot_request = Some(arg.to_owned());
-            } else if waited > DISTORTION_SHOT_WAIT.as_secs_f32() {
-                st.shot_gate = false;
-                st.shot_request = None;
-                done(false, sc, "no frame drew a distortion material".into());
-            }
-        }
-        // What the cgame dvars came to last frame (`cgis=gun 0`, `cgis=hud2d 0`, `cgis=fps 1`, `cgis=fullbright 1`,
-        // `cgis=shock 1` for the shellshock blend, `cgis=subtitle 1` for a subtitle up: [`cgame_value`]) or how often
-        // an effect kind played (`cgis=fx:shell_eject 0`, `cgis=fx:bullet_impact_noblood 1`): what was drawn or
-        // played, not the dvar's value.
-        "cgis" => {
-            let (name, want) = arg.split_once(' ').unwrap_or((arg, ""));
-            let have = match name.strip_prefix("fx:") {
-                None => cgame_value(st, name),
-                Some(kind) => st.net.as_ref().map(|n| {
-                    let played = n.fx_played(kind);
-                    match want.strip_prefix('+') {
-                        Some(n_str) => {
-                            let target = n_str.parse::<u64>().unwrap_or(u64::MAX);
-                            let at = st.fx_mark.get(kind).copied().unwrap_or(0);
-                            let delta = played.saturating_sub(at);
-                            if delta == target {
-                                "ok".to_owned()
-                            } else {
-                                format!("+{delta}")
-                            }
-                        }
-                        None => played.to_string(),
-                    }
-                }),
-            };
-            match have {
-                Some(h) => done(
-                    if want.starts_with('+') {
-                        h == "ok"
-                    } else {
-                        h == want
-                    },
-                    sc,
-                    format!("{name} is {h}"),
-                ),
-                None => done(false, sc, format!("cgis: unknown or unavailable {name:?}")),
-            }
-        }
-        // `fxmark` remembers every effect count; `cgis=fx:<kind> +n` afterwards compares what played since it
-        // (exactly n, so a wrong effect kind fails as much as a missing one).
-        "fxmark" => {
-            if let Some(n) = st.net.as_ref() {
-                st.fx_mark = n.fx_counts();
-            }
-            done(st.net.is_some(), sc, "fx marked".into());
-        }
-        // The dev hooks no key or menu reaches ([`dev_hook`]): `losedevice`, `dlight=1`, `fxdemo=<effect>`,
-        // `pacereset`, `bobmark`, `hitflesh`, `shock=<ms>`, `subtitle=<key>`.
-        "losedevice" | "dlight" | "fxdemo" | "pacereset" | "bobmark" | "hitflesh" | "shock"
-        | "subtitle" => {
-            let r = dev_hook(st, key, arg);
-            done(r.is_ok(), sc, r.err().unwrap_or_default());
-        }
-        "shot" => {
-            if st.shot_request.is_none() {
-                st.shot_request = Some(arg.to_owned());
-            } else if waited > 5.0 {
-                done(false, sc, "no screenshot".into());
-            }
-        }
-        other => done(false, sc, format!("unknown step {other}")),
-    }
-    sc.index >= sc.steps.len()
-}
-
 /// One frame of the tour; `true` when every menu has been shown.
 fn tour_step(
     shell: Option<&mut Shell>,
@@ -4057,11 +2994,12 @@ fn tour_step(
     if t.frames == 0 {
         sh.close_all(input);
         // The tour has no match, so the scoreboard would draw only its header: hold it up over synthetic rows.
-        sh.st.scores_forced = t.menus.get(t.index) == Some(&"scoreboard");
+        let scores = t.menus.get(t.index) == Some(&"scoreboard");
+        sh.st.game.scoreboard = scores;
         sh.st.live.own_team = 2;
-        sh.st.live.active = sh.st.scores_forced;
-        sh.st.in_game = sh.st.scores_forced;
-        sh.st.live.scores = if sh.st.scores_forced {
+        sh.st.live.active = scores;
+        sh.st.in_game = scores;
+        sh.st.live.scores = if scores {
             (0..12)
                 .map(|i| crate::hud::ScoreLine {
                     client: i,
@@ -4662,8 +3600,7 @@ fn ui_event(st: &mut State, ev: &crate::input::InputEvent) {
 
 /// Frames in a row a configured surface may give no texture before the run stops with an error.
 const SURFACE_RETRIES: u32 = 120;
-/// How long a surface may only time out, or be occluded in a window that is not minimized, before a timed or scripted
-/// run stops.
+/// How long a surface may only time out, or be occluded in a window that is not minimized, before a timed run stops.
 const SURFACE_STALL: Duration = Duration::from_secs(10);
 
 /// What a frame without a texture needs next.
@@ -5066,40 +4003,6 @@ fn sun_flare_materials(cvars: &crate::input::Cvars, net: &mut NetPlay, r: &mut R
     }
 }
 
-/// Scenario observations compare numeric tokens without depending on the decimal formatting of a dvar or frame
-/// value. Names remain exact, and missing, extra, non-finite or different tokens fail.
-fn scenario_value_matches(have: &str, want: &str) -> bool {
-    let mut have = have.split_whitespace();
-    for want in want.split_whitespace() {
-        let Some(have) = have.next() else {
-            return false;
-        };
-        let ok = match (have.parse::<f32>(), want.parse::<f32>()) {
-            (Ok(h), Ok(w)) => h.is_finite() && w.is_finite() && (h - w).abs() <= 0.005,
-            _ => have == want,
-        };
-        if !ok {
-            return false;
-        }
-    }
-    have.next().is_none()
-}
-
-#[cfg(test)]
-mod scenario_value_tests {
-    use super::scenario_value_matches;
-
-    #[test]
-    fn renderer_values_compare_numerically_but_materials_exactly() {
-        assert!(scenario_value_matches("0.5 2000", "0.50 2000.0"));
-        assert!(scenario_value_matches("0 1 0", "0.0000001 0.9999999 0"));
-        assert!(scenario_value_matches("sun sun_flare", "sun sun_flare"));
-        assert!(!scenario_value_matches("sun sun_flare", "sun other"));
-        assert!(!scenario_value_matches("1 2", "1"));
-        assert!(!scenario_value_matches("NaN", "NaN"));
-    }
-}
-
 /// The background load is done: a started session connects to its server and shows the world; a level change hands the
 /// new world to the running session.
 fn finish_load(
@@ -5147,7 +4050,6 @@ fn finish_load(
         if let Some(path) = st.pending_demo.take() {
             net.play_demo(&path)?;
         }
-        net.set_autojoin(std::mem::take(&mut st.autojoin_next));
         let (rate, snaps) = netplay_rates(&st.input);
         net.set_userinfo(&name, rate, snaps);
         if let Some(sh) = st.shell.as_ref() {
@@ -5879,10 +4781,9 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
                 "focused": st.window.has_focus(),
                 "pointer_locked": st.grabbed,
                 "look_gate": st.input.look_gate(),
-                // What the graphics device went through (`device_losses`, `errors`), as `ui-script.json`'s
-                // `gpu_health` but leaving the device's errors in place ([`GpuLog::view`]), and what the last map
-                // load measured until the spawn (`load_ms`, `to_spawn_ms`, `max_frame_gap_ms`, `slow_gaps_ms`), as
-                // its `load`.
+                // What the graphics device went through (`device_losses`, `errors`), as `client.json`'s `gpu_health`
+                // but leaving the device's errors in place ([`GpuLog::view`]), and what the last map load measured
+                // until the spawn (`load_ms`, `to_spawn_ms`, `max_frame_gap_ms`, `slow_gaps_ms`).
                 "gpu_health": st.gpu_log.view(&st.gpu),
                 "load": st.load_report,
             }),
@@ -5928,7 +4829,7 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
             }),
             "render" => render_report(st),
             // Named only (not in `PARTS`, so a `wait` does not query the surface and the adapter every frame): what
-            // the graphics settings and the cgame dvars came to, as `gfxis=` and `cgis=` read them.
+            // the graphics settings and the cgame dvars came to.
             "gfx" => facts(GFX_FACTS, |n| gfx_value(st, n)),
             "cgame" => facts(CGAME_FACTS, |n| cgame_value(st, n)),
             other => match st.net.as_mut() {
@@ -5973,8 +4874,8 @@ fn menu_state(st: &mut State) -> Value {
         "server_rows": server_rows})
 }
 
-/// What the HUD drew and counted since the run began (`stats`, the counters `hud_draw` of `ui-script.json` has),
-/// what it shows now (`report`, `live`), and the game facts the scoreboard reads.
+/// What the HUD drew and counted since the run began (`stats`), what it shows now (`report`, `live`), and the game
+/// facts the scoreboard reads.
 fn hud_state(st: &mut State) -> Value {
     let Some(sh) = st.shell.as_ref() else {
         return Value::Null;

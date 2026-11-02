@@ -10,9 +10,8 @@
 //! up, has an enemy bot put beside it kill it (the killcam, through the bot's eyes with the body in sight), comes back
 //! from the dead, plays on until it has had a bot in its sights and fired, then holds its sights on an enemy and on a
 //! teammate until the crosshair takes each one's team colour.
-//! What the HUD got to show over the run (`hud.stats` of the state document, the counters `hud_draw` of
-//! `ui-script.json` held) is the verdict: the
-//! scoreboard must have listed the players, the message windows must have drawn lines, the script hud elements must
+//! What the HUD got to show over the run (`hud.stats` of the state document) is the verdict: the scoreboard must have
+//! listed the players, the message windows must have drawn lines, the script hud elements must
 //! have arrived, the goggles must have drawn their overlay and d-pad icon (and the frame with them on must show the
 //! overlay over the world with the HUD still above it), the killcam must have played behind the body with its skip
 //! prompt over it, a teammate must have had a name over the head and the player under the crosshair a name of their

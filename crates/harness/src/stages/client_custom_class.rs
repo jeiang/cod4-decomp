@@ -72,9 +72,10 @@ pub(super) fn localized(install: &Path, keys: &[&str]) -> Result<HashMap<String,
     }
 }
 
-/// The run's state in the shape [`verdict`] reads (`ui-script.json`'s): the steps, the graphics device's health
-/// (`client.gpu_health`), the renderer's record, what the network side counted over the run (the `report` section,
-/// `NetPlay::report`) and what the HUD showed (`hud.report`). The sections as read are written to `file`.
+/// The run's state in the shape [`verdict`] reads (the `client`, `report`, `hud` and `render` state sections): the
+/// steps, the graphics device's health (`client.gpu_health`), the renderer's record, what the network side counted
+/// over the run (the `report` section, `NetPlay::report`) and what the HUD showed (`hud.report`). The sections as read
+/// are written to `file`.
 pub(super) fn session_report(c: &mut Driven, file: &str) -> Result<Value, String> {
     let r = c.report(file, &["client", "report", "hud", "render"])?;
     if r["client"]["gpu_health"].is_null() {

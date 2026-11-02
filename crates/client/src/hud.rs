@@ -336,7 +336,7 @@ pub fn expand_keys(text: &str, keys: &HashMap<String, String>) -> String {
     out
 }
 
-/// What the HUD got to show during a run, for the harness to check (`hud` of `ui-script.json`).
+/// What the HUD got to show during a run, for the harness to check (`hud.stats` of the control channel's state).
 #[derive(Default)]
 pub struct Stats {
     pub elems_max: usize,

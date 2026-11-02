@@ -118,8 +118,6 @@ pub struct ShellState {
     /// First scoreboard line shown (1 = the top); 0 until the open list has rows and is centred on the viewer
     /// (stock `scoresTop` -1, `CenterViewOnClient`).
     pub scores_top: usize,
-    /// The scoreboard held up by a script step instead of the key (the `--ui-script` `scores` step).
-    pub scores_forced: bool,
     /// `cg_draw2D`: off, the HUD, the crosshair, the chat and the scoreboard are not drawn (`CG_Draw2D`); the menus
     /// and the console still are. A cheat dvar, so it only goes off with `sv_cheats` on.
     pub draw_2d: bool,
@@ -333,7 +331,6 @@ impl ShellState {
             feed: Feed::default(),
             score_view: ScoreView::default(),
             scores_top: 0,
-            scores_forced: false,
             draw_2d: true,
             fps: hud::fps::Meter::default(),
             fps_cfg: hud::fps::Cfg::read(&crate::input::Cvars::default()),
@@ -371,9 +368,7 @@ impl ShellState {
     /// The scoreboard rows are on screen: held by the player, or the match is over (`DrawIntermission` keeps drawing
     /// them behind a script popup; only the end-of-game menu replaces them).
     pub fn scoreboard_shown(&self, ui: &Ui) -> bool {
-        self.game.scoreboard
-            || self.scores_forced
-            || (self.live.intermission && !ui.is_open("endofgame"))
+        self.game.scoreboard || (self.live.intermission && !ui.is_open("endofgame"))
     }
 
     /// The wheel and the page keys move the scoreboard's list while it is up (`Scoreboard_HandleInput`: those keys
@@ -864,36 +859,6 @@ impl Shell {
     pub fn bind_key(&mut self, input: &mut Input, key: &str) {
         let mut h = Self::host(&mut self.st, input);
         self.ui.bind_capture(&mut h, key);
-    }
-
-    /// Like [`Shell::click`], through the pointer.
-    pub fn mouse_click(&mut self, input: &mut Input, want: &str) -> bool {
-        let mut h = Self::host(&mut self.st, input);
-        self.ui.mouse_click(&mut h, want)
-    }
-
-    /// Whether the top menu shows an item named or labelled `want`.
-    pub fn has_item(&mut self, input: &mut Input, want: &str) -> bool {
-        let mut h = Self::host(&mut self.st, input);
-        self.ui.has_item(&mut h, want)
-    }
-
-    /// See [`Ui::item_state`].
-    pub fn item_state(&mut self, input: &mut Input, want: &str) -> Option<bool> {
-        let mut h = Self::host(&mut self.st, input);
-        self.ui.item_state(&mut h, want)
-    }
-
-    /// See [`Ui::unset_values`].
-    pub fn unset_values(&mut self, input: &mut Input, menu: &str) -> Vec<String> {
-        let mut h = Self::host(&mut self.st, input);
-        self.ui.unset_values(&mut h, menu)
-    }
-
-    /// Clicks the item of the top menu named or labelled `want`.
-    pub fn click(&mut self, input: &mut Input, want: &str) -> bool {
-        let mut h = Self::host(&mut self.st, input);
-        self.ui.click(&mut h, want)
     }
 
     /// Carries out one thing the server asked of the UI.
@@ -3677,7 +3642,7 @@ mod tests {
             !st.scroll_scores(&ui, &UiKey::WheelDown),
             "no scoreboard up"
         );
-        st.scores_forced = true;
+        st.game.scoreboard = true;
         st.live.own_team = 2;
         st.live.scores = (0..30)
             .map(|i| crate::hud::ScoreLine {

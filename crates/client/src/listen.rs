@@ -53,17 +53,8 @@ pub fn free_standard_port() -> u16 {
         .unwrap_or(0)
 }
 
-/// Console lines for the running listen server (the harness's `server=` steps), run between its frames.
+/// Console lines for the running listen server (the `bots` command, the saved `bot_count`), run between its frames.
 static CONSOLE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-
-/// The objective counters of the running listen server, as of its last frame batch.
-static OBJECTIVES: std::sync::Mutex<(u64, u64, u64, u64, u64)> =
-    std::sync::Mutex::new((0, 0, 0, 0, 0));
-
-/// Bombs planted, bombs defused, airstrikes called in, helicopters called in and helicopter shots so far.
-pub fn objectives() -> (u64, u64, u64, u64, u64) {
-    OBJECTIVES.lock().map_or((0, 0, 0, 0, 0), |o| *o)
-}
 
 /// Requests for the running listen server's state and console, keyed by the control channel's request number.
 static REQUESTS: std::sync::Mutex<Vec<(u64, serde_json::Map<String, Value>)>> =
@@ -369,15 +360,6 @@ fn run(
             tracing::warn!(%map, error = %text, "script error on the listen server");
         }
         reported_errors = server.all_script_errors.len();
-        if let Ok(mut o) = OBJECTIVES.lock() {
-            *o = (
-                server.game.stats.plants,
-                server.game.stats.defuses,
-                server.game.stats.airstrikes,
-                server.game.stats.helicopters,
-                server.game.stats.heli_shots,
-            );
-        }
         if let Some((n, c)) = server.game.connected_clients().find(|(_, c)| !c.bot) {
             person = json!({
                 "slot": n, "shots": c.shots, "hits": c.hits,

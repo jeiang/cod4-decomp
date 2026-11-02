@@ -1442,15 +1442,6 @@ impl Input {
         }
     }
 
-    /// The latched stance the commands set (`stand`, `crouch` or `prone`): the harness's `stanceis=` reads it.
-    pub fn stance_name(&self) -> &'static str {
-        match self.stance {
-            buttons::PRONE => "prone",
-            buttons::CROUCH => "crouch",
-            _ => "stand",
-        }
-    }
-
     /// `CL_SetStance`: the stance the cgame (or a command) puts the client in. Ignored while `+prone` / `+movedown`
     /// is held, which send their own temporary stance.
     fn set_stance(&mut self, stance: u32) {

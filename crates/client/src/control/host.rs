@@ -51,8 +51,8 @@ pub trait Control {
         distortion: bool,
     ) -> Option<Result<Value, String>>;
 
-    /// Runs one of the client's dev hooks by its `--ui-script` step name with that step's argument (`dlight` `1`,
-    /// `shock` `8000`, `losedevice`): scenario setup no key or menu of the player's reaches.
+    /// Runs one of the client's dev hooks by name with its argument (`dlight` `1`, `shock` `8000`, `losedevice`):
+    /// scenario setup no key or menu of the player's reaches.
     fn dev(&mut self, op: &str, arg: &str) -> Result<Value, String>;
 
     /// Places the camera (`setviewpos`): the player's own origin, and angles in degrees.

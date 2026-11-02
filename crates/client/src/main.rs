@@ -112,10 +112,6 @@ usage: cod4e [options] [+command args ...]
   --name <name>          player name on the server
   --no-sound             mix the sound without opening a sound card
   --ui-tour <dir>        open the stock menus in turn, save a screenshot of each and ui.json to <dir>, then exit (harness)
-  --ui-script <steps>    drive the menus like a player: click=<item> or mouse=<item> (through the pointer; `a|b` takes the first present), key=escape, nomenu[=secs], team=<n>|save|other|same[:secs], weapon=<name prefix>[:secs], holdkey=<key>, releasekey=<key> (a bound key), throw=<key>[:secs], open=<menu>, close=<menu>, menu=<name>[:secs], see=<item>+<item>|nosee=<item>+<item> (items the top menu shows or not), ingame[=secs], wait=<secs>, counter=<name>:<min>[:secs], shot=<name>,
-                         scores=on|off, respawn[=secs], togglemenu, home[=secs], set=<console line>, connect=<host[:port]>, stat=<i> <v>, statis=<i> <v>, cvaris=<name> <value>,
-                         map=<name>[:secs], maprotate[=secs], and waits for killcam|dead|intermission|feed[=secs];
-                         writes ui-script.json (and shots) to --out, then exits (harness)
   --no-autojoin          do not answer the server's team and class menus by default (direct --listen/--connect)
   --control <port>       open the dev control channel on 127.0.0.1:<port> (0 picks one; off unless given); see docs/control-channel.md
   --control-file <path>  write the port --control 0 took to <path>, as host:port
@@ -184,8 +180,6 @@ pub struct Cli {
     pub no_sound: bool,
     /// Open the stock menus one after another with no world, save a screenshot of each and a report (harness stage).
     pub ui_tour: Option<PathBuf>,
-    /// Steps driving the menus like a player (`click=Join Game,menu=class:30,shot=a,...`); see `app::UiScript`.
-    pub ui_script: Option<String>,
     /// Answer the server's team and class menus with the default choices (direct `--listen`/`--connect`, until the player
     /// picks); off with `--no-autojoin` and in menu-started matches.
     pub autojoin: bool,
@@ -259,7 +253,6 @@ fn parse(args: &[String]) -> Result<Cli, String> {
         fx_demo: None,
         no_sound: false,
         ui_tour: None,
-        ui_script: None,
         autojoin: true,
         control: None,
         control_file: None,
@@ -371,7 +364,6 @@ fn parse(args: &[String]) -> Result<Cli, String> {
             "--fx-demo" => c.fx_demo = Some(val(a)?),
             "--no-sound" => c.no_sound = true,
             "--ui-tour" => c.ui_tour = Some(val(a)?.into()),
-            "--ui-script" => c.ui_script = Some(val(a)?),
             "--no-autojoin" => c.autojoin = false,
             "--control" => {
                 c.control = Some(val(a)?.parse().map_err(|_| "--control takes a port")?);
@@ -410,7 +402,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
     if c.autoplay && !c.netplay() {
         return Err("--autoplay needs --connect or --listen".into());
     }
-    if (c.video || c.screenshot || c.timed() || c.ui_script.is_some()) && c.out.is_none() {
+    if (c.video || c.screenshot || c.timed()) && c.out.is_none() {
         c.out = Some(".".into());
     }
     Ok(c)

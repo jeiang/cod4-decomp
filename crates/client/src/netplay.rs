@@ -426,8 +426,6 @@ struct Counters {
     projectiles_max: usize,
     /// Missiles seen, one entry per entity and weapon: a weapon's count is how many projectiles of it appeared.
     missiles_seen: std::collections::BTreeSet<(u16, u16)>,
-    /// The missile entities the local player launched (`client` is the owner), by entity number.
-    own_missiles: std::collections::BTreeSet<u16>,
     /// Events received, by kind.
     events: std::collections::BTreeMap<&'static str, u64>,
     /// The own player's events the prediction delivered (`EV_FIRE_WEAPON`, `EV_RELOAD`, ...), by event number: what
@@ -575,14 +573,12 @@ pub struct NetPlay {
     max_turn: [f32; 2],
     /// The effect `--fx-demo` plays, and when it last did.
     fx_demo: Option<(String, Option<i32>)>,
-    /// A bullet hit on a player 64 units ahead, asked for by the `hitflesh` script step, played by the next frame.
+    /// A bullet hit on a player 64 units ahead, asked for by the `hitflesh` dev hook, played by the next frame.
     want_flesh_hit: bool,
-    /// Subtitles a `subtitle=` script step injected, taken with the sound engine's.
+    /// Subtitles the `subtitle` dev hook injected, taken with the sound engine's.
     injected_subtitles: Vec<audio::engine::Subtitle>,
     /// The server announced a level the app has not acted on yet.
     new_level: Option<String>,
-    /// Levels begun since the join: each map change or round restart ([`Self::new_level`]) counts one.
-    levels: u32,
     /// `clientSideEffects`, from the cvar store each frame; read when a level starts.
     client_side_effects: bool,
     /// `snd_levelFadeTime`, from the cvar store each frame; read when a level starts.
@@ -719,7 +715,6 @@ impl NetPlay {
             want_flesh_hit: false,
             injected_subtitles: Vec::new(),
             new_level: None,
-            levels: 0,
             client_side_effects: true,
             level_fade_ms: crate::sound::LEVEL_FADE_MS,
             stat_sync: crate::profile::StatSync::default(),
@@ -738,13 +733,13 @@ impl NetPlay {
     }
 
     /// Plays, on the next frame, what a bullet of the weapon in hand striking a player 64 units ahead shows: the
-    /// flesh row of the impact table, or the no-blood effect with `cg_blood` off (for the `hitflesh` script step).
+    /// flesh row of the impact table, or the no-blood effect with `cg_blood` off (for the `hitflesh` dev hook).
     pub fn inject_flesh_hit(&mut self) {
         self.want_flesh_hit = true;
     }
 
     /// A `shellshock` server command for the player, `ms` of the default shock, as the server sends one for a
-    /// nearby explosion (for the `shock=` script step).
+    /// nearby explosion (for the `shock` dev hook).
     pub fn inject_shock(&mut self, ms: i32) {
         self.net.commands.push(
             net::ui::ServerCmd::ShellShock {
@@ -755,19 +750,13 @@ impl NetPlay {
         );
     }
 
-    /// A sound's subtitle `key` of `ms`, as the sound engine reports one of a started sound (for the `subtitle=`
-    /// script step).
+    /// A sound's subtitle `key` of `ms`, as the sound engine reports one of a started sound (for the `subtitle` dev
+    /// hook).
     pub fn inject_subtitle(&mut self, key: &str, ms: u32) {
         self.injected_subtitles.push(audio::engine::Subtitle {
             key: key.into(),
             ms,
         });
-    }
-
-    /// How often an effect kind was played this level (`fx.played` of the report; `shell_eject`, `bullet_impact`,
-    /// `bullet_impact_noblood`, ...).
-    pub fn fx_played(&self, kind: &str) -> u64 {
-        self.effects.played.get(kind).copied().unwrap_or(0)
     }
 
     /// A deterministic view through the same camera/DOF builders the killcam uses. Console-driven harness checks
@@ -795,14 +784,6 @@ impl NetPlay {
             "{position} {fov:.0} {:.0} {:.0} {:.0} {:.0} {:.0} {:.0}",
             dof.near_start, dof.near_end, dof.far_start, dof.far_end, dof.near_blur, dof.far_blur
         )
-    }
-    /// A copy of every effect count, for a script's `fxmark` step.
-    pub fn fx_counts(&self) -> HashMap<String, u64> {
-        self.effects
-            .played
-            .iter()
-            .map(|(k, v)| ((*k).to_owned(), *v))
-            .collect()
     }
 
     pub fn refused(&self) -> Option<&str> {
@@ -832,30 +813,6 @@ impl NetPlay {
     /// Whether the last frame drew the view model (`cg_drawGun` on and no scope up).
     pub fn gun_drawn(&self) -> bool {
         self.gun_drawn
-    }
-
-    /// The `MISSILE` entities of the newest snapshot: the grenades, rockets and packs in flight or at rest.
-    pub fn missiles(&self) -> usize {
-        self.net
-            .latest()
-            .map(|s| {
-                s.entities
-                    .iter()
-                    .filter(|e| e.etype == etype::MISSILE)
-                    .count()
-            })
-            .unwrap_or(0)
-    }
-
-    /// How many distinct missile entities the local player launched have been drawn so far (a grenade thrown, a
-    /// rocket fired): grows by one per own projectile that appeared, never for another player's.
-    pub fn missiles_appeared(&self) -> usize {
-        self.c.own_missiles.len()
-    }
-
-    /// Explosions received so far.
-    pub fn explosions(&self) -> u64 {
-        self.c.events.get("explosion").copied().unwrap_or(0)
     }
 
     /// Where the join stands, for the browser overlay: "connecting", "connected" (snapshots arrive) or "spawned".
@@ -964,11 +921,6 @@ impl NetPlay {
         self.new_level.take()
     }
 
-    /// How many levels the client has begun since the join (a round restart counts).
-    pub fn levels(&self) -> u32 {
-        self.levels
-    }
-
     /// Starts over for a new level: the old one's prediction, models, events and clock are meaningless. With `world`
     /// (another map was loaded) the collision, models and sound are replaced too. The connection stays.
     pub fn new_level(
@@ -1025,7 +977,6 @@ impl NetPlay {
         self.scan = crate::hud::NameScan::default();
         self.c.spawned = false;
         self.c.start = None;
-        self.levels += 1;
         Ok(())
     }
 
@@ -1181,7 +1132,7 @@ impl NetPlay {
         self.sound.set_volume(volume);
     }
 
-    /// The subtitles of the sounds the server had played since the last call, and any a script step injected.
+    /// The subtitles of the sounds the server had played since the last call, and any a dev hook injected.
     pub fn take_subtitles(&mut self) -> Vec<audio::engine::Subtitle> {
         let mut v = self.sound.take_subtitles();
         v.append(&mut self.injected_subtitles);
@@ -2735,13 +2686,6 @@ impl NetPlay {
         let mut looping = Vec::new();
         for e in flying {
             self.c.missiles_seen.insert((e.number, e.weapon));
-            if self
-                .net
-                .latest()
-                .is_some_and(|s| e.client == s.ps.client_num)
-            {
-                self.c.own_missiles.insert(e.number);
-            }
             let Some(def) = self.lib.content.weapon(self.weapons.name(e.weapon)) else {
                 logging::dedup!(
                     WARN,
