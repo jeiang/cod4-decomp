@@ -1219,20 +1219,54 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
     // kill), which can come before the walker met anyone (#464): keep playing until it has had a bot in its sights,
     // so the check fails only when aiming and firing do not work.
     c.step("fire", |c| {
-        let end = Instant::now() + secs(120);
-        while w.shots == 0 {
-            if Instant::now() > end {
-                w.stop(c)?;
-                return Err(format!(
-                    "the stage's player never fired in {} ticks (turned with {})",
-                    w.ticks,
-                    w.turning()
-                ));
-            }
-            c.pause(Duration::from_millis(150))?;
-            w.tick(c)?;
+        // A bot left to the match may never come into sight before the timeout (#494). Put a live enemy 200 units
+        // along the player's view and hold it still, so this step measures the walker's aiming and trigger pull,
+        // not whether the match offered a target. The walker still has to turn onto the bot and fire itself.
+        if w.shots == 0 {
+            use super::client_hud_compass::{enemy_bot, exec, server_client};
+            let enemy = match c.lookup("player.team")?.as_u64() {
+                Some(1) => 2,
+                Some(2) => 1,
+                t => return Err(format!("the player is on no team ({t:?})")),
+            };
+            let me = c
+                .lookup("player.client")?
+                .as_u64()
+                .ok_or("the player has no client slot")?;
+            let person = server_client(c, me)?;
+            let at = |i: usize| person["origin"][i].as_f64().unwrap_or(0.0);
+            let angles = c.lookup("player.aim_angles")?;
+            let yaw = angles[1].as_f64().unwrap_or(0.0).to_radians();
+            let bot = enemy_bot(c, enemy)?;
+            exec(c, "set bot_idle 1")?;
+            exec(
+                c,
+                &format!(
+                    "devtele {bot} {} {} {}",
+                    at(0) + 200.0 * yaw.cos(),
+                    at(1) + 200.0 * yaw.sin(),
+                    at(2)
+                ),
+            )?;
         }
-        w.stop(c)
+        let end = Instant::now() + secs(60);
+        let result = (|| {
+            while w.shots == 0 {
+                if Instant::now() > end {
+                    w.stop(c)?;
+                    return Err(format!(
+                        "the stage's player never fired in {} ticks (turned with {})",
+                        w.ticks,
+                        w.turning()
+                    ));
+                }
+                c.pause(Duration::from_millis(150))?;
+                w.tick(c)?;
+            }
+            w.stop(c)
+        })();
+        super::client_hud_compass::exec(c, "set bot_idle 0")?;
+        result
     })?;
     // The crosshair over a player takes their team's colour (`CG_CalcCrosshairColor`, #414). The colour steps run
     // with `sv_cheats` on at the listen server (forced, as `devmap` sets it; the client takes it from the
