@@ -95,7 +95,7 @@ cgis=hud2d 1,set=set cg_draw2D 0,wait=1,cgis=hud2d 0,shot=no-2d,set=set cg_draw2
 shock=8000,wait=1,cgis=shock 1,set=set cg_drawShellshock 0,wait=1,cgis=shock 0,set=set cg_drawShellshock 1,wait=1,cgis=shock 1,\
 fxmark,set=set cg_blood 0,hitflesh,wait=1,cgis=fx:bullet_impact_noblood +1,cgis=fx:bullet_impact_flesh +0,\
 set=set cg_blood 1,hitflesh,wait=1,cgis=fx:bullet_impact_flesh +1,cgis=fx:bullet_impact_noblood +1,\
-set=set cg_brass 0,holdkey=mouse1,wait=1,releasekey=mouse1,cgis=fx:shell_eject 0,set=set cg_brass 1,\
+set=set cg_brass 0,wait=0.1,fxmark,holdkey=mouse1,wait=1,releasekey=mouse1,cgis=fx:shell_eject +0,set=set cg_brass 1,\
 cgis=fullbright 0,set=set r_fullbright 1,wait=1,cgis=fullbright 1,shot=fullbright,set=set r_fullbright 0,wait=1,cgis=fullbright 0,\
 cgis=centertime 3000,set=set cg_centertime 1.5,wait=1,cgis=centertime 1500,set=set cg_centertime 3,\
 set=set cg_crosshairAlpha 0,set=set cg_crosshairAlphaMin 0,wait=1,cgis=crosshair_alpha 0.00,\
