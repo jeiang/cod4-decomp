@@ -166,10 +166,52 @@ fn night_vision_view(dir: &std::path::Path) -> Result<NvView, String> {
     Ok(nv_measure(w, h, &off, &still, &on))
 }
 
+/// Put a live bot of the wanted side 200 units along the player's view, as the fire step does, so the colour
+/// steps measure the walker's aim and the tint rather than whether the match offered a target (#494). Bots are
+/// held still with `bot_idle 1` for the whole colour sequence; the caller restores it.
+fn place_target_ahead(c: &mut Driven, enemy: bool) -> Result<(), String> {
+    use super::client_hud_compass::{enemy_bot, exec, server_client};
+    let mine = c.lookup("player.team")?.as_u64().unwrap_or(0);
+    let team = match (mine, enemy) {
+        (1, true) => 2,
+        (2, true) => 1,
+        (1 | 2, false) => mine,
+        _ => return Err(format!("the player is on no team ({mine})")),
+    };
+    let me = c
+        .lookup("player.client")?
+        .as_u64()
+        .ok_or("the player has no client slot")?;
+    let person = server_client(c, me)?;
+    let at = |i: usize| person["origin"][i].as_f64().unwrap_or(0.0);
+    let yaw = c.lookup("player.aim_angles")?[1]
+        .as_f64()
+        .unwrap_or(0.0)
+        .to_radians();
+    let bot = enemy_bot(c, team)?;
+    exec(
+        c,
+        &format!(
+            "devtele {bot} {} {} {}",
+            at(0) + 200.0 * yaw.cos(),
+            at(1) + 200.0 * yaw.sin(),
+            at(2)
+        ),
+    )
+}
+
 /// The crosshair colour steps, once the server has `sv_cheats` on: waits for the client to take it, puts the
 /// player in `god` mode, then holds the sights on an enemy, on an enemy with `cg_crosshairEnemyColor 0`, and on a
-/// teammate.
+/// teammate. Each target is placed in front of the player rather than left to the match.
 fn crosshair_colours(c: &mut Driven, w: &mut Walker) -> Result<(), String> {
+    use super::client_hud_compass::exec;
+    exec(c, "set bot_idle 1")?;
+    let r = crosshair_colour_steps(c, w);
+    exec(c, "set bot_idle 0")?;
+    r
+}
+
+fn crosshair_colour_steps(c: &mut Driven, w: &mut Walker) -> Result<(), String> {
     c.step("crosshair cheats", |c| {
         let end = Instant::now() + Duration::from_secs(15);
         while c.ask(json!({"cmd": "cvar", "name": "sv_cheats"}))?["value"] != "1" {
@@ -183,6 +225,7 @@ fn crosshair_colours(c: &mut Driven, w: &mut Walker) -> Result<(), String> {
     // Held fire keeps an enemy alive under the sights through the fade-in; `god` keeps the player alive.
     w.hold_fire = true;
     c.step("crosshair over an enemy", |c| {
+        place_target_ahead(c, true)?;
         let theirs = c.lookup("hud.stats.crosshair_team_tints.1")?;
         w.drive_until(
             c,
@@ -195,6 +238,7 @@ fn crosshair_colours(c: &mut Driven, w: &mut Walker) -> Result<(), String> {
     // `cg_crosshairEnemyColor 0` keeps the reticle white over an enemy held past the fade-in.
     c.step("crosshair enemy colour off", |c| enemy_colour_off(c, w))?;
     c.step("crosshair over a teammate", |c| {
+        place_target_ahead(c, false)?;
         let mine = c.lookup("hud.stats.crosshair_team_tints.0")?;
         w.friends = true;
         let r = w.drive_until(
@@ -237,6 +281,7 @@ fn enemy_colour_off(c: &mut Driven, w: &mut Walker) -> Result<(), String> {
         ))
     };
     let (due, white) = counts(c)?;
+    place_target_ahead(c, true)?;
     w.drive_until(
         c,
         json!({"hud.stats.crosshair_enemy_due_frames": {"gt": due + 60}}),
