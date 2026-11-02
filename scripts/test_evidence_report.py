@@ -73,7 +73,10 @@ class EvidenceReportTests(unittest.TestCase):
         self.gh_result = None
 
     def git(self, *args):
-        return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout.strip()
+        # On the command line, so no config file can sign: a NixOS host's git carries `commit.gpgsign` in a config
+        # GIT_CONFIG_NOSYSTEM does not turn off.
+        return subprocess.run(["git", "-c", "commit.gpgsign=false", *args], check=True, capture_output=True,
+                              text=True).stdout.strip()
 
     def commit(self, name, text):
         pathlib.Path(name).write_text(text)
