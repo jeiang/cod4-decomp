@@ -9,6 +9,7 @@ use install::Detection;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::Duration;
 
 const MODES: &str = r#"{"gpu":{"name":"Fake GPU","backend":"vulkan","driver":"1","device_type":"discrete","features":[],"limits":{}},
@@ -48,12 +49,29 @@ struct Fake {
     dir: tempfile::TempDir,
 }
 
+/// The fake client script, written once for the whole test binary.
+///
+/// Writing an executable in one test thread while another forks races:
+/// the forked child inherits the open write descriptor until it execs, and
+/// exec of a file someone holds open for writing fails with ETXTBSY (#538).
+/// Every test forces this before it spawns anything, so no fork can overlap
+/// the write; each fake then reaches it through a symlink (no descriptor),
+/// and `$0` stays the symlink so the script reads its own fake's files.
+/// Statics are not dropped, so the few-hundred-byte directory outlives the
+/// test binary in the temp dir.
+static SCRIPT_DIR: LazyLock<tempfile::TempDir> = LazyLock::new(|| {
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join("cod4e");
+    fs::write(&exe, SCRIPT).unwrap();
+    fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+    dir
+});
+
 impl Fake {
     fn new(behavior: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let exe = dir.path().join("cod4e");
-        fs::write(&exe, SCRIPT).unwrap();
-        fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink(SCRIPT_DIR.path().join("cod4e"), dir.path().join("cod4e"))
+            .unwrap();
         fs::write(dir.path().join("modes.json"), MODES).unwrap();
         let f = Self { dir };
         f.behave(behavior);
