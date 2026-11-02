@@ -196,10 +196,10 @@ fn night_vision_view(dir: &std::path::Path) -> Result<NvView, String> {
     Ok(nv_measure(w, h, &off, &still, &on))
 }
 
-/// Where a target bot is put for the crosshair colour steps, tried in turn: degrees off the player's view and
-/// distance. A spot behind a wall or inside geometry hides the bot from the crosshair trace; the next one is tried.
-const CROSSHAIR_SPOTS: [(f64, f64); 4] =
-    [(0.0, 200.0), (90.0, 150.0), (-90.0, 150.0), (180.0, 150.0)];
+/// How far from the player a target bot is put for the crosshair colour steps, tried in turn. The server picks the
+/// spot round the player, along their view first, where the bot stands on floor in plain sight of them
+/// (`devtele <bot> near <client> <dist>`); a fixed offset could put it behind a wall or inside geometry.
+const CROSSHAIR_REACH: [f64; 3] = [200.0, 150.0, 250.0];
 /// How long the walker gets to turn onto one placed bot and hold it past the fade-in.
 const CROSSHAIR_SPOT_LIMIT: Duration = Duration::from_secs(25);
 
@@ -227,20 +227,9 @@ fn hold_on_placed(
         .as_u64()
         .ok_or("the player has no client slot")?;
     let mut tried = Vec::new();
-    for (off, reach) in CROSSHAIR_SPOTS {
-        let person = server_client(c, me)?;
-        let at = |i: usize| person["origin"][i].as_f64().unwrap_or(0.0);
-        let yaw = (c.lookup("player.aim_angles")?[1].as_f64().unwrap_or(0.0) + off).to_radians();
+    for reach in CROSSHAIR_REACH {
         let bot = enemy_bot(c, team)?;
-        exec(
-            c,
-            &format!(
-                "devtele {bot} {} {} {}",
-                at(0) + reach * yaw.cos(),
-                at(1) + reach * yaw.sin(),
-                at(2)
-            ),
-        )?;
+        exec(c, &format!("devtele {bot} near {me} {reach}"))?;
         w.target = Some(bot);
         let r = w.drive_until(c, state.clone(), CROSSHAIR_SPOT_LIMIT, what);
         w.target = None;
@@ -263,12 +252,11 @@ fn hold_on_placed(
                 let p = c.state("player")?;
                 let server = server_client(c, bot)?;
                 tried.push(format!(
-                    "bot {bot} at {off} degrees, {reach} units: {e}; client sees bot {seen:?}; player origin {} \
-                     aim {} crosshair flags {} client {}; server bot origin {} alive {} team {}",
+                    "bot {bot} at {reach} units: {e}; client sees bot {seen:?}; player origin {} aim {} \
+                     crosshair flags {}; server bot origin {} alive {} team {}",
                     p["origin"],
                     p["aim_angles"],
                     p["crosshair_flags"],
-                    p["crosshair_client"],
                     server["origin"],
                     server["alive"],
                     server["team"]
@@ -971,20 +959,20 @@ fn crosshair_states(c: &mut Driven) -> Result<String, String> {
     Ok(format!("crosshair weapnext switch: {switch}"))
 }
 
-/// Where an enemy bot is put around the living player for the killcam's kill, tried in turn: east, west, north,
-/// south of them, near enough that the bot sees and turns to them.
-const KILLCAM_SIDES: [(f64, f64); 4] = [(120.0, 0.0), (-120.0, 0.0), (0.0, 120.0), (0.0, -120.0)];
+/// How far from the living player an enemy bot is put for the killcam's kill, tried in turn: near enough that the
+/// bot sees and turns to them, on the spot round them where the two see each other (`devtele <bot> near`).
+const KILLCAM_REACH: [f64; 3] = [120.0, 160.0, 200.0];
 /// Time the bot is given to see the player and turn to them: its reaction is at most 600 ms and it turns at least
 /// 420 degrees a second (`server/src/bot.rs`).
 const KILLCAM_AIM: Duration = Duration::from_secs(2);
 
 /// Has an enemy bot kill the player in front of it, so the killcam that follows replays the kill through eyes that
 /// have the body in sight, and returns while that killcam is up with the viewer's body seen. Left to the match, a
-/// bot may not find the player before it ends (#494: no kill in 300 s). The bot is put beside the player with its
-/// own play on (`bot_idle 0`), so it turns to them, and then kills them with its rifle (`devkill`, as `net-killcam`
-/// and `web-match` do; a kill it makes first does as well). The stock `_killcam.gsc` plays the killcam. A side
-/// with a wall between the two leaves the body out of sight: the next side is tried after the respawn, and when no
-/// killcam showed the body, the step fails.
+/// bot may not find the player before it ends (#494: no kill in 300 s). The bot is put near the player where the
+/// two see each other, with its own play on (`bot_idle 0`), so it turns to them, and then kills them with its
+/// rifle (`devkill`, as `net-killcam` and `web-match` do; a kill it makes first does as well). The stock
+/// `_killcam.gsc` plays the killcam. When it never showed the body, the next distance is tried after the respawn,
+/// and when no killcam did, the step fails.
 fn killcam_kill(c: &mut Driven) -> Result<(), String> {
     use super::client_hud_compass::{enemy_bot, exec, server_client};
     let secs = Duration::from_secs;
@@ -999,20 +987,15 @@ fn killcam_kill(c: &mut Driven) -> Result<(), String> {
         .ok_or("the player has no client slot")?;
     exec(c, "set bot_idle 0")?;
     let mut tried = Vec::new();
-    for (dx, dy) in KILLCAM_SIDES {
+    for reach in KILLCAM_REACH {
         c.until(
             json!({"player.alive": true, "hud.live.killcam": false, "hud.live.dead": false}),
             secs(60),
             "the player was not alive to be killed",
         )?;
         let you0 = stat(c, "hud.stats.killcam_you_frames")?;
-        let person = server_client(c, me)?;
-        let at = |i: usize| person["origin"][i].as_f64().unwrap_or(0.0);
         let bot = enemy_bot(c, enemy)?;
-        exec(
-            c,
-            &format!("devtele {bot} {} {} {}", at(0) + dx, at(1) + dy, at(2)),
-        )?;
+        exec(c, &format!("devtele {bot} near {me} {reach}"))?;
         c.pause(KILLCAM_AIM)?;
         // Where the bot stood and looked when it killed, against the player: a failure says whether it faced them.
         let (b, p) = (server_client(c, bot)?, server_client(c, me)?);
@@ -1036,7 +1019,7 @@ fn killcam_kill(c: &mut Driven) -> Result<(), String> {
                 return Ok(());
             }
             if hud["live"]["killcam"] != json!(true) || Instant::now() > end {
-                tried.push(format!("bot {bot} at ({dx}, {dy}) [{seen}]"));
+                tried.push(format!("bot {bot} at {reach} units [{seen}]"));
                 break;
             }
             c.frames(1)?;
@@ -1687,10 +1670,11 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
     // so the check fails only when aiming and firing do not work.
     c.step("fire", |c| {
         // A bot left to the match may never come into sight before the timeout (#494). Put a live enemy 200 units
-        // along the player's view and hold it still, so this step measures the walker's aiming and trigger pull,
-        // not whether the match offered a target. The walker still has to turn onto the bot and fire itself.
+        // from the player in plain sight, along their view where it can, and hold it still, so this step measures
+        // the walker's aiming and trigger pull, not whether the match offered a target. The walker still has to
+        // turn onto the bot and fire itself.
         if w.shots == 0 {
-            use super::client_hud_compass::{enemy_bot, exec, server_client};
+            use super::client_hud_compass::{enemy_bot, exec};
             let enemy = match c.lookup("player.team")?.as_u64() {
                 Some(1) => 2,
                 Some(2) => 1,
@@ -1700,21 +1684,9 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
                 .lookup("player.client")?
                 .as_u64()
                 .ok_or("the player has no client slot")?;
-            let person = server_client(c, me)?;
-            let at = |i: usize| person["origin"][i].as_f64().unwrap_or(0.0);
-            let angles = c.lookup("player.aim_angles")?;
-            let yaw = angles[1].as_f64().unwrap_or(0.0).to_radians();
             let bot = enemy_bot(c, enemy)?;
             exec(c, "set bot_idle 1")?;
-            exec(
-                c,
-                &format!(
-                    "devtele {bot} {} {} {}",
-                    at(0) + 200.0 * yaw.cos(),
-                    at(1) + 200.0 * yaw.sin(),
-                    at(2)
-                ),
-            )?;
+            exec(c, &format!("devtele {bot} near {me} 200"))?;
         }
         let end = Instant::now() + secs(60);
         let result = (|| {
