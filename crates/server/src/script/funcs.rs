@@ -55,16 +55,6 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
             Ok(Value::Undefined)
         }),
     ),
-    // developer-only in the original: no-ops unless `developer` is set
-    ("assert", r(assert)),
-    ("assertex", r(assert)),
-    ("assertmsg", r(assert_msg)),
-    ("print", r(|g, _, a| dev_print(g, a, false))),
-    ("println", r(|g, _, a| dev_print(g, a, true))),
-    ("print3d", r(|_, _, _| Ok(Value::Undefined))),
-    ("line", r(|_, _, _| Ok(Value::Undefined))),
-    ("createprintchannel", r(|_, _, _| Ok(Value::Undefined))),
-    ("setprintchannel", r(|_, _, _| Ok(Value::Undefined))),
     ("logstring", r(log_string)),
     ("logprint", r(log_print)),
     ("iprintln", r(uicmd::level_print)),
@@ -188,13 +178,12 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
     ("tablelookupistring", r(|g, _, a| table_lookup(g, a, true))),
     // precache: the server records names and indices
     ("precachemodel", r(precache_model)),
-    (
-        "precacheshader",
-        r(|g, _, a| precache(g, a, Table::Material)),
-    ),
+    ("precacheshader", r(precache_shader)),
     ("precachestring", r(precache_string)),
     ("precacheitem", r(precache_item)),
-    ("precacheshellshock", r(|_, _, _| Ok(Value::Undefined))),
+    ("precacheshellshock", r(precache_shell_shock)),
+    // A null sub in the stock game: the 1.7 handler (0x4d74b0, shared with other unused builtins) is a bare `ret`
+    // (KisakCOD `game_mp/g_scr_main_mp.cpp:144`, `KISAK_NULLSUB`).
     ("precacherumble", r(|_, _, _| Ok(Value::Undefined))),
     ("precachemenu", r(|g, _, a| precache(g, a, Table::Menu))),
     (
@@ -594,45 +583,6 @@ fn get_array_keys(_: &mut Game, _: &mut Vm, a: Args) -> R {
     Ok(Value::Array(Rc::new(out)))
 }
 
-fn developer(g: &Game) -> bool {
-    g.cvars.int("developer") > 0
-}
-
-fn assert(g: &mut Game, _: &mut Vm, a: Args) -> R {
-    if developer(g) && !truthy(a.get(0)?) {
-        let msg = a.opt(1).map(display).unwrap_or_default();
-        return Err(format!("assert fail: {msg}"));
-    }
-    Ok(Value::Undefined)
-}
-
-fn assert_msg(g: &mut Game, _: &mut Vm, a: Args) -> R {
-    if developer(g) {
-        return Err(format!("assert fail: {}", a.display(0)?));
-    }
-    Ok(Value::Undefined)
-}
-
-fn truthy(v: &Value) -> bool {
-    match v {
-        Value::Undefined => false,
-        Value::Int(n) => *n != 0,
-        Value::Float(x) => *x != 0.0,
-        _ => true,
-    }
-}
-
-fn dev_print(g: &mut Game, a: Args, newline: bool) -> R {
-    if developer(g) {
-        let mut s: String = a.v.iter().map(display).collect();
-        if newline {
-            s.push('\n');
-        }
-        g.print(s);
-    }
-    Ok(Value::Undefined)
-}
-
 /// `logString(text)`: the game log line; the stage counters read the bomb events from it.
 pub(super) fn log_string(g: &mut Game, _: &mut Vm, a: Args) -> R {
     let line = a.display(0)?;
@@ -931,9 +881,13 @@ fn table_lookup(g: &mut Game, a: Args, localized: bool) -> R {
     })
 }
 
+/// The menu and icon precaches (`GScr_PrecacheMenu`, `GScr_PrecacheStatusIcon`, `GScr_PrecacheHeadIcon`,
+/// `GScr_PrecacheLocationSelector`: KisakCOD `game_mp/g_scr_main_mp.cpp:2539`, `:2586`, `:2635`, `:2881`) and
+/// [`precache_shader`]: the name is registered whether or not the zones have it; one they lack is warned about.
 fn precache(g: &mut Game, a: Args, table: Table) -> R {
-    let n = a.string(0)?.to_owned();
-    g.precache(table, &n)?;
+    let n = a.string(0)?;
+    warn_missing_asset(g, a.name, table, n);
+    g.precache(table, n)?;
     Ok(Value::Undefined)
 }
 
@@ -1259,9 +1213,98 @@ fn earthquake(g: &mut Game, _: &mut Vm, a: Args) -> R {
     Ok(Value::Undefined)
 }
 
+/// `loadfx(name)`: `Scr_LoadFX` (KisakCOD `game_mp/g_scr_main_mp.cpp:4094`). The name is under `fx/`, given
+/// without the folder. A new one registers only while the level initializes: after that `G_EffectIndex`
+/// (`game_mp/g_utils_mp.cpp:338`) finds only a loaded one, and its `G_FindConfigstringIndex` (`:120-127`) raises
+/// `effect "<name>" not precached` before `Scr_LoadFX`'s own error, which only an empty name reaches. A name the
+/// zones lack registers (the client draws nothing for it) and is warned about.
 fn load_fx(g: &mut Game, _: &mut Vm, a: Args) -> R {
-    let n = a.string(0)?.to_owned();
-    Ok(Value::Int(g.fx.index(&n) as i32))
+    let n = a.string(0)?;
+    if n.starts_with("fx/") {
+        return Err("effect name should start after the 'fx' folder.".into());
+    }
+    let mut id = g.fx.find(n);
+    if id == 0 && !n.is_empty() {
+        if !g.level.initializing {
+            return Err(format!("effect \"{n}\" not precached"));
+        }
+        if !g.content.effect_defined(n) {
+            logging::dedup!(
+                WARN,
+                n,
+                builtin = a.name,
+                name = n,
+                "effect is not in the loaded zones"
+            );
+        }
+        id = g.fx.index(n);
+    }
+    if id == 0 && !g.level.initializing {
+        return Err("loadFx must be called before any wait statements in the level script, or on an already loaded effect\n".into());
+    }
+    Ok(Value::Int(id as i32))
+}
+
+/// `precacheshader(name)`: `Scr_PrecacheShader` (KisakCOD `game_mp/g_scr_main_mp.cpp:3783`): only while the level
+/// initializes, and never with an empty name.
+fn precache_shader(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    if !g.level.initializing {
+        return Err("precacheShader must be called before any wait statements in the gametype or level script\n".into());
+    }
+    if a.string(0)?.is_empty() {
+        return Err("Shader name string is empty".into());
+    }
+    precache(g, a, Table::Material)
+}
+
+/// Warns once per name when a precached material or menu is in none of the loaded zones: the client draws the
+/// default material for it, or opens no menu.
+fn warn_missing_asset(g: &mut Game, builtin: &str, table: Table, name: &str) {
+    let missing = match table {
+        Table::Material => !g.content.material_defined(name),
+        Table::Menu => !g.content.menu_exists(name),
+        Table::Model | Table::Text => false,
+    };
+    if missing && !name.is_empty() {
+        logging::dedup!(
+            WARN,
+            name,
+            builtin,
+            name,
+            "precached asset is not in the loaded zones"
+        );
+    }
+}
+
+/// `precacheshellshock(name)`: `Scr_PrecacheShellShock` (KisakCOD `game_mp/g_scr_main_mp.cpp:3751`), only while
+/// the level initializes. It reads `shock/<name>.shock` as `BG_LoadShellShockDvars` does
+/// (`bgame/bg_misc.cpp:2179`): a missing file is a console error and `shock/default.shock` stands in; without that
+/// too the stock server drops the level (`Com_Error`), here the script errors. The players' shocks read the files
+/// themselves (the client's `shellshock` handling), so nothing more is kept.
+fn precache_shell_shock(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    if !g.level.initializing {
+        return Err("precacheShellShock must be called before any wait statements in the gametype or level script\n".into());
+    }
+    let n = a.string(0)?;
+    let file = format!("shock/{n}.shock");
+    if g.content.rawfile(&file).is_some() {
+        return Ok(Value::Undefined);
+    }
+    logging::dedup!(
+        ERROR,
+        file.as_str(),
+        file = file.as_str(),
+        "couldn't open the shell shock file; the default shock stands in"
+    );
+    if g.content.rawfile("shock/default.shock").is_none() {
+        logging::dedup!(
+            ERROR,
+            "shock/default.shock",
+            "couldn't open 'shock/default.shock'. This is a default shock file that you should have."
+        );
+        return Err(format!("couldn't find shell shock '{n}' -- see console"));
+    }
+    Ok(Value::Undefined)
 }
 
 /// The engine fields `getent` and `getentarray` can search by (string-typed fields).
@@ -2050,5 +2093,218 @@ mod edge_tests {
             Value::str(","),
         ];
         assert!(call(str_tok, &ok).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod precache_tests {
+    use super::*;
+    use gsc::{Builtins, Options, compile};
+    use tracing::Level;
+
+    fn setup(initializing: bool) -> (Game, Vm) {
+        let prog = compile(
+            &[("t.gsc", "main() {}")],
+            &Builtins::stock_mp(),
+            Options::default(),
+        )
+        .unwrap();
+        let mut g = Game::new(crate::cvar::Cvars::new(), Default::default());
+        g.level.initializing = initializing;
+        (g, Vm::new(prog).unwrap())
+    }
+
+    fn call(
+        f: fn(&mut Game, &mut Vm, Args) -> R,
+        g: &mut Game,
+        vm: &mut Vm,
+        name: &str,
+        arg: &str,
+    ) -> R {
+        let v = [Value::str(arg)];
+        f(g, vm, Args::new(name, &v))
+    }
+
+    fn warned<'a>(events: &'a [logging::Record], level: Level) -> Option<&'a logging::Record> {
+        events.iter().find(|e| e.level == level)
+    }
+
+    fn precache_menu(g: &mut Game, _: &mut Vm, a: Args) -> R {
+        precache(g, a, Table::Menu)
+    }
+
+    fn precache_status_icon(g: &mut Game, _: &mut Vm, a: Args) -> R {
+        precache(g, a, Table::Material)
+    }
+
+    #[test]
+    fn loadfx_rejects_the_fx_folder_and_new_effects_after_init() {
+        let (mut g, mut vm) = setup(true);
+        g.content.add_test_effect("smoke/logtest_known");
+        let err = call(load_fx, &mut g, &mut vm, "loadfx", "fx/smoke/logtest_known").unwrap_err();
+        assert!(err.contains("after the 'fx' folder"), "{err}");
+        let id = call(load_fx, &mut g, &mut vm, "loadfx", "smoke/logtest_known").unwrap();
+        assert!(matches!(id, Value::Int(1)));
+        g.level.initializing = false;
+        assert!(matches!(
+            call(load_fx, &mut g, &mut vm, "loadfx", "SMOKE/logtest_known"),
+            Ok(Value::Int(1))
+        ));
+        let err = call(load_fx, &mut g, &mut vm, "loadfx", "smoke/logtest_late").unwrap_err();
+        assert!(err.contains("not precached"), "{err}");
+        let err = call(load_fx, &mut g, &mut vm, "loadfx", "").unwrap_err();
+        assert!(err.contains("loadFx must be called"), "{err}");
+        assert_eq!(g.fx.find("smoke/logtest_late"), 0);
+    }
+
+    #[test]
+    fn loadfx_warns_once_about_an_effect_the_zones_lack() {
+        let (mut g, mut vm) = setup(true);
+        g.content.add_test_effect("smoke/logtest_present");
+        let (_, events) = logging::capture(|| {
+            call(load_fx, &mut g, &mut vm, "loadfx", "smoke/logtest_present").unwrap();
+        });
+        assert!(warned(&events, Level::WARN).is_none());
+        let (id, events) = logging::capture(|| {
+            call(load_fx, &mut g, &mut vm, "loadfx", "smoke/logtest_absent").unwrap()
+        });
+        assert!(matches!(id, Value::Int(2)), "it registers all the same");
+        let w = warned(&events, Level::WARN).expect("a warning");
+        assert_eq!(w.field("builtin"), Some("loadfx"));
+        assert_eq!(w.field("name"), Some("smoke/logtest_absent"));
+    }
+
+    #[test]
+    fn material_and_menu_precaches_warn_about_names_the_zones_lack() {
+        let (mut g, mut vm) = setup(true);
+        g.content.add_test_material("logtest_icon");
+        g.content.add_test_menu("logtest_menu");
+        let (_, events) = logging::capture(|| {
+            call(
+                precache_shader,
+                &mut g,
+                &mut vm,
+                "precacheshader",
+                "LOGTEST_ICON",
+            )
+            .unwrap();
+            call(
+                precache_menu,
+                &mut g,
+                &mut vm,
+                "precachemenu",
+                "logtest_menu",
+            )
+            .unwrap();
+        });
+        assert!(warned(&events, Level::WARN).is_none());
+        let (_, events) = logging::capture(|| {
+            call(
+                precache_status_icon,
+                &mut g,
+                &mut vm,
+                "precachestatusicon",
+                "logtest_no_icon",
+            )
+            .unwrap();
+        });
+        let w = warned(&events, Level::WARN).expect("a warning");
+        assert_eq!(w.field("builtin"), Some("precachestatusicon"));
+        assert_eq!(w.field("name"), Some("logtest_no_icon"));
+        let (_, events) = logging::capture(|| {
+            call(
+                precache_menu,
+                &mut g,
+                &mut vm,
+                "precachemenu",
+                "logtest_no_menu",
+            )
+            .unwrap();
+        });
+        assert_eq!(
+            warned(&events, Level::WARN).and_then(|w| w.field("name")),
+            Some("logtest_no_menu")
+        );
+        assert!(
+            g.configstrings.values().any(|v| v == "logtest_no_menu"),
+            "registered all the same"
+        );
+    }
+
+    #[test]
+    fn precacheshader_only_while_initializing_and_never_empty() {
+        let (mut g, mut vm) = setup(true);
+        g.content.add_test_material("logtest_shader");
+        let err = call(precache_shader, &mut g, &mut vm, "precacheshader", "").unwrap_err();
+        assert!(err.contains("Shader name string is empty"), "{err}");
+        g.level.initializing = false;
+        let err = call(
+            precache_shader,
+            &mut g,
+            &mut vm,
+            "precacheshader",
+            "logtest_shader",
+        )
+        .unwrap_err();
+        assert!(err.contains("precacheShader must be called"), "{err}");
+    }
+
+    #[test]
+    fn precacheshellshock_reads_the_shock_file_with_the_default_standing_in() {
+        let (mut g, mut vm) = setup(true);
+        g.content.add_test_rawfile("shock/logtest_shock.shock", "x");
+        let (r, events) = logging::capture(|| {
+            call(
+                precache_shell_shock,
+                &mut g,
+                &mut vm,
+                "precacheshellshock",
+                "logtest_shock",
+            )
+        });
+        assert!(r.is_ok() && events.iter().all(|e| e.level != Level::ERROR));
+        let (r, events) = logging::capture(|| {
+            call(
+                precache_shell_shock,
+                &mut g,
+                &mut vm,
+                "precacheshellshock",
+                "logtest_none",
+            )
+        });
+        let err = r.unwrap_err();
+        assert!(
+            err.contains("couldn't find shell shock 'logtest_none'"),
+            "{err}"
+        );
+        assert_eq!(
+            warned(&events, Level::ERROR).and_then(|e| e.field("file")),
+            Some("shock/logtest_none.shock")
+        );
+        g.content.add_test_rawfile("shock/default.shock", "x");
+        let (r, events) = logging::capture(|| {
+            call(
+                precache_shell_shock,
+                &mut g,
+                &mut vm,
+                "precacheshellshock",
+                "logtest_fallback",
+            )
+        });
+        assert!(r.is_ok());
+        assert_eq!(
+            warned(&events, Level::ERROR).and_then(|e| e.field("file")),
+            Some("shock/logtest_fallback.shock")
+        );
+        g.level.initializing = false;
+        let err = call(
+            precache_shell_shock,
+            &mut g,
+            &mut vm,
+            "precacheshellshock",
+            "logtest_shock",
+        )
+        .unwrap_err();
+        assert!(err.contains("precacheShellShock must be called"), "{err}");
     }
 }

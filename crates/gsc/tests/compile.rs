@@ -147,6 +147,96 @@ fn builtins_bind_by_index_and_methods_need_an_object() {
     );
 }
 
+/// Developer-only builtins outside `/# ... #/` compile only with `developer_script`, as statements
+/// (KisakCOD `script/scr_compiler.cpp:468-563,871-891`).
+#[test]
+fn developer_builtins_are_developer_statements() {
+    let b = Builtins::stock_mp();
+    for n in [
+        "print",
+        "println",
+        "assert",
+        "assertex",
+        "assertmsg",
+        "getentbynum",
+        "line",
+        "openfile",
+    ] {
+        assert!(b.is_developer(b.function(n).unwrap()), "{n}");
+    }
+    assert!(!b.is_developer(b.function("iprintln").unwrap()));
+    for n in ["devaddpitch", "devaddyaw", "devaddroll"] {
+        assert!(b.is_developer_method(b.method(n).unwrap()), "{n}");
+    }
+    assert!(!b.is_developer_method(b.method("rotateroll").unwrap()));
+    let src = "f() { println(\"a\", g()); assert(1); x = 1; } g() { return 1; }";
+    // Without developer_script the calls, their arguments included, are gone.
+    let d = dis(&ok(src), "f");
+    assert!(
+        !d.iter()
+            .any(|l| l.starts_with("CallBuiltin") || l.starts_with("CallFunc") || l == "Pop"),
+        "{d:?}"
+    );
+    let dev = compile(&[("a.gsc", src)], &b, Options { developer: true }).unwrap();
+    let d = dis(&dev, "f");
+    let call = |n: &str, argc: u8| format!("CallBuiltin {} {argc}", b.function(n).unwrap());
+    assert!(d.contains(&call("println", 2)), "{d:?}");
+    assert!(d.contains(&call("assert", 1)), "{d:?}");
+    // The value is out of reach outside a developer block, whatever developer_script says.
+    for opts in [Options::default(), Options { developer: true }] {
+        let e = compile(&[("a.gsc", "f() { e = getentbynum(1); }")], &b, opts)
+            .unwrap_err()
+            .remove(0);
+        assert_eq!(
+            e.message,
+            "return value of developer command can not be accessed if not in a /# ... #/ comment"
+        );
+        let e = compile(&[("a.gsc", "f() { iprintln(print(1)); }")], &b, opts).unwrap_err();
+        assert_eq!(e.len(), 1);
+    }
+    // Inside a developer block it is an ordinary call.
+    let p = compile(
+        &[("a.gsc", "f() { /# e = getentbynum(1); println(e); #/ }")],
+        &b,
+        Options { developer: true },
+    )
+    .unwrap();
+    assert!(dis(&p, "f").contains(&call("getentbynum", 1)));
+    // So is every call in a function defined inside a top-level developer block, whatever `developer_script` says.
+    let src = "/#\nf() { h = openfile(\"x\", \"read\"); return h; }\n#/\ng() {}";
+    for opts in [Options::default(), Options { developer: true }] {
+        let p = compile(&[("a.gsc", src)], &b, opts).unwrap();
+        assert!(dis(&p, "f").contains(&call("openfile", 2)));
+    }
+    // The developer-only methods follow the same rules.
+    let src = "f() { self devaddpitch(1); }";
+    let method = |n: &str| format!("CallBuiltinMethod {} 1", b.method(n).unwrap());
+    assert!(!dis(&ok(src), "f").contains(&method("devaddpitch")));
+    let p = compile(&[("a.gsc", src)], &b, Options { developer: true }).unwrap();
+    assert!(dis(&p, "f").contains(&method("devaddpitch")));
+    for opts in [Options::default(), Options { developer: true }] {
+        let e = compile(&[("a.gsc", "f() { x = self devaddyaw(1); }")], &b, opts)
+            .unwrap_err()
+            .remove(0);
+        assert_eq!(
+            e.message,
+            "return value of developer command can not be accessed if not in a /# ... #/ comment"
+        );
+        let p = compile(
+            &[("a.gsc", "f() { /# self devaddroll(1); #/ }")],
+            &b,
+            Options { developer: true },
+        )
+        .unwrap();
+        assert!(dis(&p, "f").contains(&method("devaddroll")));
+    }
+    let e = err(&[("a.gsc", "f() { self devaddroll(nosuchthing()); }")]);
+    assert_eq!(e.kind, ErrorKind::UnknownFunction);
+    // An error inside a dropped call's arguments is still reported.
+    let e = err(&[("a.gsc", "f() { println(nosuchthing()); }")]);
+    assert_eq!(e.kind, ErrorKind::UnknownFunction);
+}
+
 #[test]
 fn unknown_names_are_errors_listing_the_name() {
     let e = err(&[("a.gsc", "f() {\n\n nosuchthing(1); }")]);
