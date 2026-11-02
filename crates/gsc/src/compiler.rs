@@ -883,7 +883,8 @@ impl FnCompiler<'_> {
         }
         let discard = dev && !self.opts.developer;
         let (code_len, lines_len) = (self.code.len(), self.lines.len());
-        let outer = std::mem::replace(&mut self.in_dev, self.in_dev || dev);
+        let outer = self.in_dev;
+        self.in_dev = outer || dev;
         let r = c.args.iter().rev().try_for_each(|a| self.expr(a));
         self.in_dev = outer;
         r?;

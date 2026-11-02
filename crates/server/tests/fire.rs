@@ -280,6 +280,31 @@ fn live_events(g: &Game, kind: u8) -> Vec<net::entity::EntityState> {
         .collect()
 }
 
+/// A bullet into a player corpse strikes flesh, as into the player (KisakCOD `game/bullet.cpp:58-67`).
+#[test]
+fn a_bullet_into_a_corpse_strikes_flesh() {
+    use server::tempev::ev;
+    let (mut g, mut vm) = arena(&[], 0, vec![rifle()]);
+    let shooter = add_player(&mut g, &mut vm, [0.0; 3], 0.0, Team::Allies);
+    let victim = add_player(&mut g, &mut vm, [40.0, 0.0, 0.0], 180.0, Team::Axis);
+    let body = g
+        .clone_player(&mut vm, victim, 5000, "pb_death_run_onfront")
+        .expect("corpse");
+    // The player leaves; only the corpse is in the line of fire.
+    g.ent_mut(victim).unwrap().contents = 0;
+    g.relink(victim);
+    fire_weapon(&mut g, &mut vm, shooter, "ak47_mp");
+    let hits = live_events(&g, ev::BULLET_IMPACT);
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert!(
+        hits[0].origin[0] > 20.0,
+        "struck the corpse at {:?}",
+        hits[0].origin
+    );
+    assert_eq!(hits[0].event_parm, 7, "flesh, not the corpse's surface 0");
+    assert!(g.ent(body).unwrap().x.corpse.is_some());
+}
+
 #[test]
 fn the_last_round_and_a_bolt_actions_case_are_announced() {
     use server::tempev::{FIRE_LAST_SHOT, ev};
