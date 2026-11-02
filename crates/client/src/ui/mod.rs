@@ -1090,6 +1090,33 @@ impl Ui {
         ok
     }
 
+    /// Activates the visible item of the top menu whose name or shown text is `want` (case-insensitive): what a click
+    /// on it does, for unit tests. `true` if there was one.
+    #[cfg(test)]
+    pub fn click(&mut self, host: &mut dyn Host, want: &str) -> bool {
+        let Some(&m) = self.stack.last() else {
+            return false;
+        };
+        let def = self.menus[m].def.clone();
+        for (i, d) in def.items.iter().enumerate() {
+            let named = d
+                .window
+                .name
+                .as_deref()
+                .is_some_and(|n| n.eq_ignore_ascii_case(want));
+            let texted = !named && {
+                let t = self.item_text(&*host, m, i, d);
+                !t.is_empty() && t.eq_ignore_ascii_case(want)
+            };
+            if (named || texted) && self.item_visible(host, m, i) {
+                self.set_focus(host, m, i);
+                self.activate(host, m, i, false);
+                return true;
+            }
+        }
+        false
+    }
+
     // ---- open / close / focus -------------------------------------------------------------------------------
 
     pub fn open_by_name(&mut self, host: &mut dyn Host, name: &str) {
