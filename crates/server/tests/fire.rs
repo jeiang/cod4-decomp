@@ -894,7 +894,7 @@ fn flight_path(
 ) -> Vec<[f32; 3]> {
     let infos = vec![sidewinder(), lock_on_launcher(), hellfire(), rpg()];
     let (mut g, mut vm) = arena(&[], 0, infos);
-    for (name, defaults) in server::missile::MISSILE_CVARS {
+    for (name, defaults, _) in server::missile::MISSILE_CVARS {
         g.cvars.register(name, defaults, 0);
     }
     let shooter = add_player(&mut g, &mut vm, [-500.0, 0.0, 0.0], 0.0, Team::Allies);
@@ -1794,7 +1794,7 @@ fn pool(surface: i32, extra: Vec<BrushSpec>, models: Vec<Vec<BrushSpec>>) -> (Ga
     };
     let (mut g, vm) = arena(&[], 0, vec![rpg()]);
     g.world = Some(World::new(map.build()));
-    for (name, defaults) in server::missile::MISSILE_CVARS {
+    for (name, defaults, _) in server::missile::MISSILE_CVARS {
         g.cvars.register(name, defaults, 0);
     }
     (g, vm)
