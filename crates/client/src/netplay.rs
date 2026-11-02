@@ -3028,7 +3028,6 @@ impl NetPlay {
             "predictions": self.c.predictions,
             "prediction_corrections": self.pred.corrections,
             "players_seen_max": self.c.max_players_seen,
-            "players_seen": self.c.players_seen,
             "moved": moved,
             "path": self.c.path,
             "attack_cmds": self.c.shots,
@@ -3145,6 +3144,7 @@ impl NetPlay {
         report["damage_flash_max"] = json!(self.c.max_damage_flash);
         report["damage_wedges_max"] = json!(self.c.max_damage_wedges);
         report["players_drawn_max"] = self.c.max_players_drawn.into();
+        report["players_seen"] = json!(self.c.players_seen);
         report["players_drawn"] = json!(self.c.players_drawn);
         report["player_faults"] = json!(self.c.player_faults);
         report["torso_clips"] = json!(self.c.torso_clips);
