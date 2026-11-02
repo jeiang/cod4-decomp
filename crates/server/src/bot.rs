@@ -20,7 +20,7 @@ use crate::game::Game;
 use crate::nav::{NavMesh, NodeId, PathScratch, Steer};
 
 /// Contents a sight line collides with (`sighttracepassed`'s mask).
-const SIGHT_MASK: i32 = 0x0280_1803;
+pub(crate) const SIGHT_MASK: i32 = 0x0280_1803;
 /// How often a bot looks for enemies (ms); each bot has its own phase.
 const SCAN_MS: i32 = 200;
 /// Enemies this close are noticed from any direction.
