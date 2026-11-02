@@ -116,6 +116,11 @@ fn answer(s: &mut Server, req: &serde_json::Map<String, Value>) -> Result<Value,
                 .ok_or("cvar needs a name")?;
             match req.get("value").and_then(Value::as_str) {
                 None => Ok(json!({"name": name, "value": s.control_cvar(name)})),
+                // `"force": true` writes as the engine does (`devmap` sets the init-protected `sv_cheats` so).
+                Some(v) if req.get("force").and_then(Value::as_bool) == Some(true) => {
+                    s.game.cvars.force(name, v);
+                    Ok(json!({"name": name, "value": s.control_cvar(name)}))
+                }
                 Some(v) => {
                     s.exec_line(&format!("set {name} \"{}\"", v.replace('"', "'")))?;
                     Ok(json!({"name": name, "value": s.control_cvar(name)}))

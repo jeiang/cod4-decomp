@@ -406,6 +406,10 @@ pub struct Walker {
     pub key_ticks: u32,
     pub shots: u32,
     pub ticks: u32,
+    /// Turn toward the nearest living teammate instead, and hold fire.
+    pub friends: bool,
+    /// Keep the sights on the target without firing (an enemy held under the crosshair rather than killed).
+    pub hold_fire: bool,
 }
 
 /// Degrees in `[-180, 180)`.
@@ -445,6 +449,8 @@ impl Walker {
             key_ticks: 0,
             shots: 0,
             ticks: 0,
+            friends: false,
+            hold_fire: false,
         })
     }
 
@@ -540,9 +546,9 @@ impl Walker {
         Ok(())
     }
 
-    /// One tick of the walker, a few times a second: turns toward the nearest living enemy (or away from the wall
-    /// the player is stuck on), walks, and fires when the sights are on an enemy in range. Does nothing while the
-    /// player is dead, in the killcam, or has a menu or the console up.
+    /// One tick of the walker, a few times a second: turns toward the nearest living enemy (or teammate, with
+    /// `friends`; or away from the wall the player is stuck on), walks, and fires when the sights are on an enemy in
+    /// range. Does nothing while the player is dead, in the killcam, or has a menu or the console up.
     pub fn tick(&mut self, c: &mut Driven) -> Result<(), String> {
         self.ticks += 1;
         let player = c.state("player")?;
@@ -565,12 +571,20 @@ impl Walker {
                 || e["actor"].as_bool() == Some(true)
                 || e["dead"].as_bool() == Some(true)
                 || e["client"].as_u64() == Some(own)
-                || e["team"].as_u64().is_none_or(|t| t == team)
+                || e["team"]
+                    .as_u64()
+                    .is_none_or(|t| (t == team) != self.friends)
             {
                 continue;
             }
+            // The chest: a crouched or prone player's is lower, and aiming over it never puts the sights on them.
+            let chest = match e["stance"].as_str() {
+                Some("prone") => 10.0,
+                Some("crouch") => 30.0,
+                _ => 50.0,
+            };
             let at = vec3(&e["origin"]);
-            let at = [at[0], at[1], at[2] + 50.0];
+            let at = [at[0], at[1], at[2] + chest];
             let d = dist(eye, at);
             if nearest.is_none_or(|(n, _)| d < n) {
                 nearest = Some((d, at));
@@ -610,15 +624,24 @@ impl Walker {
             pitch_err = want_pitch - angles[0];
             aim = Some((d, want_yaw, want_pitch));
         }
-        // Stop walking while lining up a nearby target. Judge alignment after the turn, against the current local
-        // input aim rather than the delayed snapshot's angles; otherwise every correction chases the last correction.
-        self.hold(c, "+forward", aim.is_none_or(|(d, _, _)| d > 900.0))?;
+        // Stop walking while lining up a nearby target. Holding fire, keep walking until an enemy is under the
+        // crosshair (`weapFlags` 0x10): the nearest enemy can be behind a wall, which only walking gets round.
+        // Judge alignment after the turn, against the current local input aim rather than the delayed snapshot's
+        // angles; otherwise every correction chases the last correction.
+        let walk = if self.hold_fire {
+            player["crosshair_flags"].as_u64().unwrap_or(0) & 0x10 == 0
+        } else {
+            aim.is_none_or(|(d, _, _)| d > 900.0)
+        };
+        self.hold(c, "+forward", walk)?;
         self.turn_by(c, yaw_err, pitch_err, angles)?;
         c.frames(2)?;
         let after = vec3(&c.state("player")?["aim_angles"]);
-        let fire = aim.is_some_and(|(d, yaw, pitch)| {
-            d < 900.0 && wrap(yaw - after[1]).abs() < 4.0 && (pitch - after[0]).abs() < 4.0
-        });
+        let fire = !self.friends
+            && !self.hold_fire
+            && aim.is_some_and(|(d, yaw, pitch)| {
+                d < 900.0 && wrap(yaw - after[1]).abs() < 4.0 && (pitch - after[0]).abs() < 4.0
+            });
         // Pulled on one tick and released on the next: a single-shot weapon fires once per pull.
         let pull = fire && !self.held.contains(&"+attack");
         self.shots += u32::from(pull);

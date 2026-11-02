@@ -123,12 +123,21 @@ impl NetPlay {
                     .iter()
                     .find(|e| e.client == hit && e.etype == net::entity::etype::PLAYER)
             {
-                // A spectator sees every name; a player on a side sees friends always and enemies in the weapon's
-                // enemy range.
-                let friend = mine != 0 && team_of(hit) == mine;
-                let in_range = (Vec3::from(e.origin) - eye).length_squared() <= range * range;
-                if mine == 3 || friend || in_range {
+                // `CG_ScanForCrosshairEntity` (KisakCOD `cg_draw_mp.cpp:324-402`; the same in the 1.7 binary): a
+                // spectator names whoever is hit. A player on a side compares the team of the *previous* crosshair
+                // player (`crosshairClientNum`) with their own: the same side marks a friend (bit 8), otherwise the
+                // hit is an enemy, marked (0x10) only within the weapon's enemy range; out of it the scan stops and
+                // the crosshair player stays as it was.
+                if mine != 3 {
+                    if mine != 0 && team_of(self.crosshair_client) == mine {
+                        scan.weap_flags = sim::pm::wf::FRIEND_IN_CROSSHAIR;
+                    } else if (Vec3::from(e.origin) - eye).length_squared() <= range * range {
+                        scan.weap_flags = sim::pm::wf::ENEMY_IN_CROSSHAIR;
+                    }
+                }
+                if mine == 3 || scan.weap_flags != 0 {
                     scan.crosshair = Some(hit);
+                    self.crosshair_client = hit;
                 }
             }
         }

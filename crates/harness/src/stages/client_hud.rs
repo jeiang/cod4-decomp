@@ -4,10 +4,14 @@
 //! stage picks a team and a class with the pointer, walks and aims with the keys and the mouse ([`Walker`]), changes
 //! class from the in-game menu while alive (the stock `_menus.gsc` answers with a bare-key bold message, which must
 //! come out localized), types a chat line, calls a vote and adds bots through the console, puts the night vision
-//! goggles on and off with the action slot 1 bind, holds the scoreboard up with the Tab bind, throws a grenade with
-//! its key, waits for a message window to have a line up and for a bot to kill it (the killcam), comes back from the
-//! dead, and plays on until it has had a bot in its sights and fired. What the HUD got to show over the run
-//! (`hud.stats` of the state document, the counters `hud_draw` of `ui-script.json` held) is the verdict: the
+//! goggles on and off with the action slot 1 bind, holds the scoreboard up with the Tab bind (it opens centred on the
+//! viewer's row and a wheel notch moves it `cg_scoreboardScrollStep` lines), cooks a grenade with its
+//! key (the crosshair's centre dot must grow with the fuse) and throws it, waits for a message window to have a line
+//! up, has an enemy bot put beside it kill it (the killcam, through the bot's eyes with the body in sight), comes back
+//! from the dead, plays on until it has had a bot in its sights and fired, then holds its sights on an enemy and on a
+//! teammate until the crosshair takes each one's team colour.
+//! What the HUD got to show over the run (`hud.stats` of the state document, the counters `hud_draw` of
+//! `ui-script.json` held) is the verdict: the
 //! scoreboard must have listed the players, the message windows must have drawn lines, the script hud elements must
 //! have arrived, the goggles must have drawn their overlay and d-pad icon (and the frame with them on must show the
 //! overlay over the world with the HUD still above it), the killcam must have played behind the body with its skip
@@ -62,6 +66,35 @@ const NV_HALVES: [(&str, Frac); 4] = [
     ("top", (0.0, 0.0, 1.0, 0.5)),
     ("bottom", (0.0, 0.5, 1.0, 1.0)),
 ];
+
+/// The viewer's place among their team's scoreboard rows, 1 first (`CenterViewOnClient`'s `clientLine`), from the
+/// state document's `hud.live`. A spectator has none: the list always opens at the top for them.
+fn viewer_line(live: &Value) -> Result<usize, String> {
+    let own = live["own"].as_u64();
+    let team = live["own_team"].as_u64();
+    if team == Some(3) || team.is_none() {
+        return Err(format!(
+            "the viewer is on no team ({team:?}): nothing to centre on"
+        ));
+    }
+    let rows = live["score_rows"]
+        .as_array()
+        .filter(|r| !r.is_empty())
+        .ok_or("the scoreboard has no rows")?;
+    Ok(1 + rows
+        .iter()
+        .filter(|r| r[1].as_u64() == team)
+        .take_while(|r| r[0].as_u64() != own)
+        .count())
+}
+
+/// A `cg_scoreboardHeight` whose panel holds `view_max` rows under the first banner at the stock item and banner
+/// heights: the panel less its 3 + 2 + 14 bottom and 3 + 2 + 24 + 1 + 1 top, the banner, one row and 4 of air, in
+/// 18 + 4 steps (`CenterViewOnClient`), mid-step.
+fn scoreboard_height(view_max: usize) -> usize {
+    19 + 31 + 35 + 18 + 4 + 22 * view_max + 11
+}
+
 /// Rows each side of a row whose mean the ripple is measured from.
 const NV_RADIUS: usize = 4;
 /// The least gain, as a share of the half's mean luma, after twice the ripple's own change between the two
@@ -163,6 +196,96 @@ fn night_vision_view(dir: &std::path::Path) -> Result<NvView, String> {
     Ok(nv_measure(w, h, &off, &still, &on))
 }
 
+/// The crosshair colour steps, once the server has `sv_cheats` on: waits for the client to take it, puts the
+/// player in `god` mode, then holds the sights on an enemy, on an enemy with `cg_crosshairEnemyColor 0`, and on a
+/// teammate.
+fn crosshair_colours(c: &mut Driven, w: &mut Walker) -> Result<(), String> {
+    c.step("crosshair cheats", |c| {
+        let end = Instant::now() + Duration::from_secs(15);
+        while c.ask(json!({"cmd": "cvar", "name": "sv_cheats"}))?["value"] != "1" {
+            if Instant::now() > end {
+                return Err("the client never took sv_cheats 1 from the server".to_owned());
+            }
+            c.pause(Duration::from_millis(250))?;
+        }
+        c.ask(json!({"cmd": "exec", "line": "god"})).map(|_| ())
+    })?;
+    // Held fire keeps an enemy alive under the sights through the fade-in; `god` keeps the player alive.
+    w.hold_fire = true;
+    c.step("crosshair over an enemy", |c| {
+        let theirs = c.lookup("hud.stats.crosshair_team_tints.1")?;
+        w.drive_until(
+            c,
+            json!({"hud.stats.crosshair_enemy_tints": {"contains": theirs}}),
+            Duration::from_secs(100),
+            "the crosshair never took the enemy team's colour over an enemy",
+        )?;
+        c.capture("crosshair_enemy").map(|_| ())
+    })?;
+    // `cg_crosshairEnemyColor 0` keeps the reticle white over an enemy held past the fade-in.
+    c.step("crosshair enemy colour off", |c| enemy_colour_off(c, w))?;
+    c.step("crosshair over a teammate", |c| {
+        let mine = c.lookup("hud.stats.crosshair_team_tints.0")?;
+        w.friends = true;
+        let r = w.drive_until(
+            c,
+            json!({"hud.stats.crosshair_friend_tints": {"contains": mine}}),
+            Duration::from_secs(100),
+            "the crosshair never took the player's team colour over a teammate",
+        );
+        w.friends = false;
+        r?;
+        c.capture("crosshair_friend").map(|_| ())
+    })
+}
+
+/// With `sv_cheats` on at the server: waits for the client to take it, sets `cg_crosshairEnemyColor 0` through the
+/// console, then drives onto an enemy in range until the reticle has been due a tint for a second's worth of
+/// frames, every one of which must have been white.
+fn enemy_colour_off(c: &mut Driven, w: &mut Walker) -> Result<(), String> {
+    let end = Instant::now() + Duration::from_secs(15);
+    loop {
+        let set = c.ask(json!({"cmd": "cvar", "name": "cg_crosshairEnemyColor", "value": "0"}))?;
+        if set["value"] == "0" {
+            break;
+        }
+        if Instant::now() > end {
+            return Err(format!(
+                "cg_crosshairEnemyColor stayed {} after the server turned sv_cheats on",
+                set["value"]
+            ));
+        }
+        c.pause(Duration::from_millis(250))?;
+    }
+    // Both counters from the same state document: two reads would let frames land between them.
+    let counts = |c: &mut Driven| -> Result<(u64, u64), String> {
+        let s = c.ask(json!({"cmd": "state"}))?;
+        let n = |k: &str| s["hud"]["stats"][k].as_u64().unwrap_or(0);
+        Ok((
+            n("crosshair_enemy_due_frames"),
+            n("crosshair_enemy_due_white_frames"),
+        ))
+    };
+    let (due, white) = counts(c)?;
+    w.drive_until(
+        c,
+        json!({"hud.stats.crosshair_enemy_due_frames": {"gt": due + 60}}),
+        Duration::from_secs(150),
+        "the crosshair was never held on an enemy past the fade-in with cg_crosshairEnemyColor 0",
+    )?;
+    c.capture("crosshair_enemy_white")?;
+    let (due, white) = {
+        let (d, wh) = counts(c)?;
+        (d - due, wh - white)
+    };
+    if white != due {
+        return Err(format!(
+            "with cg_crosshairEnemyColor 0 the crosshair over an enemy was white on {white} of {due} frames"
+        ));
+    }
+    Ok(())
+}
+
 /// What is wrong with the HUD of a finished run, or `None`.
 pub(crate) fn verdict(report: &Value) -> Option<String> {
     if let Some(w) = steps_problem(report) {
@@ -222,6 +345,27 @@ pub(crate) fn verdict(report: &Value) -> Option<String> {
         bad.push("the crosshair was never on a player in range, so none was ever named");
     } else if n("crosshair_name_frames") == 0 {
         bad.push("the crosshair was on a player but never named them");
+    }
+    // The crosshair's tint (#414): white, or the colour of the team of the player it is on, never another.
+    fn strs(v: &Value) -> Vec<&str> {
+        v.as_array()
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default()
+    }
+    let team = strs(&h["crosshair_team_tints"]);
+    let only = |k: &str, i: usize| {
+        strs(&h[k])
+            .iter()
+            .all(|t| *t == "1.000 1.000 1.000" || team.get(i) == Some(t))
+    };
+    if !only("crosshair_friend_tints", 0) {
+        bad.push("the crosshair over a teammate was drawn in a colour other than white or the player's team's");
+    }
+    if !only("crosshair_enemy_tints", 1) {
+        bad.push("the crosshair over an enemy was drawn in a colour other than white or the enemy team's");
+    }
+    if n("crosshair_stray_tint_frames") > 0 {
+        bad.push("the crosshair was tinted with no player under it");
     }
     // The killcam shows the viewer's own body, which carries the "you" marker over its head.
     let marked = h["head_icon_materials"]
@@ -356,10 +500,48 @@ fn command_frame(c: &mut Driven, slot: u64, empty: bool, right: bool) -> Result<
     ))
 }
 
-/// Exercise queued and retained player input through the real UDP path, independent of rendering throughput.
+/// Frames the client drew per second over `window`, by its own frame counter.
+fn frame_rate(c: &mut Driven, window: Duration) -> Result<f64, String> {
+    let count = |c: &mut Driven| {
+        c.lookup("client.frames")?
+            .as_u64()
+            .ok_or_else(|| "no client.frames".to_owned())
+    };
+    let (f0, t0) = (count(c)?, Instant::now());
+    c.pause(window)?;
+    Ok(count(c)?.saturating_sub(f0) as f64 / t0.elapsed().as_secs_f64())
+}
+
+/// The first rate over `window` of at least `want` frames a second, measured again until `limit` has passed (`Ok`), or
+/// the best rate seen (`Err`). A busy host (another slot's release build) slows every frame for a while, whatever the
+/// present mode: a slot run at a few frames a second drew as few with `Immediate` as with `Fifo` (#499).
+fn reach_frame_rate(
+    c: &mut Driven,
+    want: f64,
+    window: Duration,
+    limit: Duration,
+) -> Result<Result<f64, f64>, String> {
+    let start = Instant::now();
+    let mut best = 0.0f64;
+    loop {
+        let rate = frame_rate(c, window)?;
+        if rate >= want {
+            return Ok(Ok(rate));
+        }
+        best = best.max(rate);
+        if start.elapsed() >= limit {
+            return Ok(Err(best));
+        }
+    }
+}
+
+/// Exercise queued and retained player input through the real UDP path, independent of rendering throughput. The
+/// step's `vid_restart` back to the player's `r_vsync` must give the frame rate back too, as stock `vid_restart` does
+/// (#499): at least half the rate measured before the step, within 15 s.
 fn synchronous_commands(c: &mut Driven, notes: &mut Vec<String>) -> Result<(), String> {
     let fps = c.ask(json!({"cmd": "cvar", "name": "com_maxfps"}))?["value"].clone();
     let vsync = c.ask(json!({"cmd": "cvar", "name": "r_vsync"}))?["value"].clone();
+    let before = frame_rate(c, Duration::from_secs(1))?;
     let sync =
         c.ask(json!({"cmd": "server", "op": "cvar", "name": "g_synchronousClients"}))?["value"]
             .clone();
@@ -406,7 +588,26 @@ fn synchronous_commands(c: &mut Driven, notes: &mut Vec<String>) -> Result<(), S
     c.ask(json!({"cmd": "cvar", "name": "r_vsync", "value": vsync}))?;
     c.console("vid_restart")?;
     c.ask(json!({"cmd": "server", "op": "cvar", "name": "g_synchronousClients", "value": sync}))?;
-    result
+    result?;
+    let vsync = vsync.as_str().unwrap_or("?");
+    match reach_frame_rate(
+        c,
+        before / 2.0,
+        Duration::from_secs(1),
+        Duration::from_secs(15),
+    )? {
+        Ok(after) => {
+            notes.push(format!(
+                "frame rate around the synchronous step: {before:.0} a second before, {after:.0} after vid_restart \
+                 put r_vsync {vsync} back"
+            ));
+            Ok(())
+        }
+        Err(best) => Err(format!(
+            "after vid_restart put r_vsync {vsync} back the client drew at most {best:.1} frames a second in 15 s, \
+             against {before:.1} before the step"
+        )),
+    }
 }
 
 /// The crosshair opacity seen per predicted weapon state during one keyed action.
@@ -448,11 +649,23 @@ fn state_frames(c: &mut Driven) -> Result<Vec<[u64; 2]>, String> {
 /// polling gap on a busy host to miss (#494). So besides the polled samples it diffs the client's per-frame counts
 /// of the drop and raise states (1-4), which see every drawn frame. Also returns the trace of every polled sample
 /// whose facts changed (ms since the notch, the snapshot's `weapon_index` and `weapon_state`, the predicted
-/// `visual_weapon_state` and `crosshair_alpha`) and the counted frames per state.
+/// `visual_weapon_state` and `crosshair_alpha`) and the counted frames per state. At a few frames a second the whole
+/// switch falls inside one frame's prediction and is never drawn, so the notch waits (up to 30 s) for the client to
+/// draw twenty a second, about ten frames of the switch: a busy host slows every frame for a while (#499).
 fn sample_weapon_switch(
     c: &mut Driven,
     until: Duration,
 ) -> Result<(Vec<(u64, f64)>, String), String> {
+    let rate = match reach_frame_rate(c, 20.0, Duration::from_millis(500), Duration::from_secs(30))?
+    {
+        Ok(rate) => rate,
+        Err(best) => {
+            return Err(format!(
+                "the client drew at most {best:.1} frames a second for 30 s, too few to draw a half-second weapon \
+                 switch"
+            ));
+        }
+    };
     let counted = state_frames(c)?;
     let start = Instant::now();
     c.ask(json!({"cmd": "wheel", "y": 1.0}))?;
@@ -508,7 +721,7 @@ fn sample_weapon_switch(
     Ok((
         seen,
         format!(
-            "{samples} samples: {}; {total} frames drawn in {} ms: {}",
+            "{samples} samples at {rate:.0} frames a second before the notch: {}; {total} frames drawn in {} ms: {}",
             trace.join(", "),
             start.elapsed().as_millis(),
             frames.join(", ")
@@ -576,6 +789,77 @@ fn crosshair_states(c: &mut Driven) -> Result<String, String> {
         )?;
     }
     Ok(format!("crosshair weapnext switch: {switch}"))
+}
+
+/// Where an enemy bot is put around the living player for the killcam's kill, tried in turn: east, west, north,
+/// south of them, near enough that the bot sees and turns to them.
+const KILLCAM_SIDES: [(f64, f64); 4] = [(120.0, 0.0), (-120.0, 0.0), (0.0, 120.0), (0.0, -120.0)];
+/// Time the bot is given to see the player and turn to them: its reaction is at most 600 ms and it turns at least
+/// 420 degrees a second (`server/src/bot.rs`).
+const KILLCAM_AIM: Duration = Duration::from_secs(2);
+
+/// Has an enemy bot kill the player in front of it, so the killcam that follows replays the kill through eyes that
+/// have the body in sight, and returns while that killcam is up with the viewer's body seen. Left to the match, a
+/// bot may not find the player before it ends (#494: no kill in 300 s). The bot is put beside the player with its
+/// own play on (`bot_idle 0`), so it turns to them, and then kills them with its rifle (`devkill`, as `net-killcam`
+/// and `web-match` do; a kill it makes first does as well). The stock `_killcam.gsc` plays the killcam. A side
+/// with a wall between the two leaves the body out of sight: the next side is tried after the respawn, and when no
+/// killcam showed the body, the step fails.
+fn killcam_kill(c: &mut Driven) -> Result<(), String> {
+    use super::client_hud_compass::{enemy_bot, exec, server_client};
+    let secs = Duration::from_secs;
+    let enemy = match c.lookup("player.team")?.as_u64() {
+        Some(1) => 2,
+        Some(2) => 1,
+        t => return Err(format!("the player is on no team ({t:?})")),
+    };
+    let me = c
+        .lookup("player.client")?
+        .as_u64()
+        .ok_or("the player has no client slot")?;
+    exec(c, "set bot_idle 0")?;
+    let mut tried = Vec::new();
+    for (dx, dy) in KILLCAM_SIDES {
+        c.until(
+            json!({"player.alive": true, "hud.live.killcam": false, "hud.live.dead": false}),
+            secs(60),
+            "the player was not alive to be killed",
+        )?;
+        let you0 = stat(c, "hud.stats.killcam_you_frames")?;
+        let person = server_client(c, me)?;
+        let at = |i: usize| person["origin"][i].as_f64().unwrap_or(0.0);
+        let bot = enemy_bot(c, enemy)?;
+        exec(
+            c,
+            &format!("devtele {bot} {} {} {}", at(0) + dx, at(1) + dy, at(2)),
+        )?;
+        c.pause(KILLCAM_AIM)?;
+        if server_client(c, me)?["alive"] == json!(true) {
+            exec(c, &format!("devkill {me} {bot}"))?;
+        }
+        c.until(
+            json!({"hud.live.killcam": true}),
+            secs(30),
+            "no killcam started after the bot's kill",
+        )?;
+        // Up while the replay plays: done once it has the body in sight, the next side once it is over without.
+        let end = Instant::now() + secs(30);
+        loop {
+            let hud = c.state("hud")?;
+            if hud["stats"]["killcam_you_frames"].as_u64().unwrap_or(0) > you0 {
+                return Ok(());
+            }
+            if hud["live"]["killcam"] != json!(true) || Instant::now() > end {
+                tried.push(format!("bot {bot} at ({dx}, {dy})"));
+                break;
+            }
+            c.frames(1)?;
+        }
+    }
+    Err(format!(
+        "no killcam showed the viewer's body for the you marker; killed by {}",
+        tried.join(", ")
+    ))
 }
 
 /// The match, step by step. Every step goes through the channel: a failure names the step and what was observed.
@@ -814,7 +1098,8 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
         Ok(())
     })?;
 
-    // A grenade thrown with its key: the count on the HUD drops once the throw is out.
+    // A grenade cooked and thrown with its key: while it cooks the crosshair's centre dot grows with the fuse
+    // (`CG_DrawReticleCenter`, #419), and the count on the HUD drops once the throw is out.
     c.step("throw", |c| {
         let frag = c.lookup("hud.report.frag")?;
         let (key, before) = match (frag.as_u64(), c.lookup("hud.report.second")?.as_u64()) {
@@ -822,14 +1107,47 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
             (None, Some(n)) => ("hud.report.second", n),
             (None, None) => return Err("the HUD shows no grenade to throw".to_owned()),
         };
+        let cooked = c
+            .lookup("hud.stats.crosshair_cook_frames")?
+            .as_u64()
+            .unwrap_or(0);
         c.bind("+frag", "down")?;
-        let r = c.until(
+        // The dot is half again its size at the first cooked frame (3.5 s left); half a second of cooking shows it.
+        let cooking = c
+            .until(
+                json!({"player.grenade_time_left": {"gt": 0}, "hud.stats.crosshair_cook_frames": {"gt": cooked + 30}}),
+                secs(10),
+                "holding the grenade key cooked no grenade under a drawn crosshair",
+            )
+            .and_then(|_| c.capture("crosshair_cook").map(|_| ()));
+        if let Err(e) = cooking {
+            c.bind("+frag", "up")?;
+            return Err(e);
+        }
+        let grown = c
+            .lookup("hud.stats.crosshair_cook_growth_max")?
+            .as_f64()
+            .unwrap_or(0.0);
+        c.bind("+frag", "up")?;
+        if grown < 5.0 {
+            return Err(format!(
+                "the crosshair's centre grew by at most {grown} while the grenade cooked"
+            ));
+        }
+        c.until(
             json!({key: {"lt": before}}),
             secs(30),
             "the grenade count never dropped",
-        );
-        c.bind("+frag", "up")?;
-        r
+        )?;
+        // The cooked grenade goes off a few seconds after the throw, and one that bounces back off a wall can kill
+        // the thrower: let it go off and the player be back on their feet before the scoreboard's look checks.
+        c.pause(secs(4))?;
+        c.until(
+            json!({"hud.report.live": true, "hud.live.killcam": false, "hud.live.dead": false, "hud.report.health": {"gt": 0}}),
+            secs(120),
+            "the player did not come back after the cooked grenade",
+        )
+        .map(|_| ())
     })?;
 
     // The scoreboard held up by the Tab bind, with every player on it, and up on every frame while the key is down
@@ -863,8 +1181,9 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
             }
             c.capture("scoreboard")?;
             // The keys stay the game's while Tab is held: the down arrow looks down (`+lookdown`) and leaves the
-            // list alone; the wheel scrolls the list and goes no further, so `weapnext` on it changes no weapon
-            // (`Scoreboard_HandleInput`).
+            // list alone; the wheel scrolls the list by `cg_scoreboardScrollStep` (stock 3) lines and goes no further,
+            // so `weapnext` on it changes no weapon (`Scoreboard_HandleInput`, `CG_ScrollScoreboardDown`). Thirteen
+            // players and two banners do not fit the stock panel, so the list scrolls down from its first line.
             let top0 = c.lookup("hud.scores_top")?;
             let pitch0 = c.lookup("player.angles.0")?.as_f64().unwrap_or(0.0);
             let weapon0 = c.lookup("player.weapon")?;
@@ -881,8 +1200,11 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
             }
             c.ask(json!({"cmd": "wheel", "y": -1.0}))?;
             c.pause(Duration::from_millis(300))?;
-            if c.lookup("hud.scores_top")? == top0 {
-                return Err("the wheel did not scroll the scoreboard".to_owned());
+            let top = c.lookup("hud.scores_top")?;
+            if top.as_u64() != top0.as_u64().map(|t| t + 3) {
+                return Err(format!(
+                    "one wheel notch moved the scoreboard from line {top0} to {top}, not by the stock step of 3"
+                ));
             }
             if c.lookup("player.weapon")? != weapon0 {
                 return Err("the wheel over the scoreboard reached the binds (the weapon changed)".to_owned());
@@ -892,6 +1214,83 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
         let r = held(c);
         c.bind("+scores", "up")?;
         r
+    })?;
+
+    // Each open of the scoreboard lands on the viewer's row (`CenterViewOnClient`): with the viewer's place among
+    // their team's rows past the `viewmax` rows the panel holds, the list opens at `line - viewmax / 2 + 1`. The panel
+    // is shortened (`cg_scoreboardHeight`) so the viewer's row is just past it wherever the scores put them; then
+    // `cg_scoreboardScrollStep` sets how far a notch goes.
+    c.step("scoreboard centre", |c| {
+        let mut last = String::new();
+        let mut centred = false;
+        for _ in 0..3 {
+            let line = viewer_line(&c.ask(json!({"cmd": "state"}))?["hud"]["live"])?;
+            let view_max = line - 1;
+            c.console(&format!("set cg_scoreboardHeight {}", scoreboard_height(view_max)))?;
+            c.pause(Duration::from_millis(300))?;
+            c.bind("+scores", "down")?;
+            let up = c.until(
+                json!({"hud.scoreboard_shown": true, "hud.scores_top": {"ge": 1}}),
+                secs(10),
+                "the scoreboard did not come up on the bind",
+            );
+            let state = c.ask(json!({"cmd": "state"}));
+            c.bind("+scores", "up")?;
+            up?;
+            let state = state?;
+            let line_now = viewer_line(&state["hud"]["live"])?;
+            let top = state["hud"]["scores_top"].as_u64().unwrap_or(0) as usize;
+            let want = if line_now > view_max {
+                line_now - view_max / 2 + 1
+            } else {
+                1
+            };
+            if line_now == line && top == want {
+                centred = true;
+                break;
+            }
+            last = format!(
+                "the viewer is on line {line_now} of their team with {view_max} rows in view; the list opened at \
+                 line {top}, not {want}"
+            );
+            c.until(
+                json!({"hud.scoreboard_shown": false}),
+                secs(10),
+                "the scoreboard did not go down",
+            )?;
+        }
+        c.console("set cg_scoreboardHeight 435")?;
+        if !centred {
+            return Err(last);
+        }
+        c.until(
+            json!({"hud.scoreboard_shown": false}),
+            secs(10),
+            "the scoreboard did not go down",
+        )?;
+        c.console("set cg_scoreboardScrollStep 2")?;
+        c.pause(Duration::from_millis(300))?;
+        c.bind("+scores", "down")?;
+        let stepped = (|| -> Result<(), String> {
+            c.until(
+                json!({"hud.scoreboard_shown": true, "hud.scores_top": {"ge": 1}}),
+                secs(10),
+                "the scoreboard did not come up on the bind",
+            )?;
+            let top0 = c.lookup("hud.scores_top")?.as_u64().unwrap_or(0);
+            c.ask(json!({"cmd": "wheel", "y": -1.0}))?;
+            c.pause(Duration::from_millis(300))?;
+            let top = c.lookup("hud.scores_top")?.as_u64().unwrap_or(0);
+            if top != top0 + 2 {
+                return Err(format!(
+                    "with cg_scoreboardScrollStep 2 one wheel notch moved the scoreboard from line {top0} to {top}"
+                ));
+            }
+            Ok(())
+        })();
+        c.bind("+scores", "up")?;
+        c.console("set cg_scoreboardScrollStep 3")?;
+        stepped
     })?;
 
     // From here the stage's player walks and fights, so that bots come into sight and one of them gets the kill.
@@ -906,14 +1305,7 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
         c.capture("feed").map(|_| ())
     })?;
     c.step("killcam", |c| {
-        // A replay can start with the victim behind a wall. Keep playing until a killcam actually offers the body
-        // to the "you" marker rather than ending the run at the first replay regardless of what it showed.
-        w.drive_until(
-            c,
-            json!({"hud.live.killcam": true, "hud.stats.killcam_you_frames": {"gt": 0}}),
-            secs(300),
-            "no killcam showed the viewer's body for the you marker",
-        )?;
+        killcam_kill(c)?;
         c.capture("killcam_first")?;
         c.pause(secs(1))?;
         c.capture("killcam_next")?;
@@ -938,21 +1330,76 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
     // kill), which can come before the walker met anyone (#464): keep playing until it has had a bot in its sights,
     // so the check fails only when aiming and firing do not work.
     c.step("fire", |c| {
-        let end = Instant::now() + secs(120);
-        while w.shots == 0 {
-            if Instant::now() > end {
-                w.stop(c)?;
-                return Err(format!(
-                    "the stage's player never fired in {} ticks (turned with {})",
-                    w.ticks,
-                    w.turning()
-                ));
-            }
-            c.pause(Duration::from_millis(150))?;
-            w.tick(c)?;
+        // A bot left to the match may never come into sight before the timeout (#494). Put a live enemy 200 units
+        // along the player's view and hold it still, so this step measures the walker's aiming and trigger pull,
+        // not whether the match offered a target. The walker still has to turn onto the bot and fire itself.
+        if w.shots == 0 {
+            use super::client_hud_compass::{enemy_bot, exec, server_client};
+            let enemy = match c.lookup("player.team")?.as_u64() {
+                Some(1) => 2,
+                Some(2) => 1,
+                t => return Err(format!("the player is on no team ({t:?})")),
+            };
+            let me = c
+                .lookup("player.client")?
+                .as_u64()
+                .ok_or("the player has no client slot")?;
+            let person = server_client(c, me)?;
+            let at = |i: usize| person["origin"][i].as_f64().unwrap_or(0.0);
+            let angles = c.lookup("player.aim_angles")?;
+            let yaw = angles[1].as_f64().unwrap_or(0.0).to_radians();
+            let bot = enemy_bot(c, enemy)?;
+            exec(c, "set bot_idle 1")?;
+            exec(
+                c,
+                &format!(
+                    "devtele {bot} {} {} {}",
+                    at(0) + 200.0 * yaw.cos(),
+                    at(1) + 200.0 * yaw.sin(),
+                    at(2)
+                ),
+            )?;
         }
-        w.stop(c)
+        let end = Instant::now() + secs(60);
+        let result = (|| {
+            while w.shots == 0 {
+                if Instant::now() > end {
+                    w.stop(c)?;
+                    return Err(format!(
+                        "the stage's player never fired in {} ticks (turned with {})",
+                        w.ticks,
+                        w.turning()
+                    ));
+                }
+                c.pause(Duration::from_millis(150))?;
+                w.tick(c)?;
+            }
+            w.stop(c)
+        })();
+        super::client_hud_compass::exec(c, "set bot_idle 0")?;
+        result
     })?;
+    // The crosshair over a player takes their team's colour (`CG_CalcCrosshairColor`, #414). The colour steps run
+    // with `sv_cheats` on at the listen server (forced, as `devmap` sets it; the client takes it from the
+    // systeminfo) and the player in `god` mode, so the walker's sights stay on players rather than on killcams.
+    let cheats = c.ask(json!({"cmd": "server", "op": "cvar", "name": "sv_cheats"}))?["value"]
+        .as_str()
+        .unwrap_or("0")
+        .to_owned();
+    let force = |c: &mut Driven, v: &str| {
+        c.ask(
+            json!({"cmd": "server", "op": "cvar", "name": "sv_cheats", "value": v, "force": true}),
+        )
+    };
+    force(c, "1")?;
+    let r = crosshair_colours(c, w);
+    w.hold_fire = false;
+    let restored = c
+        .ask(json!({"cmd": "cvar", "name": "cg_crosshairEnemyColor", "value": "1"}))
+        .and_then(|_| c.ask(json!({"cmd": "exec", "line": "god"})))
+        .and_then(|_| force(c, &cheats));
+    r?;
+    restored?;
     notes.push(format!(
         "the stage's player turned with {}; {} ticks, {} shots",
         w.turning(),
@@ -1126,6 +1573,19 @@ mod tests {
         let why = verdict(&r).unwrap();
         assert!(
             why.contains("no teammate was ever in sight") && why.contains("never on a player"),
+            "{why}"
+        );
+        // The crosshair tinted in the wrong team's colour, or with nobody under it.
+        let mut r = good();
+        r["hud_draw"]["crosshair_team_tints"] = json!(["0.400 0.600 0.850", "0.750 0.250 0.250"]);
+        r["hud_draw"]["crosshair_friend_tints"] = json!(["1.000 1.000 1.000", "0.400 0.600 0.850"]);
+        r["hud_draw"]["crosshair_enemy_tints"] = json!(["0.750 0.250 0.250"]);
+        assert_eq!(verdict(&r), None);
+        r["hud_draw"]["crosshair_enemy_tints"] = json!(["0.400 0.600 0.850"]);
+        r["hud_draw"]["crosshair_stray_tint_frames"] = json!(3);
+        let why = verdict(&r).unwrap();
+        assert!(
+            why.contains("over an enemy") && why.contains("no player under it"),
             "{why}"
         );
         let mut r = good();

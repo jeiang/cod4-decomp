@@ -61,6 +61,8 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     // time, the blood limit, team-only chat, no console printing and the window position.
     ("cg_crosshairAlpha", "1", true),
     ("cg_crosshairAlphaMin", "0.5", true),
+    // `cg_crosshairEnemyColor` (cheat, archived; `cg_main_mp.cpp:666`): an enemy under the crosshair tints it.
+    ("cg_crosshairEnemyColor", "1", true),
     ("cg_centertime", "3", false),
     ("cg_bloodLimit", "0", true),
     ("cg_bloodLimitMsec", "330", true),
@@ -222,6 +224,7 @@ const CHEAT: &[(&str, &str)] = &[
     ("clientSideEffects", "1"),
     ("cg_crosshairAlpha", "1"),
     ("cg_crosshairAlphaMin", "0.5"),
+    ("cg_crosshairEnemyColor", "1"),
     ("cg_centertime", "3"),
     ("r_brightness", "0"),
     ("r_contrast", "1"),
