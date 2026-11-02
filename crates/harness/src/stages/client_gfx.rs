@@ -155,9 +155,12 @@ shot=laser-off,set=set cg_laserLight 1,wait=1,gfxis=postlights 1+,shot=laser-on,
 /// Share of pixels a light must brighten, and by how much (of 255, in luma).
 const LIT_SHARE: f64 = 0.05;
 const LIT_STEP: i32 = 24;
-/// Pixels a laser sight's post light must brighten where it strikes, and by how much (of 255, in luma): the light is
-/// a few units wide, so a small patch.
-const LASER_LIT_PIXELS: usize = 30;
+/// Where a test laser aimed along the view strikes the garage floor, as fractions of the picture (x from, x to, y from,
+/// y to, y down): just below the crosshair, clear of the gun and the HUD, which move between frames on their own.
+const LASER_STRIKE: [f64; 4] = [0.45, 0.55, 0.45, 0.6];
+/// Share of [`LASER_STRIKE`]'s pixels the laser's post light must brighten, and by how much (of 255, in luma): the
+/// light is a few units wide, so a patch of it (measured about 7%, and nothing without the light).
+const LASER_LIT_SHARE: f64 = 0.015;
 const LASER_LIT_STEP: i32 = 8;
 /// How much brighter (in luma) the picture at `r_gamma` 2 must be than at 0.5.
 const GAMMA_STEP: f64 = 20.0;
@@ -204,8 +207,8 @@ fn dynamic_light_lit(dir: &std::path::Path) -> Result<(), String> {
 }
 
 /// A laser sight with `cg_laserLight` on lights what it strikes (`gfx_laser_light`, #516): the frame with the post light
-/// brightens a patch of the floor the laser points at, in the middle third of the picture (the laser runs along the
-/// view), against the same laser with `cg_laserLight` off. Returns the pixels it brightened.
+/// brightens a patch of the floor where the laser strikes ([`LASER_STRIKE`]) against the same laser with
+/// `cg_laserLight` off. Returns the pixels it brightened.
 fn laser_light_lit(dir: &std::path::Path) -> Result<usize, String> {
     use super::client_models::decode;
     let (w, h, off) = decode(&dir.join("laser-off.png"))?;
@@ -213,23 +216,24 @@ fn laser_light_lit(dir: &std::path::Path) -> Result<usize, String> {
     if (w, h) != (w2, h2) {
         return Err("laser light screenshots differ in size".into());
     }
-    let lit = brightened(
-        &middle_third(w as usize, h as usize, &off),
-        &middle_third(w as usize, h as usize, &on),
-        LASER_LIT_STEP,
-    );
-    if lit < LASER_LIT_PIXELS {
+    let (w, h) = (w as usize, h as usize);
+    let off = crop(w, h, &off, LASER_STRIKE);
+    let lit = brightened(&off, &crop(w, h, &on, LASER_STRIKE), LASER_LIT_STEP);
+    let need = (LASER_LIT_SHARE * (off.len() / 3) as f64).ceil() as usize;
+    if lit < need {
         return Err(format!(
-            "a laser sight's post light brightened {lit} pixels where it struck (need {LASER_LIT_PIXELS})"
+            "a laser sight's post light brightened {lit} pixels where it struck (need {need})"
         ));
     }
     Ok(lit)
 }
 
-/// The middle third (each way) of a packed RGB picture.
-fn middle_third(w: usize, h: usize, px: &[u8]) -> Vec<u8> {
-    (h / 3..2 * h / 3)
-        .flat_map(|y| &px[(y * w + w / 3) * 3..(y * w + 2 * w / 3) * 3])
+/// The pixels of a packed RGB picture inside `[x from, x to, y from, y to]`, as fractions of its size.
+fn crop(w: usize, h: usize, px: &[u8], [x0, x1, y0, y1]: [f64; 4]) -> Vec<u8> {
+    let at = |f: f64, n: usize| (f * n as f64) as usize;
+    let (x0, x1) = (at(x0, w), at(x1, w));
+    (at(y0, h)..at(y1, h))
+        .flat_map(|y| &px[(y * w + x0) * 3..(y * w + x1) * 3])
         .copied()
         .collect()
 }
@@ -398,7 +402,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
 
 #[cfg(test)]
 mod tests {
-    use super::{brightened_share, mean_luma, middle_third, white_share};
+    use super::{brightened_share, crop, mean_luma, white_share};
 
     #[test]
     fn white_share_counts_the_middle_third_only() {
@@ -422,9 +426,12 @@ mod tests {
     }
 
     #[test]
-    fn middle_third_keeps_the_centre_block_only() {
-        // 3x3 pixels, each its own index.
-        let px: Vec<u8> = (0..9u8).flat_map(|i| [i; 3]).collect();
-        assert_eq!(middle_third(3, 3, &px), vec![4, 4, 4]);
+    fn crop_keeps_the_pixels_inside_its_fractions() {
+        // 4x3 pixels, each its own index: columns 1..3 of row 1.
+        let px: Vec<u8> = (0..12u8).flat_map(|i| [i; 3]).collect();
+        assert_eq!(
+            crop(4, 3, &px, [0.25, 0.75, 0.34, 0.67]),
+            vec![5, 5, 5, 6, 6, 6]
+        );
     }
 }
