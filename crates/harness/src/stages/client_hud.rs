@@ -246,7 +246,34 @@ fn hold_on_placed(
         w.target = None;
         match r {
             Ok(_) => return Ok(()),
-            Err(e) => tried.push(format!("bot {bot} at {off} degrees, {reach} units: {e}")),
+            Err(e) => {
+                // What the client and the server had at the end: the placed bot as the snapshot carried it, the
+                // player's aim and crosshair bits, and the bot as the server has it.
+                let ents = c.state("entities")?;
+                let seen = ents["list"]
+                    .as_array()
+                    .and_then(|l| {
+                        l.iter()
+                            .find(|e| e["kind"] == "player" && e["client"].as_u64() == Some(bot))
+                    })
+                    .map(|e| {
+                        json!({"origin": e["origin"], "team": e["team"], "dead": e["dead"],
+                            "stance": e["stance"], "actor": e["actor"]})
+                    });
+                let p = c.state("player")?;
+                let server = server_client(c, bot)?;
+                tried.push(format!(
+                    "bot {bot} at {off} degrees, {reach} units: {e}; client sees bot {seen:?}; player origin {} \
+                     aim {} crosshair flags {} client {}; server bot origin {} alive {} team {}",
+                    p["origin"],
+                    p["aim_angles"],
+                    p["crosshair_flags"],
+                    p["crosshair_client"],
+                    server["origin"],
+                    server["alive"],
+                    server["team"]
+                ));
+            }
         }
     }
     Err(tried.join("; "))
