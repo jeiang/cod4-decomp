@@ -227,6 +227,13 @@ impl NetPlay {
             "watch" => watch(self),
             // The vision channels, the blend under way and the last goggles switch (`look::Look::report`).
             "look" => self.look.report(),
+            // The local voice: frames sent to the server so far, whether the microphone is open, and why it could not
+            // be (`null` once the console took the note, or when it never failed).
+            "voice" => json!({
+                "sent": self.talker.sent,
+                "mic_open": self.talker.mic_open(),
+                "note": self.talker.note,
+            }),
             _ => Value::Null,
         }
     }

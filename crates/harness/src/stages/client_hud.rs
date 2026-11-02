@@ -1408,6 +1408,41 @@ fn play(
         )?;
         Ok(())
     })?;
+    // Holding `+talk` sends the microphone (`CL_VoiceFrame`): on the Linux test host's slots scripts/virtual-audio.sh
+    // gives the client a 440 Hz test-tone microphone (#488) and says so with COD4E_TEST_MIC.
+    c.step("voice capture", |c| {
+        if std::env::var_os("COD4E_TEST_MIC").is_none() {
+            notes.push(
+                "voice capture untested: no test microphone (COD4E_TEST_MIC unset; #488)".into(),
+            );
+            return Ok(());
+        }
+        let before = stat(c, "voice.sent")?;
+        c.bind("+talk", "down")?;
+        // Half a second of speech: 25 of the 20 ms frames (`net::voice::FRAME_SAMPLES` at 8 kHz).
+        let sent = c.until(
+            json!({"voice.mic_open": true, "voice.sent": {"ge": before + 25}}),
+            secs(10),
+            "holding +talk sent no voice frames from the test microphone",
+        );
+        c.bind("+talk", "up")?;
+        sent?;
+        // Released, nothing more is sent (the microphone stays open for a while, its audio thrown away).
+        c.pause(Duration::from_millis(300))?;
+        let up = stat(c, "voice.sent")?;
+        c.pause(secs(1))?;
+        let later = stat(c, "voice.sent")?;
+        if later != up {
+            return Err(format!(
+                "voice frames went on after +talk was released ({up} -> {later})"
+            ));
+        }
+        notes.push(format!(
+            "voice: {} frames sent while +talk was held",
+            up - before
+        ));
+        Ok(())
+    })?;
     // A vote called, bots counted and added through the console.
     c.step("callvote", |c| {
         c.console("callvote kick bot5")?;

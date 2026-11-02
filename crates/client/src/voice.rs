@@ -32,6 +32,11 @@ pub struct Talker {
 }
 
 impl Talker {
+    /// Whether the microphone is open now.
+    pub fn mic_open(&self) -> bool {
+        self.mic.is_some()
+    }
+
     /// Takes what the microphone heard since the last call. The microphone is open while `talking` (the talk key held
     /// with voice on) or while the record meter is shown (`metering`): stock records whenever its UI runs
     /// (`CL_VoiceFrame`, `Voice_GetLocalVoiceData`), which only the meter can see, so this opens it only then. Each

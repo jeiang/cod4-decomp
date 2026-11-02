@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Usage: scripts/virtual-display.sh <slot> -- <cmd...>
 # Runs <cmd> inside a private headless sway compositor (one 1920x1080@60 output, Xwayland on) so harness slots on
-# the Linux host each get their own display. The compositor renders on the host GPU; audio still goes to the host's
-# PipeWire. The compositor and its runtime dir are removed on exit; the exit status is <cmd>'s.
+# the Linux host each get their own display. The compositor renders on the host GPU; the host's PipeWire stays named
+# for audio unless scripts/virtual-audio.sh (inside this) gives the run its own server. The compositor and its
+# runtime dir are removed on exit; the exit status is <cmd>'s.
 set -euo pipefail
 slot=${1:?usage: virtual-display.sh <slot> -- <cmd...>}
 shift

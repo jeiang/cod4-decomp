@@ -5,8 +5,9 @@
 # workspace and, unless --no-checks, runs test/clippy/fmt. With `--` it then runs `cod4e-harness run --out bundles
 # <options>` (a bare `--` runs the default suite); with --exec it runs <command...> instead, with the release
 # binaries on PATH, writing into out/.
-# COD4E_SLOT=1..3 selects a harness slot: its own target dir, headless display (scripts/virtual-display.sh) and
-# loopback-only network namespace (scripts/netns.sh). Every run holds the host-wide stage lock shared from its build
+# COD4E_SLOT=1..3 selects a harness slot: its own target dir, headless display (scripts/virtual-display.sh), sound
+# server with a test-tone microphone (scripts/virtual-audio.sh) and loopback-only network namespace
+# (scripts/netns.sh). Every run holds the host-wide stage lock shared from its build
 # on, so up to three slot runs work at once. Without a slot the run is serial: after its build it holds the stage lock
 # exclusively, so timing-gated stages see a quiet host (no stage and no compile beside them), and runs on its own
 # headless display like a slot (the desktop session's state cannot stall its windows). A pending serial run
@@ -104,7 +105,7 @@ fi
 [ $run = 1 ] || exit 0
 
 slot_wrap() {
-  scripts/virtual-display.sh "$COD4E_SLOT" -- scripts/netns.sh -- "$@"
+  scripts/virtual-display.sh "$COD4E_SLOT" -- scripts/virtual-audio.sh "$COD4E_SLOT" -- scripts/netns.sh -- "$@"
 }
 
 if [ $exec_mode = 1 ]; then
@@ -135,6 +136,6 @@ else
   trap clear_pending EXIT
   take_lock -x 8 "exclusive stage lock (serial run)"
   # shellcheck disable=SC2086
-  scripts/virtual-display.sh serial -- \
+  scripts/virtual-display.sh serial -- scripts/virtual-audio.sh serial -- \
     env COD4E_NO_PROMPT=1 $chrome "$h" run --out bundles "$@"
 fi
