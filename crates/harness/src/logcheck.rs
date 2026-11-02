@@ -65,11 +65,12 @@ pub const ALLOWED: &[Allow] = &[
     },
     Allow {
         contains: &["server::server", "not extrapolated", "issue=514"],
-        reason: "g_smoothClients is on by default and player entity states are not extrapolated (#514); warned once \
-                 per server process",
+        reason: "g_smoothClients is on by default and player entity states are not extrapolated (#514); warned at \
+                 each map load (round restarts included), logged at the 1st, 2nd, 4th, 8th, ... time per process",
         stages: &[],
-        // Measured: 1 on client-hud and net-match; 2 on script-builtins (its in-process server and its listen client).
-        max: Some(2),
+        // Measured: 1 on client-hud and net-match; 2 on script-builtins (its in-process server and its listen client);
+        // 3 on client-sd-rounds (four loads: the map, two round restarts, the rotation). 4 lines cover up to 15 loads.
+        max: Some(4),
     },
     // Timing of the harness's own clients and bots.
     Allow {
