@@ -62,7 +62,7 @@ impl Talker {
                     }
                     Err(e) => {
                         self.failed_at = Some(now);
-                        tracing::warn!(error = %e, "microphone cannot be opened (no capture on the test hosts: #488)");
+                        tracing::warn!(error = %e, "microphone cannot be opened");
                         self.note = Some(format!("voice chat: {e}"));
                     }
                 }

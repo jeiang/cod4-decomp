@@ -1240,8 +1240,9 @@ fn play(
         received_voice(c, install, notes)
     })?;
     c.step("record level ownerdraw", |c| {
-        // UI_DrawRecordLevel in the stock voice options; the slot hosts have no microphone (#488), so only the
-        // meter's drawing is checked, not a level.
+        // UI_DrawRecordLevel in the stock voice options. With the slot's test-tone microphone (#488, half-scale sine:
+        // a mean sample size of about 0.32 of full scale) the meter must rise; without one only its drawing is checked.
+        let mic = std::env::var_os("COD4E_TEST_MIC").is_some();
         let before = c.lookup("menu.open")?;
         c.console("openmenu options_voice")?;
         let result = c.until(
@@ -1249,6 +1250,24 @@ fn play(
             secs(10),
             "the voice options never drew the record level (265)",
         );
+        let result = result.and_then(|_| {
+            if !mic {
+                notes.push(
+                    "record level untested: no test microphone (COD4E_TEST_MIC unset; #488)".into(),
+                );
+                return Ok(());
+            }
+            c.until(
+                json!({"hud.report.record_level":{"ge":0.1}}),
+                secs(10),
+                "the record level stayed under 0.1 with the test tone on the microphone",
+            )?;
+            notes.push(format!(
+                "record level {}",
+                c.lookup("hud.report.record_level")?
+            ));
+            Ok(())
+        });
         let result = result.and_then(|_| {
             let shot = c.capture("record-level")?;
             let rect = c.lookup("hud.report.record_meter_rect")?;
