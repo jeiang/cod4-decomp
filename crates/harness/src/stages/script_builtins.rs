@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! The script builtins on a running stock level: a check script, compiled against the stock builtin table, runs
 //! on the live game after the level's own scripts have initialised. It exercises the developer-only builtins
-//! (print channels, asserts, the debug drawings; #409) and the precache rules (#374), and every line must give
-//! the stock result (KisakCOD `game_mp/g_scr_main_mp.cpp`).
+//! (print channels, asserts, the debug drawings; #409), the precache rules (#374), the client name modes (#410) and
+//! the laser, aim assist, turret arc, vibrate and grenade effect builtins (#411), and every line must give the stock
+//! result (KisakCOD `game_mp/g_scr_main_mp.cpp`, `game/g_scr_mover.cpp`).
 use crate::stage::{StageCtx, StageReport, Status};
 use gsc::{Builtins, CallOutcome, Options, Value, Vm, compile};
 use server::script::{Dispatch, ScriptHost};
@@ -33,6 +34,13 @@ t_draw()
 }
 t_loadfx_late() { return loadfx("harness/none"); }
 t_precacheshader_late() { precacheshader("white"); }
+t_name_mode_bad() { setclientnamemode("sideways"); }
+t_update_names_auto() { updateclientnames(); }
+t_vibrate_short() { e = spawn("script_model", (0, 0, 0)); e vibrate((0, 1, 0), 1, 1); }
+t_aim_assist_model() { e = spawn("script_model", (0, 0, 0)); e enableaimassist(); }
+t_arc_not_turret() { e = spawn("script_model", (0, 0, 0)); e setleftarc(10); }
+t_laser() { e = spawn("script_model", (0, 0, 0)); e laseron(); return e; }
+t_grenade_effect() { grenadeexplosioneffect((0, 0, 0)); }
 "#;
 
 enum Expect {
@@ -40,6 +48,8 @@ enum Expect {
     Ints(&'static [i32]),
     Error(&'static str),
     Undefined,
+    /// Returns an entity, which the stage checks afterwards.
+    Entity,
 }
 
 const CHECKS: &[(&str, Expect)] = &[
@@ -62,6 +72,22 @@ const CHECKS: &[(&str, Expect)] = &[
             "precacheShader must be called before any wait statements in the gametype or level script\n",
         ),
     ),
+    ("t_name_mode_bad", Expect::Error("Unknown mode")),
+    (
+        "t_update_names_auto",
+        Expect::Error("Only works in [manual_change] mode"),
+    ),
+    (
+        "t_vibrate_short",
+        Expect::Error("illegal call to vibrate()\n"),
+    ),
+    (
+        "t_aim_assist_model",
+        Expect::Error("Currently only supported on entities with brush models"),
+    ),
+    ("t_arc_not_turret", Expect::Error("entity is not a turret")),
+    ("t_laser", Expect::Entity),
+    ("t_grenade_effect", Expect::Undefined),
 ];
 
 fn ints(v: &Value) -> Option<Vec<i32>> {
@@ -123,6 +149,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         }
     };
     let lines_before = server.game.debug_draw.shown_lines.len();
+    let mut laser = None;
     for ((name, expect), f) in CHECKS.iter().zip(funcs) {
         let Some(f) = f else {
             failures.push(format!("{name}: not in the check script"));
@@ -141,6 +168,10 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             (Expect::Ints(want), Ok(v)) => ints(v).as_deref() == Some(*want),
             (Expect::Error(want), Err(e)) => e == want,
             (Expect::Undefined, Ok(Value::Undefined)) => true,
+            (Expect::Entity, Ok(v)) => {
+                laser = v.entity().map(|e| e.num);
+                laser.is_some()
+            }
             _ => false,
         };
         if !ok {
@@ -148,6 +179,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                 Expect::Ints(w) => format!("{w:?}"),
                 Expect::Error(e) => format!("error {e:?}"),
                 Expect::Undefined => "undefined".to_owned(),
+                Expect::Entity => "an entity".to_owned(),
             };
             failures.push(format!("{name}: want {want}, got {got:?}"));
         }
@@ -160,6 +192,21 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             "line()/print3d() never reached the debug drawing: {} lines, strings {:?}",
             d.shown_lines.len(),
             d.shown_strings.iter().map(|s| &s.text).collect::<Vec<_>>()
+        ));
+    }
+    // `laseron` flags the entity (#411).
+    if !laser.is_some_and(|n| server.game.ent(n).is_some_and(|e| e.x.laser)) {
+        failures.push(format!("laseron did not flag entity {laser:?}"));
+    }
+    // `grenadeexplosioneffect` raised an explosion of the default weapon (#411).
+    let default_weapon = server.game.weapons.index("defaultweapon_mp");
+    let now = server.game.level.time;
+    let exploded = server.game.tempev.live(now).any(|s| {
+        s.event == server::tempev::ev::EXPLOSION && s.weapon == default_weapon && s.origin[2] == 1.0
+    });
+    if default_weapon == 0 || !exploded {
+        failures.push(format!(
+            "grenadeexplosioneffect raised no defaultweapon_mp explosion (weapon index {default_weapon})"
         ));
     }
 
