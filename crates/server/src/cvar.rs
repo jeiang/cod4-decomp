@@ -185,8 +185,18 @@ impl Cvars {
         self.get(name).map_or("", |v| v.value.as_str())
     }
 
+    /// The value as an integer. A Float or Vec2 dvar is read as its float and truncated, as the engine's
+    /// `(int)dvar->current.value` does (KisakCOD `game_mp/g_active_mp.cpp:1153` for `g_gravity`): its stored `%g`
+    /// text can be `1e+06`, which `atoi` would read as 1. Any other is read as `atoi`. Scripts' `getdvarint` reads
+    /// the string with `atoi` (`game_mp/g_scr_main_mp.cpp:890-899`), not through this.
     pub fn int(&self, name: &str) -> i32 {
-        parse_int(self.string(name))
+        let Some(v) = self.get(name) else {
+            return 0;
+        };
+        match v.kind {
+            Kind::Float(..) | Kind::Vec2(..) => parse_float(&v.value) as i32,
+            _ => parse_int(&v.value),
+        }
     }
 
     pub fn float(&self, name: &str) -> f32 {
@@ -583,6 +593,19 @@ mod tests {
         c.register_kind("g_antilag", Kind::Bool, "1", 0);
         assert_eq!(c.string("sv_maxclients"), "64");
         assert_eq!(c.string("g_antilag"), "0");
+    }
+
+    #[test]
+    fn an_integer_read_of_a_float_dvar_takes_its_exponent_form_whole() {
+        let mut c = Cvars::new();
+        c.register_kind("g_gravity", Kind::Float(1.0, f32::MAX), "800", 0);
+        assert!(c.set("g_gravity", "1000000"));
+        assert_eq!(c.string("g_gravity"), "1e+06");
+        assert_eq!(c.int("g_gravity"), 1_000_000);
+        assert!(c.set("g_gravity", "799.9"));
+        assert_eq!(c.int("g_gravity"), 799, "truncated, as (int) casts");
+        c.set("loose", "1e+06");
+        assert_eq!(c.int("loose"), 1, "an untyped variable is read as atoi");
     }
 
     #[test]
