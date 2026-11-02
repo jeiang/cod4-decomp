@@ -61,6 +61,11 @@ fn stock() -> Vec<(&'static str, Kind, &'static str, u32)> {
         ("g_playerCollisionEjectSpeed", Kind::Int(0, 32_000), "25", ARCHIVE),
         ("g_redCrosshairs", Kind::Bool, "1", LATCH | ARCHIVE),
         ("g_banIPs", Kind::String, "", ARCHIVE),
+        ("g_motd", Kind::String, "", 0), // g_main_mp.cpp:454
+        ("g_smoothClients", Kind::Bool, "1", 0), // g_main_mp.cpp:613
+        ("g_no_script_spam", Kind::Bool, "0", 0), // g_main_mp.cpp:624
+        ("sv_paused", Kind::Int(0, 2), "0", ROM), // qcommon/common.cpp:1584
+        ("sv_botsPressAttackBtn", Kind::Bool, "1", 0), // sv_init_mp.cpp:784
         ("g_friendlyfireDist", Kind::Float(0.0, 15000.0), "256", CHEAT),
         ("g_friendlyNameDist", Kind::Float(0.0, 15000.0), "15000", CHEAT),
         ("sv_iwds", Kind::String, "", SYSTEMINFO | ROM),

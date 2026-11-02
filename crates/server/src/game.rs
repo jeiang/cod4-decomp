@@ -367,6 +367,11 @@ pub struct Level {
     pub free_ents: std::collections::VecDeque<(u16, i32)>,
     /// `level.pendingTriggerList`: touches the next trigger pass delivers.
     pub pending_triggers: Vec<crate::trigger::PendingTrigger>,
+    /// `setclientnamemode("manual_change")`: a connected person's new name waits for `updateclientnames`
+    /// (`level.manualNameChange`).
+    pub manual_name_change: bool,
+    /// The console channel `print`/`println` write to (`level.scriptPrintChannel`; `script` at level start).
+    pub script_print_channel: usize,
 }
 
 /// What happened in play since boot, for harness reports.
@@ -490,6 +495,10 @@ pub struct Game {
     pub tempev: crate::tempev::TempEvents,
     /// The vision set in force (`visionsetnaked`, `visionsetnight`) as `(name)`, replayed to clients that join.
     pub vision: [Option<String>; 2],
+    /// The developer-only `line`/`print3d` drawings, for a listen server's own client (`crate::debugdraw`).
+    pub debug_draw: crate::debugdraw::DebugDraw,
+    /// The console print channels the scripts may open and print to (`createprintchannel`, `setprintchannel`).
+    pub print_channels: crate::script::dev::PrintChannels,
     /// Entities of dropped weapons, oldest first (`level.droppedWeaponCue`).
     pub dropped: Vec<u16>,
 }
@@ -557,6 +566,8 @@ impl Game {
             tempev: Default::default(),
             vision: [None, None],
             attractors: Attractors::default(),
+            debug_draw: Default::default(),
+            print_channels: Default::default(),
             sound_out: Vec::new(),
             ambient: None,
             dropped: Vec::new(),
@@ -656,7 +667,11 @@ impl Game {
 
     /// Clears per-map state for a new `G_InitGame`.
     pub fn reset_level(&mut self, max_clients: usize) {
-        self.level = Level::default();
+        self.level = Level {
+            // `G_InitGame`: the `script` console channel (KisakCOD `game_mp/g_main_mp.cpp:244`).
+            script_print_channel: crate::script::dev::SCRIPT_CHANNEL,
+            ..Level::default()
+        };
         self.vote = Default::default();
         self.ambient = None;
         self.sound_out.clear();

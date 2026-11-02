@@ -231,7 +231,7 @@ pub const COMMANDS: &[&str] = &[
     "expect",
     "until",
     // Test hooks: `devtele`, `devrun`, `devgrenade`, `devhardpoint`, `devradar`, `devheli`, `devkill`, `devshoot`,
-    // `devbotfire`, `devobjective`.
+    // `devbotfire`, `devobjective`, `devline`.
     "devtele",
     "devrun",
     "devgrenade",
@@ -242,6 +242,7 @@ pub const COMMANDS: &[&str] = &[
     "devshoot",
     "devbotfire",
     "devobjective",
+    "devline",
     // Players and administration.
     "clientkick",
     "tempbanclient",
@@ -329,12 +330,24 @@ const BOT_JOIN_MS: i32 = 5000;
 /// The bot's menu choices as script (the stock `_dev` script has them behind developer mode).
 const TEST_CLIENT_GSC: &str = include_str!("testclient.gsc");
 
+/// The `devline` hook's script: the line's ends, where the string goes and how many frames both stay.
+const DEVLINE_GSC: &str = "main(start, end, text_at, frames)\n{\n\tline(start, end, (1, 1, 0), 1, 0, frames);\n\tprint3d(text_at, \"devline\", (1, 1, 1), 1, 0.25, frames);\n}\n";
+
+/// The compiled `devline` script and the VM that runs it.
+struct DevLine {
+    vm: Vm,
+    dispatch: Dispatch,
+    main: gsc::bytecode::FuncId,
+}
+
 /// What a client is told when its IWDs are not the server's and `sv_pure` is on.
 pub const IMPURE: &str = "Unpure client detected: your IWD files differ from this server's (sv_pure is on). Verify your game files, and remove extra .iwd files from main and the mod folder.";
 
 pub struct Server {
     pub game: Game,
     install: Install,
+    /// The `devline` hook's script, compiled on first use and kept for the server's lifetime.
+    devline: Option<DevLine>,
     run: Option<Running>,
     cbuf: CommandBuffer,
     /// The console's print channels (`con_showchannel`, ...). The output itself is not filtered: the original's
@@ -415,6 +428,8 @@ fn core_dvars() -> Vec<(&'static str, Kind, String, u32)> {
         ("developer", Kind::Int(0, 2), "0", 0),
         ("log_filter", Kind::String, "", 0),
         ("developer_script", Kind::Bool, "0", 0),
+        // "Turn off script debugging info" (KisakCOD `game_mp/g_main_mp.cpp:624`): silences `print`/`println`.
+        ("g_no_script_spam", Kind::Bool, "0", 0),
         // The stock server runs 20; this one deliberately keeps 30 (README: the game runs at 30 Hz).
         ("sv_fps", Kind::Int(10, 1000), "30", 0),
         (
@@ -631,6 +646,19 @@ fn core_dvars() -> Vec<(&'static str, Kind, String, u32)> {
         // The log file name (empty: no log; stock `games_mp.log`); `cod4e-server` asks for `games_mp.log`.
         ("g_log", Kind::String, "", ARCHIVE),
         ("loc_language", Kind::Int(0, 14), "0", ARCHIVE | LATCH),
+        // The message of the day (`g_motd`, KisakCOD `game_mp/g_main_mp.cpp:454`), which the stock level spawn puts
+        // in `CS_MOTD` (`game_mp/g_spawn_mp.cpp:646`); this protocol has no such configstring, so a set one is warned
+        // about at each level start (#523).
+        ("g_motd", Kind::String, "", 0),
+        // "Enable extrapolation between client states" (`game_mp/g_main_mp.cpp:613`, read at
+        // `game_mp/g_active_mp.cpp:716,1227`): the native snapshots carry no player trajectory to extrapolate.
+        ("g_smoothClients", Kind::Bool, "1", 0),
+        // Set only by `SV_CheckPaused` (`qcommon/common.cpp:1584`, `server_mp/sv_main_mp.cpp:920-940`), for a listen
+        // server whose one client paused; nothing pauses a multiplayer game here, so it stays 0.
+        ("sv_paused", Kind::Int(0, 2), "0", ROM),
+        // "Allow testclients to press attack button" (`server_mp/sv_init_mp.cpp:784`, read by `SV_BotUserMove` at
+        // `server_mp/sv_main_mp.cpp:1051`): off, the bots never fire.
+        ("sv_botsPressAttackBtn", Kind::Bool, "1", 0),
     ];
     let mut all: Vec<_> = rows
         .into_iter()
@@ -666,6 +694,56 @@ fn register_core_dvars(c: &mut Cvars) {
     }
     c.force("protocol", &net::oob::PROTOCOL.to_string());
     c.force("version", &net::version());
+}
+
+/// Most bots a `bots` command or `bot_count` asks for (`MAX_CLIENTS`).
+const MAX_BOTS: usize = 64;
+
+/// The count of a `bots` command or of `bot_count`: a whole number from 0 to [`MAX_BOTS`], else why not.
+fn bot_count(s: &str) -> Result<usize, String> {
+    let n: i64 = s
+        .trim()
+        .parse()
+        .map_err(|_| format!("bots: '{s}' is not a number (usage: bots <0-{MAX_BOTS}>)"))?;
+    usize::try_from(n)
+        .ok()
+        .filter(|n| *n <= MAX_BOTS)
+        .ok_or_else(|| format!("bots: {n} is out of range (0-{MAX_BOTS})"))
+}
+
+/// The stock dvars registered here whose effect this server cannot give, warned about once when set (each level
+/// start reads them): `g_motd` has no configstring to reach the clients in, and `g_banIPs` is filtered by nothing
+/// in the stock multiplayer game either (KisakCOD keeps its `ipFilters` only for `addip`, `removeip` and `listip`,
+/// `game/g_svcmds.cpp:17-240`), which this console does not have.
+fn warn_unhonoured_dvars(c: &Cvars) {
+    if !c.string("g_motd").is_empty() {
+        logging::dedup!(
+            WARN,
+            "g_motd",
+            dvar = "g_motd",
+            issue = 523,
+            "message of the day not sent: this protocol has no motd configstring"
+        );
+    }
+    if !c.string("g_banIPs").trim().is_empty() {
+        logging::dedup!(
+            WARN,
+            "g_banIPs",
+            dvar = "g_banIPs",
+            "IP list not enforced, as in the stock game; addip/removeip/listip are not implemented (banUser/banClient ban)"
+        );
+    }
+    if c.bool("g_smoothClients") {
+        // With it on, the stock game builds a player's entity state with `G_PlayerStateToEntityStateExtrapolate`
+        // (KisakCOD `game_mp/g_active_mp.cpp:716,1227`), so other clients extrapolate it between snapshots.
+        logging::dedup!(
+            WARN,
+            "g_smoothClients",
+            dvar = "g_smoothClients",
+            issue = 514,
+            "player entity states are not extrapolated between snapshots"
+        );
+    }
 }
 
 /// What one `map_rotate` does with the rotation.
@@ -804,6 +882,7 @@ impl Server {
             install,
             run: None,
             cbuf: CommandBuffer::new(),
+            devline: None,
             channels: logging::channels::Channels::default(),
             startup,
             cfg_from_zone: false,
@@ -2121,6 +2200,66 @@ impl Server {
                     fuse,
                 )?;
             }
+            // Test hook: `devline <client|human> [frames]` runs a script compiled for developer that calls the stock
+            // `line` and `print3d` builtins: a yellow line across the player's view 100 units ahead and the string
+            // `devline` over it, kept `frames` server frames (default 400), so a listen server's own player draws them
+            // (`RB_DrawDebugLines`/`RB_DrawDebugStrings`, KisakCOD `gfx_d3d/rb_debug.cpp:158-226`). Not a stock command;
+            // needs `developer 1`. The script's VM lives as long as the server: dropping a VM releases every object
+            // on the thread that it does not reach (`gsc::value::release_objects`), the level's included.
+            "devline" => {
+                if !self.game.cvars.bool("developer") {
+                    return Err("devline needs developer 1".into());
+                }
+                let who = arg(1).ok_or("usage: devline <client|human> [frames]")?;
+                let n = if who == "human" {
+                    self.game
+                        .connected_clients()
+                        .find(|(_, c)| !c.bot)
+                        .map(|(n, _)| n)
+                        .ok_or("devline: no human is connected")?
+                } else {
+                    cvar::parse_int(who) as u16
+                };
+                let frames = arg(2).map_or(400, cvar::parse_int);
+                let ps = &self.game.client(n).ok_or("devline: no such client")?.ps;
+                let eye = crate::fire::view_origin(ps, &self.game.pm_params.bob);
+                let (fwd, right, up) = sim::pm::math::angle_vectors(&ps.viewangles);
+                let at = |f: f32, r: f32, u: f32| {
+                    Value::Vector(std::array::from_fn(|i| {
+                        eye[i] + fwd[i] * f + right[i] * r + up[i] * u
+                    }))
+                };
+                let args = [
+                    at(100.0, -30.0, 0.0),
+                    at(100.0, 30.0, 0.0),
+                    at(100.0, 0.0, 8.0),
+                    Value::Int(frames),
+                ];
+                if self.devline.is_none() {
+                    let prog = compile(
+                        &[("devline.gsc", DEVLINE_GSC)],
+                        &Builtins::stock_mp(),
+                        gsc::Options { developer: true },
+                    )
+                    .map_err(|e| format!("devline: {e:?}"))?;
+                    let dispatch = Dispatch::new(&prog);
+                    let main = prog
+                        .find("devline", "main")
+                        .ok_or("devline: the script has no main")?;
+                    let vm = Vm::new(prog).map_err(|e| format!("devline: {e:?}"))?;
+                    self.devline = Some(DevLine { vm, dispatch, main });
+                }
+                let d = self.devline.as_mut().expect("compiled above");
+                let mut host = ScriptHost {
+                    game: &mut self.game,
+                    dispatch: &d.dispatch,
+                };
+                match d.vm.call(&mut host, d.main, None, &args) {
+                    Ok(CallOutcome::Finished(_)) => {}
+                    Ok(CallOutcome::Pending) => return Err("devline: the script waited".into()),
+                    Err(e) => return Err(format!("devline: {}", e.message)),
+                }
+            }
             // Test hook: `devbotfire <client|axis|allies> <weapon|frag> <ms>` makes a bot stand and, through its
             // usercmds and the shared weapon state machine, hold attack with `weapon` (given with its ammunition and
             // switched to) for `ms` from when it is raised, or hold the frag key (after a `frag_grenade_mp` is given)
@@ -2490,10 +2629,7 @@ impl Server {
                 );
             }
             "bots" => {
-                let n = arg(1)
-                    .map(cvar::parse_int)
-                    .ok_or("usage: bots <count>")?
-                    .clamp(0, 64) as usize;
+                let n = bot_count(arg(1).ok_or("usage: bots <count>")?)?;
                 // The variable is the one count: the map starts that follow read it.
                 self.game.cvars.set("bot_count", &n.to_string());
                 self.set_bots(n)?;
@@ -2918,7 +3054,14 @@ impl Server {
                 net.notify(peer.link.addr, why);
             }
         }
-        let wanted = self.game.cvars.int("bot_count").clamp(0, 64) as usize;
+        warn_unhonoured_dvars(&self.game.cvars);
+        let wanted = match bot_count(self.game.cvars.string("bot_count")) {
+            Ok(n) => n,
+            Err(why) => {
+                tracing::warn!(dvar = "bot_count", why, "no bots added");
+                0
+            }
+        };
         if wanted > 0 {
             self.set_bots(wanted)?;
         }
@@ -3154,6 +3297,8 @@ impl Server {
         self.game.level.frametime = self.frame_ms;
         self.game.level.time = self.svs_time;
         self.game.publish_info(false);
+        // `FlushDebugLines`/`FlushDebugStrings`: last frame's `line`/`print3d` drawings age before this frame adds more.
+        self.game.debug_draw.flush();
         // `G_SetClientSound` sets a player's loop afresh every frame: a script's `playloopsound` on one does not stay.
         for e in self.game.ents.iter_mut().flatten() {
             if e.kind == crate::game::EntKind::Client {
@@ -3179,6 +3324,7 @@ impl Server {
             };
             // `ClientThink` receives inputs; `G_RunClient` runs the latest at level time when synchronous.
             let synchronous = host.game.cvars.bool("g_synchronousClients");
+            let bots_attack = host.game.cvars.bool("sv_botsPressAttackBtn");
             // `SV_BotFrame` then each client's `ClientThink`: usercmds reach the game before
             // the frame's script threads run.
             for n in 0..host.game.clients.len() as u16 {
@@ -3217,7 +3363,10 @@ impl Server {
                     client += t.elapsed();
                     continue;
                 };
-                let cmd = b.usercmd(host.game, &mut self.bot_shared, n, self.svs_time);
+                let mut cmd = b.usercmd(host.game, &mut self.bot_shared, n, self.svs_time);
+                if !bots_attack {
+                    cmd.buttons &= !sim::pm::button::ATTACK;
+                }
                 host.game.clients[usize::from(n)].bot_brain = Some(b);
                 bot += t.elapsed();
                 let t = Instant::now();
@@ -3326,6 +3475,8 @@ impl Server {
             self.game.level.map_restart_requested = false;
             self.cbuf.add_text("fast_restart");
         }
+        // `CL_UpdateDebugServerData`: what a listen server's own client draws until the next frame.
+        self.game.debug_draw.publish();
         let total = t0.elapsed();
         let s = TickSample {
             total_ms: total.as_secs_f64() * 1000.0,
@@ -4149,5 +4300,42 @@ mod tests {
         let levels: Vec<_> = events.iter().map(|e| e.level).collect();
         assert_eq!(levels, [tracing::Level::WARN, tracing::Level::ERROR]);
         assert_eq!(events[0].field("at"), Some("maps/mp/x::y line 3"));
+    }
+
+    #[test]
+    fn a_bot_count_that_is_not_a_number_or_out_of_range_says_why() {
+        assert_eq!(super::bot_count("3"), Ok(3));
+        assert_eq!(super::bot_count("0"), Ok(0));
+        assert_eq!(super::bot_count("64"), Ok(64));
+        let e = super::bot_count("abc").unwrap_err();
+        assert!(e.contains("'abc' is not a number"), "{e}");
+        let e = super::bot_count("65").unwrap_err();
+        assert!(e.contains("65 is out of range"), "{e}");
+        let e = super::bot_count("-1").unwrap_err();
+        assert!(e.contains("-1 is out of range"), "{e}");
+    }
+
+    #[test]
+    fn the_s11_dvars_have_their_stock_defaults_and_a_set_motd_or_ban_list_warns() {
+        let mut c = crate::cvar::Cvars::new();
+        register_core_dvars(&mut c);
+        assert_eq!(c.string("g_motd"), "");
+        assert!(c.bool("g_smoothClients") && c.bool("sv_botsPressAttackBtn"));
+        assert_eq!(c.int("sv_paused"), 0);
+        // The stock default turns on the extrapolation this server lacks (#514), said once per process (an earlier
+        // test's level start may have said it already); nothing else warns.
+        let (_, events) = logging::capture(|| super::warn_unhonoured_dvars(&c));
+        let dvars: Vec<_> = events.iter().filter_map(|e| e.field("dvar")).collect();
+        assert!(dvars.iter().all(|d| *d == "g_smoothClients"), "{dvars:?}");
+        c.set("g_motd", "logtest motd");
+        c.set("g_banIPs", "10.0.0.1 ");
+        let (_, events) = logging::capture(|| super::warn_unhonoured_dvars(&c));
+        let dvars: Vec<_> = events
+            .iter()
+            .filter(|e| e.level == tracing::Level::WARN)
+            .filter_map(|e| e.field("dvar"))
+            .filter(|d| *d != "g_smoothClients")
+            .collect();
+        assert_eq!(dvars, ["g_motd", "g_banIPs"]);
     }
 }

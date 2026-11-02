@@ -1240,6 +1240,7 @@ dependencies = [
  "assets",
  "crash-handler",
  "devctrl",
+ "gsc",
  "install",
  "logging",
  "master",

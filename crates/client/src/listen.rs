@@ -65,6 +65,18 @@ pub fn objectives() -> (u64, u64, u64, u64, u64) {
     OBJECTIVES.lock().map_or((0, 0, 0, 0, 0), |o| *o)
 }
 
+/// The running listen server's `line`/`print3d` drawings as of its last frame (`cls.debug.svLinesBuffer`,
+/// `svStringsBuffer`): the original draws them only in the hosting process, never over the network.
+static DEBUG_DRAW: std::sync::Mutex<server::debugdraw::DebugDraw> =
+    std::sync::Mutex::new(server::debugdraw::DebugDraw::new());
+
+/// Runs `f` on the listen server's latest debug drawings.
+pub fn with_debug_draw(f: impl FnOnce(&server::debugdraw::DebugDraw)) {
+    if let Ok(d) = DEBUG_DRAW.lock() {
+        f(&d);
+    }
+}
+
 /// Requests for the running listen server's state and console, keyed by the control channel's request number.
 static REQUESTS: std::sync::Mutex<Vec<(u64, serde_json::Map<String, Value>)>> =
     std::sync::Mutex::new(Vec::new());
@@ -381,6 +393,12 @@ fn run(
                 server.game.stats.heli_shots,
             );
         }
+        if let Ok(mut d) = DEBUG_DRAW.lock() {
+            d.shown_lines
+                .clone_from(&server.game.debug_draw.shown_lines);
+            d.shown_strings
+                .clone_from(&server.game.debug_draw.shown_strings);
+        }
         if let Some((n, c)) = server.game.connected_clients().find(|(_, c)| !c.bot) {
             person = json!({
                 "slot": n, "shots": c.shots, "hits": c.hits,
@@ -389,6 +407,9 @@ fn run(
         }
     }
     RUNNING.store(false, Ordering::Relaxed);
+    if let Ok(mut d) = DEBUG_DRAW.lock() {
+        *d = server::debugdraw::DebugDraw::new();
+    }
     if let Ok(mut q) = HOST_LINES.lock() {
         q.clear();
     }
