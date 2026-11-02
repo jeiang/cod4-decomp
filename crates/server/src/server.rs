@@ -1677,6 +1677,13 @@ impl Server {
                     "weapon": c.ps.weapon,
                     "weapon_name": self.game.weapons.name(c.ps.weapon as u16),
                     "weapons": weapons,
+                    // The weapon state machine, so a stage can say where an offhand throw stopped.
+                    "weapon_state": c.ps.weapon_state,
+                    "weapon_flags": c.ps.weapon_flags,
+                    "offhand_index": c.ps.offhand_index,
+                    "grenade_time_left": c.ps.grenade_time_left,
+                    "pm_flags": c.ps.pm_flags,
+                    "buttons": c.buttons,
                     // Shots through `FireWeapon`; compass pings are derived client-side from snapshot events.
                     "shots": c.shots,
                     "alive": c.ps.pm_type < sim::pm::PmType::Dead,
