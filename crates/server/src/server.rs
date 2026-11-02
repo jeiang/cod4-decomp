@@ -487,6 +487,9 @@ fn core_dvars() -> Vec<(&'static str, Kind, String, u32)> {
         // "Turn on antilag checks for weapon hits" (KisakCOD `game_mp/g_main_mp.cpp:614`): shots and knife swings are
         // judged where the shooter saw the others (`lagcomp`).
         ("g_antilag", Kind::Bool, "1", ARCHIVE | SERVERINFO),
+        // "Enable extrapolation between client states" (KisakCOD `game_mp/g_main_mp.cpp:613`; 1.7 registers it at
+        // 0x4be6cb): which trajectory type a player's entity state carries (`netsv::player_pos_type`).
+        ("g_smoothClients", Kind::Bool, "1", 0),
         ("bot_idle", Kind::Bool, "0", 0),
         // Bots on every map; the listen server's player sets it, and a `bots` command sets it too.
         ("bot_count", Kind::Int(0, 64), "0", 0),
@@ -656,9 +659,6 @@ fn core_dvars() -> Vec<(&'static str, Kind, String, u32)> {
         // in `CS_MOTD` (`game_mp/g_spawn_mp.cpp:646`); this protocol has no such configstring, so a set one is warned
         // about at each level start (#523).
         ("g_motd", Kind::String, "", 0),
-        // "Enable extrapolation between client states" (`game_mp/g_main_mp.cpp:613`, read at
-        // `game_mp/g_active_mp.cpp:716,1227`): the native snapshots carry no player trajectory to extrapolate.
-        ("g_smoothClients", Kind::Bool, "1", 0),
         // Set only by `SV_CheckPaused` (`qcommon/common.cpp:1584`, `server_mp/sv_main_mp.cpp:920-940`), for a listen
         // server whose one client paused; nothing pauses a multiplayer game here, so it stays 0.
         ("sv_paused", Kind::Int(0, 2), "0", ROM),
@@ -737,17 +737,6 @@ fn warn_unhonoured_dvars(c: &Cvars) {
             "g_banIPs",
             dvar = "g_banIPs",
             "IP list not enforced, as in the stock game; addip/removeip/listip are not implemented (banUser/banClient ban)"
-        );
-    }
-    if c.bool("g_smoothClients") {
-        // With it on, the stock game builds a player's entity state with `G_PlayerStateToEntityStateExtrapolate`
-        // (KisakCOD `game_mp/g_active_mp.cpp:716,1227`), so other clients extrapolate it between snapshots.
-        logging::dedup!(
-            WARN,
-            "g_smoothClients",
-            dvar = "g_smoothClients",
-            issue = 514,
-            "player entity states are not extrapolated between snapshots"
         );
     }
 }
@@ -4477,11 +4466,10 @@ mod tests {
         assert_eq!(c.string("g_motd"), "");
         assert!(c.bool("g_smoothClients") && c.bool("sv_botsPressAttackBtn"));
         assert_eq!(c.int("sv_paused"), 0);
-        // The stock default turns on the extrapolation this server lacks (#514), said once per process (an earlier
-        // test's level start may have said it already); nothing else warns.
+        // Nothing warns at the stock defaults.
         let (_, events) = logging::capture(|| super::warn_unhonoured_dvars(&c));
         let dvars: Vec<_> = events.iter().filter_map(|e| e.field("dvar")).collect();
-        assert!(dvars.iter().all(|d| *d == "g_smoothClients"), "{dvars:?}");
+        assert!(dvars.is_empty(), "{dvars:?}");
         c.set("g_motd", "logtest motd");
         c.set("g_banIPs", "10.0.0.1 ");
         let (_, events) = logging::capture(|| super::warn_unhonoured_dvars(&c));
@@ -4489,7 +4477,6 @@ mod tests {
             .iter()
             .filter(|e| e.level == tracing::Level::WARN)
             .filter_map(|e| e.field("dvar"))
-            .filter(|d| *d != "g_smoothClients")
             .collect();
         assert_eq!(dvars, ["g_motd", "g_banIPs"]);
     }

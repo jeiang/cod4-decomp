@@ -63,15 +63,6 @@ pub const ALLOWED: &[Allow] = &[
         stages: &[],
         max: Some(2), // once per client process
     },
-    Allow {
-        contains: &["server::server", "not extrapolated", "issue=514"],
-        reason: "g_smoothClients is on by default and player entity states are not extrapolated (#514); warned at \
-                 each map load (round restarts included), logged at the 1st, 2nd, 4th, 8th, ... time per process",
-        stages: &[],
-        // Once per server instance. Measured on main 15caa930 (bundle cod4e-run-20261102-204501): 4 on net-info
-        // (its extra dedicated servers), 3 on client-host-console, 2 on script-builtins, 1 on client-hud/net-match.
-        max: Some(4),
-    },
     // Timing of the harness's own clients and bots.
     Allow {
         contains: &["server::netsv", "packet from an address with no client"],
