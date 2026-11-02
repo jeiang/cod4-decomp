@@ -11,9 +11,14 @@
 //! bad arguments print the stock usage lines (`bind`, `unbind`, `set`, `seta` through a bind, `reset`,
 //! `setfromdvar`, `con_showchannel`, `openscriptmenu`); `bind k`, `bindlist`, `reset`, `togglep`,
 //! `cmdlist <filter>` and `clear` show or do what the original's do; hiding the `error` channel keeps a
-//! not-implemented command's warning (#479) off the console and showing it brings it back; in the match `viewpos`
-//! prints the eye, the stance commands take the player prone and crouched typed and bound alike, a `+word` that is no
-//! button is `Unknown command` typed and bound alike, `openmenu`/`closemenu` open and close a menu, and
+//! not-implemented command's warning (#527) off the console and showing it brings it back. The stock commands of
+//! #479 answer as the original's: `dvar_int` registers a ranged dvar that refuses a value outside it, `setenv` sets
+//! and shows a variable, `clientinfo` reports state 0 at the front end and 9 in a match, `configstrings` and a bare
+//! `serverstatus` need a server, `fs_openedList`, `path` and `fdir` list the search path, `writedefaults` names its
+//! file, `localservers` scans, and in the match `serverstatus` lists the players, `snd_setEqQ` refuses an unknown
+//! channel and `snd_playLocal` an unknown alias; in the match `viewpos` prints the eye, the stance commands take the
+//! player prone and crouched typed and bound alike, a `+word` that is no button is `Unknown command` typed and bound
+//! alike, `openmenu`/`closemenu` open and close a menu, and
 //! `openscriptmenu team_marinesopfor axis` moves the player to the other team. A dvar named like a server command
 //! (`give`) is shown typed and bound, not forwarded; `connect <server> reconnect` joins from the front end (an
 //! address nothing answers on opens the error popup) and a plain `connect` in a match is refused with the stock
@@ -226,7 +231,42 @@ fn front_end(c: &mut Driven) -> Result<(), String> {
             return Err(format!("the hidden error channel still printed {l:?}"));
         }
         typed(c, "con_showchannel error", "Adding channel: error")?;
-        typed(c, "gfx_stats", "not implemented")
+        typed(c, "r_smc_stats", "not implemented")
+    })?;
+    c.step("the stock commands of #479 at the front end", |c| {
+        let reply = |c: &mut Driven, line: &str, text: &str| {
+            let line = line.to_owned();
+            says(c, move |c| c.console(&line), text, true, 5)
+        };
+        c.console("dvar_int zz_cmdtest 5 0 10")?;
+        reply(c, "zz_cmdtest", "\"zz_cmdtest\" is \"5\"")?;
+        reply(c, "zz_cmdtest 50", "Domain is any integer from 0 to 10")?;
+        cvar_is(c, "zz_cmdtest", "5")?;
+        reply(
+            c,
+            "dvar_int zz_cmdtest2 1 9 2",
+            "min 9 should not be greater than max 2",
+        )?;
+        c.console("setenv ZZ_ENV a b")?;
+        reply(c, "setenv ZZ_ENV", "ZZ_ENV=a b")?;
+        reply(c, "clientinfo", "Client Information")?;
+        if !lines(c)?.iter().any(|l| l.contains("state: 0")) {
+            return Err("clientinfo at the front end did not report state: 0".into());
+        }
+        reply(c, "configstrings", "Not connected to a server.")?;
+        reply(c, "serverstatus", "Usage: serverstatus [server]")?;
+        reply(c, "fs_openedList", "Opened IWD Names: iw_")?;
+        if let Some(l) = lines(c)?.iter().find(|l| l.contains("Names: Opened IWD")) {
+            return Err(format!("fs_openedList ran its lines together: {l:?}"));
+        }
+        reply(c, "path", "Current search path:")?;
+        reply(c, "fdir zz_none*", "0 files listed")?;
+        reply(c, "writedefaults zz_defaults", "Writing zz_defaults.cfg.")?;
+        reply(
+            c,
+            "localservers",
+            "Scanning for servers on the local network...",
+        )
     })?;
     c.step("connect to an address nothing answers on", |c| {
         c.console(&format!("connect {NOBODY} reconnect"))?;
@@ -337,7 +377,30 @@ fn in_match(c: &mut Driven, custom3: &str) -> Result<(), String> {
             true,
             6,
         )?;
-        says(c, |c| c.console("viewpos"), ") : ", true, 5)
+        says(c, |c| c.console("viewpos"), ") : ", true, 5)?;
+        says(c, |c| c.console("clientinfo"), "state: 9", true, 5)?;
+        says(c, |c| c.console("configstrings"), "17: ", true, 5)?;
+        says(
+            c,
+            |c| c.console("serverstatus"),
+            "num: score: ping: name:",
+            true,
+            10,
+        )?;
+        says(
+            c,
+            |c| c.console("snd_setEqQ zz_chan 0 0 1"),
+            "Unknown channel name (zz_chan)",
+            true,
+            5,
+        )?;
+        says(
+            c,
+            |c| c.console("snd_playLocal zz_noalias"),
+            "Couldn't find sound alias \"zz_noalias\".",
+            true,
+            5,
+        )
     })?;
     // A bound key runs its command only with no menu up: at the front end the menus take the keys.
     c.step("seta through a bind prints its usage", |c| {

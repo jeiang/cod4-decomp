@@ -174,6 +174,12 @@ pub const ALLOWED: &[Allow] = &[
         max: Some(2), // measured 1 on the Linux host, 2026-10-14,
     },
     Allow {
+        contains: &["server::cvar", "cvar set refused", "rcon_ranged"],
+        reason: "net-rcon sets a `dvar_int` dvar out of its range to check that it is refused (#479)",
+        stages: &["net-rcon"],
+        max: Some(2), // one expected
+    },
+    Allow {
         contains: &["cod4e::console", "unknown command", "zz_unknown_at_front"],
         reason: "client-commands types an unknown word at the front end to check `Unknown command`",
         stages: &["client-commands"],
@@ -189,22 +195,11 @@ pub const ALLOWED: &[Allow] = &[
         contains: &[
             "cod4e::console",
             "stock command not implemented",
-            "issue=479",
+            "issue=527",
         ],
-        reason: "client-commands runs two stock commands we do not implement (imagelist, gfx_stats) to check the #479 warning and the error channel",
+        reason: "client-commands runs two stock renderer commands we do not implement (imagelist, r_smc_stats; #527) to check the not-implemented warning and the error channel",
         stages: &["client-commands"],
         max: Some(3), // two expected
-    },
-    Allow {
-        contains: &[
-            "cod4e::console",
-            "stock command not implemented",
-            "command=\"uploadstats\"",
-            "issue=479",
-        ],
-        reason: "the stock Create a Class menus run `uploadstats` when a class is saved, a command we do not implement yet (#479)",
-        stages: &["client-custom-class"],
-        max: Some(1),
     },
     Allow {
         contains: &[
