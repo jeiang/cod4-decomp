@@ -364,9 +364,12 @@ fn run(
             }
         }
         server.run_for(Duration::from_millis(100));
-        // A script error ends a thread chain silently for the player; the client log is where it shows.
+        // A script error ends a thread chain silently for the player; the client log is where it shows. The message
+        // and innermost site lead, on the line's first line, so the harness's log gate can tell one error from
+        // another (#539); the whole text with its call stack follows.
         for (map, text) in server.all_script_errors.iter().skip(reported_errors) {
-            tracing::warn!(%map, error = %text, "script error on the listen server");
+            let (cause, at) = error_site(text);
+            tracing::warn!(%map, cause, at, error = %text, "script error on the listen server");
         }
         reported_errors = server.all_script_errors.len();
         if let Ok(mut o) = OBJECTIVES.lock() {
@@ -408,12 +411,30 @@ fn run(
         "bytes_in": stats.bytes_in,
         "bots": cfg.bots.unwrap_or(cfg.bot_count),
         "script_errors": server.all_script_errors.len(),
+        // Each error's message and innermost `at` line, so the harness can tell a known stock-script defect apart.
+        "script_error_sites": server.all_script_errors.iter().map(|(_, text)| {
+            let (message, at) = error_site(text);
+            json!({ "message": message, "at": at })
+        }).collect::<Vec<_>>(),
         "level_time_ms": server.level_time(),
         "stats": {
             "shots": server.game.stats.shots, "hits": server.game.stats.hits,
             "kills": server.game.stats.kills, "deaths": server.game.stats.deaths,
             "plants": server.game.stats.plants, "defuses": server.game.stats.defuses,
+            "frag_suicides": server.game.stats.frag_suicides,
         },
         "person": person,
     })
+}
+
+/// A script error's message and its innermost `at` location (the frame that raised it), from the text the VM wrote:
+/// a `*******` banner, the message, then one `at` line per frame, innermost first. Empty where the text lacks one.
+fn error_site(text: &str) -> (&str, &str) {
+    let mut lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with("*******"));
+    let message = lines.next().unwrap_or("");
+    let at = lines.find_map(|l| l.strip_prefix("at ")).unwrap_or("");
+    (message, at)
 }

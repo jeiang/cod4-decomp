@@ -396,6 +396,11 @@ pub struct MatchStats {
     pub heli_shots: u64,
     pub heli_hits: u64,
     pub heli_crashes: u64,
+    /// Players their own `frag_` grenade killed with a grenade, explosive or projectile means of death. Each one
+    /// takes the stock `_missions` kill challenges into a frag branch that reads `explosiveInfo["suicideGrenadeKill"]`,
+    /// which the stock damage callback only sets for damage from someone else, so the stock scripts raise a runtime
+    /// error there (#539); the harness lets that one error through as many times as this counts.
+    pub frag_suicides: u64,
 }
 
 pub struct Game {
