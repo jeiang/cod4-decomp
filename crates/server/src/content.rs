@@ -567,9 +567,10 @@ impl Content {
         defined::<Material>(&mut self.db, name)
     }
 
-    /// Whether a zone defines an effect of this name, under `fx/` as `loadfx` names it without the folder.
+    /// Whether a zone defines an effect of this name. Effect assets are named without the `fx/` folder, as `loadfx`
+    /// names them (KisakCOD `EffectsCore/fx_load_obj.cpp:1229-1238`, the default effect `misc/missing_fx`).
     pub fn effect_defined(&mut self, name: &str) -> bool {
-        defined::<FxEffectDef>(&mut self.db, &format!("fx/{name}"))
+        defined::<FxEffectDef>(&mut self.db, name)
     }
 
     /// Whether a menu list of the loaded zones holds a menu of this name (`precachemenu`).
@@ -1012,9 +1013,9 @@ mod tests {
     }
 
     #[test]
-    fn effects_are_looked_up_under_the_fx_folder() {
+    fn effects_are_named_without_the_fx_folder() {
         let mut content = Content::default();
-        content.add_test_effect("fx/smoke/test_smoke");
+        content.add_test_effect("smoke/test_smoke");
         assert!(content.effect_defined("Smoke/Test_Smoke"));
         assert!(!content.effect_defined("fx/smoke/test_smoke"));
         assert!(!content.effect_defined("smoke/other"));

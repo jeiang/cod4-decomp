@@ -2140,7 +2140,7 @@ mod precache_tests {
     #[test]
     fn loadfx_rejects_the_fx_folder_and_new_effects_after_init() {
         let (mut g, mut vm) = setup(true);
-        g.content.add_test_effect("fx/smoke/logtest_known");
+        g.content.add_test_effect("smoke/logtest_known");
         let err = call(load_fx, &mut g, &mut vm, "loadfx", "fx/smoke/logtest_known").unwrap_err();
         assert!(err.contains("after the 'fx' folder"), "{err}");
         let id = call(load_fx, &mut g, &mut vm, "loadfx", "smoke/logtest_known").unwrap();
@@ -2160,7 +2160,7 @@ mod precache_tests {
     #[test]
     fn loadfx_warns_once_about_an_effect_the_zones_lack() {
         let (mut g, mut vm) = setup(true);
-        g.content.add_test_effect("fx/smoke/logtest_present");
+        g.content.add_test_effect("smoke/logtest_present");
         let (_, events) = logging::capture(|| {
             call(load_fx, &mut g, &mut vm, "loadfx", "smoke/logtest_present").unwrap();
         });
