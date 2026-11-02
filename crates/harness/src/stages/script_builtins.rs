@@ -167,7 +167,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             return Ok(StageReport::new(NAME, Status::Failed).with_reason(format!("{e:?}")));
         }
     };
-    developer_compile_rules(&mut server, &mut failures);
+    // Kept until the server is gone: dropping a VM releases every object on the thread it does not reach.
+    let _nodev_vm = developer_compile_rules(&mut server, &mut failures);
     let lines_before = server.game.debug_draw.shown_lines.len();
     for ((name, expect), f) in CHECKS.iter().zip(funcs) {
         let Some(f) = f else {
@@ -320,8 +321,9 @@ fn live_bots(server: &Server) -> Vec<u16> {
 
 /// The developer-statement compile rules (KisakCOD `script/scr_compiler.cpp:468-563,871-891,1000-1022`): the value
 /// of a developer-only call outside `/# ... #/` is an error whatever `developer_script` says, and without
-/// `developer_script` such calls compile and are then dropped, so nothing prints or draws (#409).
-fn developer_compile_rules(server: &mut Server, failures: &mut Vec<String>) {
+/// `developer_script` such calls compile and are then dropped, so nothing prints or draws (#409). Returns the VM
+/// that ran the check, which the caller must keep while the level runs (`gsc::value::release_objects`).
+fn developer_compile_rules(server: &mut Server, failures: &mut Vec<String>) -> Option<Vm> {
     const ACCESS: &str =
         "return value of developer command can not be accessed if not in a /# ... #/ comment";
     let b = Builtins::stock_mp();
@@ -347,19 +349,19 @@ fn developer_compile_rules(server: &mut Server, failures: &mut Vec<String>) {
         Ok(p) => p,
         Err(e) => {
             failures.push(format!("developer_script 0 check script: {e:?}"));
-            return;
+            return None;
         }
     };
     let Some(f) = prog.find("harness_nodev", "t_nodev") else {
         failures.push("t_nodev: not in its script".to_owned());
-        return;
+        return None;
     };
     let dispatch = Dispatch::new(&prog);
     let mut vm = match Vm::new(prog) {
         Ok(v) => v,
         Err(e) => {
             failures.push(format!("developer_script 0 vm: {e:?}"));
-            return;
+            return None;
         }
     };
     server.game.printed.clear();
@@ -381,6 +383,7 @@ fn developer_compile_rules(server: &mut Server, failures: &mut Vec<String>) {
             "developer_script 0 kept developer calls: got {got:?}, printed {printed:?}, lines {lines} -> {now}"
         ));
     }
+    Some(vm)
 }
 
 /// A UI server command whose arguments do not parse is logged with its word and argument count; a word that is
@@ -525,8 +528,14 @@ fn bots_attack_button(server: &mut Server, failures: &mut Vec<String>) {
         seen.push(shots(server).saturating_sub(before));
     }
     if seen[0] != 0 || seen[1] == 0 {
+        let state = server
+            .game
+            .client(n)
+            .map(|c| (c.ps.weapon, c.ps.pm_type, c.team));
         failures.push(format!(
-            "shots with sv_botsPressAttackBtn 0 then 1: {seen:?}, want none then some"
+            "shots with sv_botsPressAttackBtn 0 then 1: {seen:?}, want none then some (bot {n}: weapon, pm_type, \
+             team {state:?}; mp5_mp is {})",
+            server.game.weapons.index("mp5_mp")
         ));
     }
 }
