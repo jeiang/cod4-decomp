@@ -3450,7 +3450,7 @@ fn script_step(st: &mut State) -> bool {
         // The graphics device is destroyed under the client, as a driver reset does it: the next frame must find it lost
         // and make a new one (`losedevice`); `renderer=secs` then waits for the world to be drawable again.
         "losedevice" => {
-            st.gpu.destroy();
+            st.gpu.device.destroy();
             done(true, sc, String::new());
         }
         "renderer" => {
@@ -4591,7 +4591,9 @@ fn recover_surface(
     if st.loading.is_some() {
         return Ok(SurfaceAction::Retry);
     }
-    if st.gpu.lost().is_some() {
+    // A device lost under a frame can fail the acquisition before a plain poll reports it; wait for it here, which
+    // also lets wgpu release the surface's images before recovery drops the surface.
+    if st.gpu.lost_waiting().is_some() {
         return Ok(SurfaceAction::DeviceLost);
     }
     if matches!(outcome, C::Timeout | C::Occluded) {
