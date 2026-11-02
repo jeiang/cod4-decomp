@@ -833,6 +833,12 @@ impl Sound {
         self.handle.deactivate_channel_volumes(priority, fade_ms);
     }
 
+    /// `SND_MapInit`'s fade: every entity channel starts the level silent and rises to its volume over `fade_ms`
+    /// (`snd_levelFadeTime`).
+    pub fn level_fade(&mut self, fade_ms: u32) {
+        self.handle.level_fade(fade_ms);
+    }
+
     /// The priority of the channel volume group in force, 0 when none.
     pub fn channel_volume_priority(&self) -> u32 {
         self.handle

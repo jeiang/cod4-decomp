@@ -28,7 +28,7 @@ pub use tracing;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{LazyLock, Mutex, OnceLock};
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
@@ -274,12 +274,27 @@ impl<S: Subscriber> Layer<S> for ConsoleLayer {
 }
 
 /// Runs `f` with a subscriber that records every event (all levels), and returns them with `f`'s result. For tests
-/// that check an unexpected state is logged at the right level.
+/// that check an unexpected state is logged at the right level. Safe beside other tests on other threads: `f`'s
+/// [`dedup!`] limiters count afresh, and no other thread can turn a call site off while it runs.
 pub fn capture<R>(f: impl FnOnce() -> R) -> (R, Vec<Record>) {
     let sink = format::Sink::default();
     let subscriber = Registry::default().with(format::CaptureLayer(sink.clone()));
-    let r = tracing::subscriber::with_default(subscriber, f);
+    let r = scoped(subscriber, || dedup::scoped(f));
     (r, sink.take())
+}
+
+/// Runs `f` with `subscriber` as this thread's default.
+///
+/// `tracing` caches whether a call site is wanted when the site is first hit. While only one dispatcher is
+/// registered it asks the hitting thread's default alone, so a test thread without a subscriber that first hits a site
+/// while one capture is live caches "never" for it, and the capture then misses that event; while the capture is the
+/// only one asked it also caches "always", which makes `dedup!` count other threads' hits. A second dispatcher that
+/// lives for the whole process keeps every later answer a combined one: "sometimes", decided per thread on each hit.
+fn scoped<R>(subscriber: impl Subscriber + Send + Sync + 'static, f: impl FnOnce() -> R) -> R {
+    static HELD: LazyLock<tracing::Dispatch> =
+        LazyLock::new(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::new()));
+    LazyLock::force(&HELD);
+    tracing::subscriber::with_default(subscriber, f)
 }
 
 #[cfg(test)]
@@ -364,7 +379,7 @@ mod tests {
     fn console_queue_keeps_warnings_only_once_forwarded() {
         // One test owns the process-wide flag; the layer is driven directly with its own subscriber.
         let sub = Registry::default().with(ConsoleLayer);
-        tracing::subscriber::with_default(sub, || {
+        scoped(sub, || {
             tracing::warn!("before");
             forward_to_console();
             tracing::warn!(cmd = "foo", "unknown command");

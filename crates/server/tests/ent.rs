@@ -341,9 +341,11 @@ t_entbynum()
 {
 	a = spawn("script_origin", (0, 0, 0));
 	r = [];
+	/#
 	r[0] = getentbynum(a getentitynumber()) == a;
 	r[1] = isdefined(getentbynum(1000));
 	r[2] = isdefined(getentbynum(5000));
+	#/
 	return r;
 }
 "#;
@@ -352,7 +354,8 @@ t_entbynum()
         let prog = compile(
             &[("t.gsc", SCRIPT)],
             &Builtins::stock_mp(),
-            Options::default(),
+            // `developer_script`: `getentbynum` is developer-only and its value is used in a `/# ... #/` block.
+            Options { developer: true },
         )
         .map_err(|e| format!("{e:?}"))?;
         let f = prog.find("t", name).ok_or("no such function")?;

@@ -142,6 +142,9 @@ pub struct Client {
     pub conn: Conn,
     pub bot: bool,
     pub name: String,
+    /// The name the person last asked for while `setclientnamemode("manual_change")` held it back (`sess.newnetname`);
+    /// `updateclientnames` makes it [`Self::name`]. The name itself until a change is held.
+    pub new_name: String,
     pub ps: PlayerState,
     pub cmd: UserCmd,
     pub old_cmd: UserCmd,
@@ -226,8 +229,6 @@ pub struct Client {
     /// `setstat`/`getstat` values.
     pub stats: std::collections::HashMap<i32, i32>,
     pub bot_brain: Option<Box<Brain>>,
-    /// Test hook `devbotfire`: buttons the bot holds, standing still, and the level time it lets go.
-    pub dev_buttons: Option<(i32, i32)>,
     /// The body animation clock locational hits are tested against.
     pub pose: PlayerPoseState,
 }
@@ -242,6 +243,8 @@ impl Client {
         Self {
             conn: Conn::Connecting,
             bot,
+            // `ClientUserinfoChanged` before the client is connected: the name and the pending name agree.
+            new_name: name.clone(),
             name,
             ps,
             cmd: UserCmd::default(),
@@ -305,7 +308,6 @@ impl Client {
             last_server_time: 0,
             stats: std::collections::HashMap::new(),
             bot_brain: None,
-            dev_buttons: None,
             pose: PlayerPoseState::default(),
         }
     }
@@ -479,7 +481,7 @@ impl Game {
         let Some(world) = self.world.as_ref() else {
             return;
         };
-        let eye = crate::fire::view_origin(&seen);
+        let eye = crate::fire::view_origin(&seen, &self.pm_params.bob);
         let (forward, _, up) = pm::math::angle_vectors(&seen.viewangles);
         let end: Vec3 = std::array::from_fn(|i| eye[i] - 40.0 * forward[i] + 10.0 * up[i]);
         let t = sim::cm::Collide::trace(
@@ -516,7 +518,8 @@ impl Game {
     }
 
     /// `ClientDisconnect`: scripts hear `menuresponse "disconnect"`, then the disconnect
-    /// callback runs, then the entity goes.
+    /// callback runs, then the entity goes ([`Self::finish_disconnects`], at the end of the
+    /// `run_calls` that ran the callback: nothing may damage or think for the player between).
     pub fn disconnect_client(&mut self, vm: &mut Vm, n: u16) {
         if !self.client(n).is_some_and(Client::connected) {
             return;
@@ -536,7 +539,9 @@ impl Game {
         self.pending_free.push(n);
     }
 
-    /// Frees the slots whose disconnect callback has run.
+    /// Frees the slots whose disconnect callback has run: stock `ClientDisconnect` calls
+    /// `G_FreeEntity` right after `Scr_PlayerDisconnect` (KisakCOD MP 1.8
+    /// `game_mp/g_client_mp.cpp:420-450`).
     pub fn finish_disconnects(&mut self, vm: &mut Vm) {
         for n in std::mem::take(&mut self.pending_free) {
             self.release_turret(n);
@@ -758,7 +763,11 @@ impl Game {
         c.ps.speed = self.cvars.int("g_speed");
         // `ClientThink_real` works out the aim of this command's shots before `Pmove`, from the state as the last
         // command left it, and caps the step at 200 ms.
-        c.gun_step(self.weapons.get(c.ps.weapon as u16), msec.min(200));
+        c.gun_step(
+            self.weapons.get(c.ps.weapon as u16),
+            msec.min(200),
+            &self.pm_params.bob,
+        );
         let Some(world) = self.world.as_ref() else {
             return;
         };
@@ -1420,5 +1429,68 @@ mod spawn_inactivity_tests {
         g.finish_disconnects(&mut vm);
         assert!(g.clients[usize::from(n)].received_cmd.is_none());
         assert_eq!(g.clients[usize::from(n)].cmd, UserCmd::default());
+    }
+
+    /// #505: stock `ClientDisconnect` frees the entity right after the disconnect callback, so in the
+    /// same frame the leaving player is gone from the world and a script's reference to them is no
+    /// longer defined (the stock `_missions::playerDamaged` thread relies on it). The callback itself
+    /// still has the player throughout: its builtins run nested script calls, which must not free it.
+    #[test]
+    fn a_leaving_player_is_freed_right_after_the_disconnect_callback() {
+        let src = "CodeCallback_PlayerDisconnect()\n\
+                   {\n\
+                   \tif (isdefined(self))\n\
+                   \t\tlevel.seen = self getentitynumber();\n\
+                   \tlevel.left = self;\n\
+                   }\n\
+                   seen() { return level.seen; }\n\
+                   still_there() { return isdefined(level.left); }\n";
+        let p = gsc::compile(
+            &[("t.gsc", src)],
+            &gsc::Builtins::stock_mp(),
+            gsc::Options::default(),
+        )
+        .unwrap();
+        let callback = p.find("t", "CodeCallback_PlayerDisconnect").unwrap();
+        let still_there = p.find("t", "still_there").unwrap();
+        let seen = p.find("t", "seen").unwrap();
+        let dispatch = crate::script::Dispatch::new(&p);
+        let mut vm = Vm::new(p).unwrap();
+        let mut g = Game::new(Cvars::new(), Content::default());
+        g.reset_level(4);
+        g.callbacks.player_disconnect = Some(callback);
+        let n = g.connect_client(&mut vm, false, "Ann").expect("slot");
+        g.client_mut(n).unwrap().conn = Conn::Connected;
+        g.client_spawn(&mut vm, n, [0.0; 3], [0.0; 3]);
+        g.disconnect_client(&mut vm, n);
+        let mut host = crate::script::ScriptHost {
+            game: &mut g,
+            dispatch: &dispatch,
+        };
+        host.run_calls(&mut vm);
+        assert!(
+            host.game.nested_errors.is_empty(),
+            "the disconnect callback failed: {:?}",
+            host.game
+                .nested_errors
+                .iter()
+                .map(|e| &e.message)
+                .collect::<Vec<_>>()
+        );
+        let seen = vm.call(&mut host, seen, None, &[]).unwrap();
+        assert!(
+            matches!(seen, gsc::CallOutcome::Finished(Value::Int(s)) if s == i32::from(n)),
+            "the disconnect callback lost its player: {seen:?}"
+        );
+        let left = vm.call(&mut host, still_there, None, &[]).unwrap();
+        assert!(
+            matches!(left, gsc::CallOutcome::Finished(Value::Int(0))),
+            "the leaving player's script reference is still defined: {left:?}"
+        );
+        assert!(
+            g.ent(n).is_none(),
+            "the leaving player is still in the world"
+        );
+        assert_eq!(g.clients[usize::from(n)].conn, Conn::Free);
     }
 }

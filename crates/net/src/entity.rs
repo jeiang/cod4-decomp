@@ -33,7 +33,7 @@ pub mod etype {
     pub const PLANE: u8 = 10;
     /// A `script_brushmodel`: the map's inline model `model` (`*N`) placed at `origin` and `angles`. `velocity` is its
     /// motion in units per second at the snapshot's time, so a client can carry what stands on it and draw it ahead
-    /// of the snapshot, `pm_flags` the milliseconds left of its move (it is not carried past that); `eflags` is its contents (low 24 bits), which tells the client whether it blocks a player.
+    /// of the snapshot, `pm_flags` the milliseconds left of its move (it is not carried past that); `eflags` is its contents (low 24 bits), which tells the client whether it blocks a player; `pm_type` is [`BRUSH_AIM_ASSIST`](super::BRUSH_AIM_ASSIST) when the melee aim assist may target it.
     pub const BRUSH: u8 = 11;
 }
 
@@ -46,12 +46,23 @@ pub const MAX_ATTACH: usize = 19;
 /// the client does not slide the entity from where it was to where it is (`EF_TELEPORT_BIT`).
 pub const TELEPORT_BIT: u32 = 1 << 8;
 
+/// A [`etype::BRUSH`] entity's `pm_type` when a script made it a target of the melee aim assist (`enableaimassist`,
+/// the original's `eFlags & 0x800`); 0 otherwise.
+pub const BRUSH_AIM_ASSIST: u8 = 1;
+
+/// Stock unnamed `0x10000` flag: a GENERAL entity retains an active smoke explosion.
+pub const SMOKE_EXPLODE: u32 = 0x10000;
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EntityState {
     /// Not part of the delta; the entity list codes it.
     pub number: u16,
     pub etype: u8,
     pub eflags: u32,
+    /// GENERAL smoke: original burst time (`lerp.u.customExplode.startTime`), milliseconds.
+    pub custom_explode_start_time: i32,
+    /// GENERAL smoke: end of the cloud's lifetime, milliseconds.
+    pub time2: i32,
     pub origin: [f32; 3],
     /// Degrees. A player's pitch is the view pitch, roll the lean.
     pub angles: [f32; 3],
@@ -162,6 +173,8 @@ fn table() -> Vec<Field<EntityState>> {
         num!(s, s.angles[1], Angle16),
         num!(s, s.angles[2], Angle16),
         int!(s, s.eflags, Bits(24)),
+        int!(s, s.custom_explode_start_time, Bits(32)),
+        int!(s, s.time2, Bits(32)),
         int!(s, s.model, Bits(10)),
         int!(s, s.weapon, Bits(9)),
         int!(s, s.client, Bits(10)),
@@ -312,6 +325,23 @@ mod tests {
         write_delta(&mut w, fields(), &EntityState::new(5), &to);
         let bytes = w.into_bytes();
         let mut got = EntityState::new(5);
+        read_delta(&mut BitReader::new(&bytes), fields(), &mut got).unwrap();
+        assert_eq!(got, to);
+    }
+
+    #[test]
+    fn smoke_times_survive_the_wire_beyond_the_old_24_bit_clock() {
+        let to = EntityState {
+            etype: etype::GENERAL,
+            eflags: SMOKE_EXPLODE,
+            custom_explode_start_time: 20_000_000,
+            time2: 20_061_000,
+            ..EntityState::new(70)
+        };
+        let mut w = BitWriter::new();
+        write_delta(&mut w, fields(), &EntityState::new(70), &to);
+        let bytes = w.into_bytes();
+        let mut got = EntityState::new(70);
         read_delta(&mut BitReader::new(&bytes), fields(), &mut got).unwrap();
         assert_eq!(got, to);
     }

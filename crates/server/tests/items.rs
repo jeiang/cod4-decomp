@@ -4,7 +4,7 @@
 
 use gsc::{Builtins, Options, Vm, compile};
 use server::client::{Session, Team};
-use server::combat::{Damage, MOD_RIFLE_BULLET, MOD_SUICIDE};
+use server::combat::{Damage, MOD_GRENADE_SPLASH, MOD_RIFLE_BULLET, MOD_SUICIDE};
 use server::content::Content;
 use server::cvar::Cvars;
 use server::game::{EntKind, Game};
@@ -418,6 +418,35 @@ fn martyrdom_leaves_a_grenade_unless_the_player_killed_themselves() {
         g.player_die(&mut vm, a, &Damage::new(200, mean), 200);
         let after = missiles(&g).len();
         assert_eq!(after - before, usize::from(!suicide), "suicide {suicide}");
+    }
+}
+
+/// A player their own frag killed is counted as a frag suicide (#539); the same frag from someone else, or a rifle
+/// of their own, is not.
+#[test]
+fn a_player_killed_by_their_own_frag_counts_as_a_frag_suicide() {
+    let (mut g, mut vm) = arena();
+    let frag_w = u32::from(g.weapons.index("frag_grenade_mp"));
+    let rifle_w = u32::from(g.weapons.index("m16_mp"));
+    assert!(frag_w != 0 && rifle_w != 0);
+    let other = add_player(&mut g, &mut vm, [64.0, 0.0, 0.0], Team::Axis);
+    for (own, weapon, mean, counted) in [
+        (true, frag_w, MOD_GRENADE_SPLASH, 1),
+        (false, frag_w, MOD_GRENADE_SPLASH, 0),
+        (true, rifle_w, MOD_RIFLE_BULLET, 0),
+    ] {
+        let a = add_player(&mut g, &mut vm, [0.0; 3], Team::Allies);
+        g.ent_mut(a).unwrap().health = 0;
+        let before = g.stats.frag_suicides;
+        let mut d = Damage::new(200, mean);
+        d.attacker = Some(if own { a } else { other });
+        d.weapon = weapon;
+        g.player_die(&mut vm, a, &d, 200);
+        assert_eq!(
+            g.stats.frag_suicides - before,
+            counted,
+            "own {own} weapon {weapon}"
+        );
     }
 }
 

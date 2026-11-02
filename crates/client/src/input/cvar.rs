@@ -27,7 +27,8 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     ("cl_stanceholdtime", "300", false),
     ("cl_yawspeed", "140", true),
     ("cl_pitchspeed", "140", true),
-    ("cg_fov", "80", true),
+    // KisakCOD (GPL-3.0), cgame_mp/cg_main_mp.cpp:366, and `iw3mp.exe` 1.7's registration: 65, archived.
+    ("cg_fov", "65", true),
     ("cg_fovscale", "1", false),
     ("cg_fovmin", "10", false),
     ("in_mouse", "1", true),
@@ -65,6 +66,8 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     // time, the blood limit, team-only chat, no console printing and the window position.
     ("cg_crosshairAlpha", "1", true),
     ("cg_crosshairAlphaMin", "0.5", true),
+    // `cg_crosshairEnemyColor` (cheat, archived; `cg_main_mp.cpp:666`): an enemy under the crosshair tints it.
+    ("cg_crosshairEnemyColor", "1", true),
     ("cg_centertime", "3", false),
     ("cg_bloodLimit", "0", true),
     ("cg_bloodLimitMsec", "330", true),
@@ -75,6 +78,8 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     ("r_brightness", "0", false),
     ("r_contrast", "1", false),
     ("r_desaturation", "1", false),
+    // KisakCOD (GPL-3.0), cgame/cg_visionsets.cpp:72, CG_RegisterVisionSetsDvars: bool, 0, `DVAR_SAVED`.
+    ("nightVisionDisableEffects", "0", true),
     // KisakCOD (GPL-3.0), gfx_d3d/r_dvars.cpp, R_RegisterDvars: renderer defaults and flags.
     // `DVAR_SAVED`, like `DVAR_ARCHIVE`, keeps ordinary `set` writes in the config.
     ("r_filmUseTweaks", "0", false),
@@ -152,11 +157,48 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     ("cg_airstrikeKillCamFarBlurDist", "300", false),
     ("cg_airstrikeKillCamNearBlurStart", "0", false),
     ("cg_airstrikeKillCamNearBlurEnd", "100", false),
+    // `CG_CompassRegisterDvars`: the multiplayer minimap's scale, `DVAR_ARCHIVE | DVAR_CHEAT | DVAR_SAVED` (3500 in
+    // single player).
+    ("compassMaxRange", "2500", true),
+    // `Com_Init`: the game version (`version`, this build's name, is added at start), and
+    // `UI_RegisterDvars` (ui_mp/ui_main_mp.cpp): this is the multiplayer UI, which the stock Options menu reads to
+    // offer Voice Chat and Multiplayer Options in place of the single-player Cheats; and where and how big the build
+    // number is drawn while no server is connected (`UI_DrawBuildNumber`; the 1.7 defaults).
+    ("shortversion", net::SHORT_VERSION, false),
+    ("ui_multiplayer", "1", false),
+    ("ui_buildLocation", "-100 52", false),
+    ("ui_buildSize", "0.3", false),
+    // The one value each of these has here (see `UNSUPPORTED`); the Sound and Game Options pages show them.
+    ("snd_outputConfiguration", "Windows default", true),
+    ("monkeytoy", "0", true),
+    // The Voice Chat and Multiplayer Options pages' controls that `ui_multiplayer` shows (see `NOT_IMPLEMENTED`):
+    // `winvoice_mic_reclevel` as `Voice_Init` registers it (win32/win_voice.cpp, 65535) and `cl_punkbuster` as
+    // `CL_InitOnceForAllClients` does (client_mp/cl_main_mp.cpp, 1): the stock profile's config writes that value back
+    // on every start, which is no change and so no warning.
+    ("winvoice_mic_reclevel", "65535", true),
+    ("cl_punkbuster", "1", true),
+];
+
+/// Stock dvars the menus set that this build keeps but does not act on yet: a write says so (issue #372).
+const NOT_IMPLEMENTED: &[(&str, &str)] = &[
+    (
+        "winvoice_mic_reclevel",
+        "voice chat does not capture yet; the microphone's recording level is not set",
+    ),
+    (
+        "voicechat_level_indicator",
+        "voice chat does not capture yet; no level indicator is drawn",
+    ),
+    ("cl_punkbuster", "PunkBuster does not exist in this build"),
 ];
 
 /// The cvars a console, bind or menu may not set (`DVAR_ROM`).
 const READ_ONLY: &[&str] = &[
     "cl_paused",
+    // `DVAR_ROM` in Com_Init and UI_RegisterDvars.
+    "shortversion",
+    "version",
+    "ui_multiplayer",
     // `DVAR_ROM | DVAR_AUTOEXEC` in R_RegisterDvars.
     "r_lightTweakAmbient",
     "r_lightTweakAmbientColor",
@@ -179,6 +221,7 @@ const CHEAT: &[(&str, &str)] = &[
     ("r_dof_tweak", "0"),
     ("snd_slaveFadeTime", "500"),
     ("snd_enableReverb", "1"),
+    ("snd_levelFadeTime", "250"),
     ("ragdoll_max_life", "4500"),
     ("ragdoll_jointlerp_time", "3000"),
     ("ragdoll_explode_force", "18000"),
@@ -188,6 +231,7 @@ const CHEAT: &[(&str, &str)] = &[
     ("clientSideEffects", "1"),
     ("cg_crosshairAlpha", "1"),
     ("cg_crosshairAlphaMin", "0.5"),
+    ("cg_crosshairEnemyColor", "1"),
     ("cg_centertime", "3"),
     ("r_brightness", "0"),
     ("r_contrast", "1"),
@@ -227,6 +271,14 @@ const CHEAT: &[(&str, &str)] = &[
     ("cg_airstrikeKillCamFarBlurDist", "300"),
     ("cg_airstrikeKillCamNearBlurStart", "0"),
     ("cg_airstrikeKillCamNearBlurEnd", "100"),
+    ("compassMaxRange", "2500"),
+];
+
+/// Float dvars registered with a range narrower than any number: name, min, max.
+const FLOAT_DOMAINS: &[(&str, f32, f32)] = &[
+    // `iw3mp.exe` 1.7's `cg_fov` registration (near 0x43adc1): min 65, max 80, `DVAR_ARCHIVE` only. KisakCOD
+    // (GPL-3.0, CoD4 MP 1.8), cgame_mp/cg_main_mp.cpp:366, allows up to 120.
+    ("cg_fov", 65.0, 80.0),
 ];
 
 /// Stock dvars whose other values this build cannot act on: the one value it has, and why. A write of any other
@@ -236,6 +288,18 @@ const UNSUPPORTED: &[(&str, &str, &str)] = &[
         "snd_khz",
         "44",
         "the mixer runs at the sound device's own rate; this build has no 11/22 kHz output",
+    ),
+    // `SND_InitDriver` (sound/snd_driver.cpp): an enum, index 0 the default; the Sound options page shows it (#372).
+    (
+        "snd_outputConfiguration",
+        "Windows default",
+        "the mixer plays through the sound device's own channel layout",
+    ),
+    // `Con_Init` (client/cl_console.cpp): the Game Options page's Enable Console (#372).
+    (
+        "monkeytoy",
+        "0",
+        "the console is always open to the player in this build",
     ),
     (
         "snd_enableEq",
@@ -249,6 +313,60 @@ const UNSUPPORTED: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// The type and domain `dvar_bool`, `dvar_int` or `dvar_float` gave a dvar (`DVAR_TYPE_BOOL`, `_INT`, `_FLOAT`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Kind {
+    Bool,
+    Int(i32, i32),
+    Float(f32, f32),
+}
+
+impl Kind {
+    /// `Dvar_StringToValue` then `Dvar_ValueInDomain`: the value as the dvar keeps it, or the domain line of
+    /// `Dvar_PrintDomain` with the value read as a number, for one outside the domain.
+    pub fn value(self, s: &str) -> Result<String, (String, String)> {
+        match self {
+            Self::Bool => Ok(if super::config::atoi(s) != 0 {
+                "1"
+            } else {
+                "0"
+            }
+            .to_owned()),
+            Self::Int(min, max) => {
+                let v = super::config::atoi(s);
+                if (min..=max).contains(&v) {
+                    Ok(v.to_string())
+                } else {
+                    Err((v.to_string(), format!("any integer from {min} to {max}")))
+                }
+            }
+            Self::Float(min, max) => {
+                let v = s.trim().parse::<f32>().unwrap_or(0.0);
+                if (min..=max).contains(&v) {
+                    Ok(v.to_string())
+                } else {
+                    Err((v.to_string(), format!("any number from {min} to {max}")))
+                }
+            }
+        }
+    }
+
+    fn same_type(self, other: Self) -> bool {
+        std::mem::discriminant(&self) == std::mem::discriminant(&other)
+    }
+
+    /// Whether an engine dvar registered with `value` reads as this type. This build keeps the engine's dvars
+    /// untyped, so their type is taken from the registered value [INFERENCE].
+    fn fits(self, value: &str) -> bool {
+        let v = value.trim();
+        match self {
+            Self::Bool => v == "0" || v == "1",
+            Self::Int(..) => v.parse::<i32>().is_ok(),
+            Self::Float(..) => v.parse::<f32>().is_ok(),
+        }
+    }
+}
+
 struct Cvar {
     value: String,
     archive: bool,
@@ -256,6 +374,10 @@ struct Cvar {
     /// The value it was registered with: the default, or the first value of one a command created
     /// (`Dvar_RegisterVariant` with an external source keeps it as the reset value).
     registered: String,
+    /// The type `dvar_bool`, `dvar_int` or `dvar_float` gave it; `None` for an untyped one.
+    kind: Option<Kind>,
+    /// Created by a command (`set`, a config), not registered by the engine (`DVAR_EXTERNAL`).
+    external: bool,
 }
 
 pub struct Cvars {
@@ -275,11 +397,15 @@ impl Default for Cvars {
                         value,
                         archive,
                         reset: None,
+                        kind: None,
+                        external: false,
                     },
                 )
             })
             .collect();
-        Self { map }
+        let mut c = Self { map };
+        c.set("version", &net::version(), false);
+        c
     }
 }
 
@@ -345,12 +471,99 @@ impl Cvars {
         }
     }
 
+    /// For a stock dvar this build keeps but does not act on: why.
+    pub fn not_implemented(name: &str) -> Option<&'static str> {
+        NOT_IMPLEMENTED
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|&(_, why)| why)
+    }
+
     /// For a dvar this build accepts only one value of: that value and why.
     pub fn unsupported_domain(name: &str) -> Option<(&'static str, &'static str)> {
         UNSUPPORTED
             .iter()
             .find(|(n, _, _)| n.eq_ignore_ascii_case(name))
             .map(|&(_, only, why)| (only, why))
+    }
+
+    /// The range of a float dvar whose registration bounds it (`Dvar_RegisterFloat`'s min and max): a write outside
+    /// it is refused (`Dvar_SetVariant` after `Dvar_ValueInDomain`).
+    pub fn float_domain(name: &str) -> Option<(f32, f32)> {
+        FLOAT_DOMAINS
+            .iter()
+            .find(|(n, _, _)| n.eq_ignore_ascii_case(name))
+            .map(|&(_, min, max)| (min, max))
+    }
+
+    /// The type a `dvar_*` command gave `name`; `None` for an untyped dvar or none at all.
+    pub fn kind(&self, name: &str) -> Option<Kind> {
+        self.map.get(&name.to_ascii_lowercase())?.kind
+    }
+
+    /// `Dvar_RegisterBool_f`, `_Int_f` and `_Float_f` (KisakCOD dvar_cmds.cpp:540-660): a dvar that does not
+    /// exist, or one a command made without a type, is registered with `kind` and `default` (an untyped one keeps
+    /// its value when it fits the domain). One of another type is refused: `Err` with its name, for
+    /// `dvar '%s' is not a boolean dvar`. One of the same type is left as it is.
+    pub fn register_typed(&mut self, name: &str, kind: Kind, default: &str) -> Result<(), String> {
+        let key = name.to_ascii_lowercase();
+        match self.map.get_mut(&key) {
+            None => {
+                self.map.insert(
+                    key,
+                    Cvar {
+                        value: default.to_owned(),
+                        archive: false,
+                        reset: None,
+                        registered: default.to_owned(),
+                        kind: Some(kind),
+                        external: true,
+                    },
+                );
+                Ok(())
+            }
+            Some(c) if c.external && c.kind.is_none() => {
+                c.value = kind.value(&c.value).unwrap_or_else(|_| default.to_owned());
+                default.clone_into(&mut c.registered);
+                c.kind = Some(kind);
+                Ok(())
+            }
+            Some(c) => {
+                let same = c
+                    .kind
+                    .map_or_else(|| kind.fits(&c.registered), |k| k.same_type(kind));
+                if same { Ok(()) } else { Err(key) }
+            }
+        }
+    }
+
+    /// `(name, reset value)` of every dvar the engine registered, sorted by name: what `Dvar_WriteDefaults`
+    /// writes. It skips `cl_cdkey` and the read-only (`DVAR_ROM`), cheat (`DVAR_CHEAT`) and command-made
+    /// (`DVAR_EXTERNAL`) ones, the `0x40C0` flags of `Dvar_WriteSingleDefault` (KisakCOD dvar.cpp:139).
+    pub fn defaults(&self) -> Vec<(&str, &str)> {
+        let mut v: Vec<_> = self
+            .map
+            .iter()
+            .filter(|(n, c)| {
+                !c.external
+                    && n.as_str() != "cl_cdkey"
+                    && !Self::read_only(n)
+                    && Self::cheat_name(n).is_none()
+            })
+            .filter_map(|(n, _)| Some((n.as_str(), self.reset_value(n)?)))
+            .collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// A `set` (or the name alone) from a console, bind or config: as [`Cvars::set`], and a dvar it creates is
+    /// command-made (`DVAR_EXTERNAL`), so `dvar_int` and the others may give it a type.
+    pub fn set_by_command(&mut self, name: &str, value: &str, archive: bool) {
+        let new = !self.map.contains_key(&name.to_ascii_lowercase());
+        self.set(name, value, archive);
+        if new && let Some(c) = self.map.get_mut(&name.to_ascii_lowercase()) {
+            c.external = true;
+        }
     }
 
     /// Set a value, creating the cvar if needed. `archive` only ever turns the flag on (`seta`).
@@ -363,6 +576,8 @@ impl Cvars {
                 archive: false,
                 reset: None,
                 registered: value.to_owned(),
+                kind: None,
+                external: false,
             });
         value.clone_into(&mut c.value);
         c.archive |= archive;
@@ -386,6 +601,8 @@ impl Cvars {
                 archive: false,
                 reset: None,
                 registered: value.to_owned(),
+                kind: None,
+                external: false,
             });
         value.clone_into(&mut c.value);
         value.clone_into(c.reset.get_or_insert_with(String::new));
@@ -506,6 +723,8 @@ mod tests {
             ("r_lightTweakAmbientColor", "1 0 0 1", false, false, true),
             ("r_lightTweakDiffuseFraction", "0.5", false, false, true),
             ("r_blur", "0", false, true, false),
+            // KisakCOD cgame/cg_compass.cpp, CG_CompassRegisterDvars (multiplayer).
+            ("compassMaxRange", "2500", true, true, false),
         ] {
             assert_eq!(cvars.get(name), Some(default), "{name}");
             assert_eq!(Cvars::cheat_name(name).is_some(), cheat, "{name}");
@@ -576,6 +795,7 @@ mod tests {
             ("r_lightTweakSunColor", "1 0 0 1", "0 1 0 1"),
             ("r_lightTweakSunDirection", "10 20 30", "0 0 0"),
             ("r_blur", "4", "0"),
+            ("compassMaxRange", "10000", "2500"),
         ] {
             input.cvars.set_cheat_state(true);
             assert_eq!(input.cvar(name), Some(default), "{name}");

@@ -90,6 +90,9 @@ pub mod eflags {
     pub const PING: u32 = 1 << 7;
     /// The entity was moved by fiat since the last snapshot (`EF_TELEPORT_BIT`, flipped): not slid there.
     pub const TELEPORT: u32 = net::entity::TELEPORT_BIT;
+    /// A script model's laser sight is on (`laseron`, the original's `0x4000`): clients looking through night vision
+    /// draw it.
+    pub const LASER: u32 = 1 << 9;
 }
 
 /// Time the server has listened to a client without hearing it, after which others are shown the
@@ -1148,7 +1151,8 @@ impl NetSv {
             .ok()
             .filter(|t| *t != slot && c.session == Session::Spectator);
         let Some(target) = followed else {
-            (snap.entities, snap.actors) = tell(game, world, slot, view_origin(&c.ps), &[], true);
+            let eye = view_origin(&c.ps, &game.pm_params.bob);
+            (snap.entities, snap.actors) = tell(game, world, slot, eye, &[], true);
             return Some(snap);
         };
         let archive_ms = (c.archive_time * 1000.0) as i32;
@@ -1167,7 +1171,8 @@ impl NetSv {
             follow.archive_ms = (server_time - f.time).max(1) as u32;
             if let Some(Some(p)) = f.players.get(usize::from(target)) {
                 // What the watched player's eyes could see then.
-                snap.entities = tell(game, &f.entities, slot, view_origin(&p.ps), &keep, false).0;
+                let eye = view_origin(&p.ps, &game.pm_params.bob);
+                snap.entities = tell(game, &f.entities, slot, eye, &keep, false).0;
                 snap.ps = p.ps.clone();
                 snap.inv = p.inv.clone();
                 snap.objectives = p.objectives;
@@ -1179,16 +1184,19 @@ impl NetSv {
                 snap.hud.sort_by_key(|h| h.id);
                 snap.hud.dedup_by_key(|h| h.id);
             } else {
-                snap.entities = tell(game, &f.entities, slot, view_origin(&c.ps), &keep, false).0;
+                let eye = view_origin(&c.ps, &game.pm_params.bob);
+                snap.entities = tell(game, &f.entities, slot, eye, &keep, false).0;
                 return Some(snap);
             }
         } else if let Some(t) = game.client(target).filter(|t| t.connected()) {
-            (snap.entities, snap.actors) = tell(game, world, slot, view_origin(&t.ps), &keep, true);
+            let eye = view_origin(&t.ps, &game.pm_params.bob);
+            (snap.entities, snap.actors) = tell(game, world, slot, eye, &keep, true);
             snap.ps = t.ps.clone();
             snap.inv = Box::new(t.inv.to_words());
             snap.objectives = game.visible_objectives(target);
         } else {
-            (snap.entities, snap.actors) = tell(game, world, slot, view_origin(&c.ps), &keep, true);
+            let eye = view_origin(&c.ps, &game.pm_params.bob);
+            (snap.entities, snap.actors) = tell(game, world, slot, eye, &keep, true);
             return Some(snap);
         }
         // The watcher's own prompts ride on the state of the player watched.
@@ -1255,7 +1263,9 @@ fn compass_shows(game: &Game, viewer: u16, p: &EntityState) -> bool {
 /// What client `viewer` is sent at this moment: the entities it may see and the players beyond its sight the
 /// compass is told about.
 pub fn visible_to(game: &Game, viewer: u16) -> (Vec<EntityState>, Vec<EntityState>) {
-    let eye = game.client(viewer).map_or([0.0; 3], |c| view_origin(&c.ps));
+    let eye = game
+        .client(viewer)
+        .map_or([0.0; 3], |c| view_origin(&c.ps, &game.pm_params.bob));
     tell(game, &world_snapshot(game), viewer, eye, &[], true)
 }
 
@@ -1594,6 +1604,9 @@ pub fn world_snapshot(game: &Game) -> Vec<Sent> {
                 s.angles = e.angles;
                 s.model = model;
                 s.eflags = e.contents as u32 & 0xff_ffff;
+                // The contents fill the flags on the wire: the aim assist flag (`enableaimassist`, the original's
+                // `0x800`) travels in the otherwise unused `pm_type`.
+                s.pm_type = u8::from(e.x.aim_assist) * net::entity::BRUSH_AIM_ASSIST;
                 if !game.is_linked(n) && e.mv.pos.tr.kind != sim::traj::TrType::Stationary {
                     s.velocity = e.mv.pos.tr.evaluate_delta(game.level.time);
                     s.pm_flags = e.mv.remaining_ms(game.level.time).clamp(0, 0x1f_ffff) as u32;
@@ -1638,6 +1651,9 @@ pub fn world_snapshot(game: &Game) -> Vec<Sent> {
                     s.launch_point = point;
                     s.velocity = force;
                 }
+                if e.x.laser {
+                    s.eflags |= eflags::LASER;
+                }
                 if let Some(owner) = e.x.plane_owner {
                     s.etype = etype::PLANE;
                     // A plane shows on every compass, so it is sent to everyone.
@@ -1674,6 +1690,25 @@ pub fn world_snapshot(game: &Game) -> Vec<Sent> {
                 s.pm_type = v.stage;
                 s.eflags = owner_team_flags(game, v.owner);
                 s
+            }
+            EntKind::Plain if e.smoke_explosion.is_some() => {
+                // G_ExplodeMissile broadcasts the persistent smoke cloud, including to late joiners.
+                let smoke = e.smoke_explosion.expect("smoke explosion");
+                EntityState {
+                    number: n,
+                    etype: etype::GENERAL,
+                    eflags: net::entity::SMOKE_EXPLODE,
+                    origin: e.origin,
+                    angles: e.angles,
+                    weapon: smoke.weapon,
+                    client: smoke.owner,
+                    event: crate::tempev::ev::EXPLOSION,
+                    event_parm: smoke.surface,
+                    event_seq: 1,
+                    custom_explode_start_time: smoke.start_time,
+                    time2: smoke.start_time + 61_000,
+                    ..Default::default()
+                }
             }
             EntKind::Plain if e.world_fx.is_some() => {
                 let mut s = EntityState::new(n);

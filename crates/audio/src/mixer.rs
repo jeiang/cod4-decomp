@@ -213,6 +213,11 @@ enum Command {
         priority: u8,
         fade_ms: u32,
     },
+    /// `SND_MapInit`: every entity channel of the group in force starts silent and rises to its goal over
+    /// `fade_ms`.
+    LevelFade {
+        fade_ms: u32,
+    },
 }
 
 /// What the mixer has done, readable from any thread.
@@ -230,6 +235,11 @@ pub struct Stats {
     pub active: AtomicU32,
     /// The priority of the channel volume group in force (0 when none is).
     pub channel_priority: AtomicU32,
+    /// The lowest entity channel volume of the group in force, as `f32` bits (0 until the first mix).
+    channel_volume_min: AtomicU32,
+    /// The lowest entity channel volume of the first chunk mixed after the latest level fade began, as `f32`
+    /// bits (0 before any).
+    level_fade_start: AtomicU32,
     /// Largest output sample seen, as `f32` bits.
     peak: AtomicU32,
 }
@@ -237,6 +247,17 @@ pub struct Stats {
 impl Stats {
     pub fn peak(&self) -> f32 {
         f32::from_bits(self.peak.load(Ordering::Relaxed))
+    }
+
+    /// The lowest entity channel volume of the group in force after the last mix: below 1 while a level fades
+    /// in or a group ducks a channel.
+    pub fn channel_volume_min(&self) -> f32 {
+        f32::from_bits(self.channel_volume_min.load(Ordering::Relaxed))
+    }
+
+    /// How loud the quietest entity channel was in the first chunk after the latest level fade began.
+    pub fn level_fade_start(&self) -> f32 {
+        f32::from_bits(self.level_fade_start.load(Ordering::Relaxed))
     }
 
     pub fn take_peak(&self) -> f32 {
@@ -371,6 +392,12 @@ impl Handle {
     /// `SND_DeactivateChannelVolumes`.
     pub fn deactivate_channel_volumes(&self, priority: u8, fade_ms: u32) {
         self.send(Command::DeactivateChannelVolumes { priority, fade_ms });
+    }
+
+    /// `SND_MapInit`: the entity channels start a level silent and fade up to their goals over `fade_ms`
+    /// (`snd_levelFadeTime`).
+    pub fn level_fade(&self, fade_ms: u32) {
+        self.send(Command::LevelFade { fade_ms });
     }
 
     pub fn set_listener(&self, l: Listener) {
@@ -538,6 +565,8 @@ pub struct Mixer {
     wet_step: f32,
     eq: [ChannelEq; MAX_CHANNELS],
     chan_vol: ChannelVolumes,
+    /// A level fade began since the last chunk: the next chunk's lowest channel volume is noted as its start.
+    level_fade_probe: bool,
     /// The mono sum of the sounds that feed the reverb, one chunk.
     send: Vec<f32>,
 }
@@ -638,6 +667,7 @@ pub fn mixer(rate: u32, channels: &[ChannelDef]) -> (Handle, Mixer) {
             wet_step: 0.0,
             eq: [[[None; BANDS]; EQS]; MAX_CHANNELS],
             chan_vol: ChannelVolumes::new(),
+            level_fade_probe: false,
             send: vec![0.0; CHUNK],
         },
     )
@@ -683,6 +713,18 @@ impl Mixer {
         let mut finished = 0;
         let mut underruns = 0;
         self.chan_vol.advance(dt_ms);
+        let lowest = self.chan_vol.groups[self.chan_vol.current]
+            .iter()
+            .map(|c| c.volume)
+            .fold(1.0f32, f32::min);
+        self.stats
+            .channel_volume_min
+            .store(lowest.to_bits(), Ordering::Relaxed);
+        if std::mem::take(&mut self.level_fade_probe) {
+            self.stats
+                .level_fade_start
+                .store(lowest.to_bits(), Ordering::Relaxed);
+        }
         self.fade.advance(dt_ms);
         for slot in &mut self.voices {
             let Some(v) = slot else { continue };
@@ -779,6 +821,10 @@ impl Mixer {
                     .channel_priority
                     .store(self.chan_vol.current as u32, Ordering::Relaxed);
             }
+            Command::LevelFade { fade_ms } => {
+                self.chan_vol.level_fade(fade_ms);
+                self.level_fade_probe = true;
+            }
             Command::Listener(l) => self.listener = l,
             Command::Reverb { room, wet, fade_ms } => {
                 if room != self.reverb.room() {
@@ -816,7 +862,11 @@ impl Mixer {
         self.slave_lerp = 0.0;
         self.wet = 0.0;
         self.wet_goal = 0.0;
-        self.chan_vol = ChannelVolumes::new();
+        // Stock deactivates every group above the base one at once; the base group, and a level fade it is
+        // running, carry on.
+        for priority in 1..CHANNEL_GROUPS {
+            self.chan_vol.deactivate(priority, 0);
+        }
         self.stats.channel_priority.store(0, Ordering::Relaxed);
         self.eq = [[[None; BANDS]; EQS]; MAX_CHANNELS];
         self.stats.active.store(0, Ordering::Relaxed);
@@ -1185,6 +1235,16 @@ impl ChannelVolumes {
         }
     }
 
+    /// `SND_MapInit`: the group in force drops every channel to silence and raises it to its goal over `fade_ms`
+    /// (0 counts as 1, as stock's does).
+    fn level_fade(&mut self, fade_ms: u32) {
+        let fade = fade_ms.max(1) as f32;
+        for c in &mut self.groups[self.current] {
+            c.volume = 0.0;
+            c.rate = c.goal / fade;
+        }
+    }
+
     /// `SND_UpdateVolume` for every channel of the current group.
     fn advance(&mut self, dt_ms: f32) {
         for c in &mut self.groups[self.current] {
@@ -1333,6 +1393,41 @@ mod tests {
         // 4 chunks of 480 frames at 48 kHz is 40 ms of a 2 s fade.
         let part = level(&mut m)[0];
         assert!(part > 0.9 * open && part < open, "{open} -> {part}");
+    }
+
+    #[test]
+    fn a_level_start_fades_the_channels_in_over_the_level_fade_time() {
+        let (mut h, mut m) = mixer(RATE, &table());
+        world_play(&mut h, 1, [400.0, 0.0, 0.0]);
+        let open = level(&mut m)[0];
+        assert_eq!(h.stats.channel_volume_min(), 1.0);
+        h.level_fade(250);
+        // The first 40 ms of a 250 ms fade from silence.
+        let start = level(&mut m)[0];
+        assert!(start < 0.5 * open, "{open} -> {start}");
+        assert!(h.stats.channel_volume_min() < 0.5);
+        assert!(
+            h.stats.level_fade_start() < 0.1,
+            "{}",
+            h.stats.level_fade_start()
+        );
+        // Past 250 ms every channel is back at its goal.
+        for _ in 0..6 {
+            level(&mut m);
+        }
+        let full = level(&mut m)[0];
+        assert!((full - open).abs() < 0.01 * open, "{open} -> {full}");
+        assert_eq!(h.stats.channel_volume_min(), 1.0);
+    }
+
+    #[test]
+    fn stopping_every_sound_leaves_a_level_fade_running() {
+        let (mut h, mut m) = mixer(RATE, &table());
+        h.level_fade(250);
+        h.stop_all();
+        world_play(&mut h, 1, [400.0, 0.0, 0.0]);
+        level(&mut m);
+        assert!(h.stats.channel_volume_min() < 0.5);
     }
 
     #[test]

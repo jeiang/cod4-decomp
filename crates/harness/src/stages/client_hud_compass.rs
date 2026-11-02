@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Snapshot firing-event compass parity (#406). Bots stand still and use real weapon usercmds.
 //! An unsilenced shot must hold its rendered mark for the independently observed audio playback length,
-//! then fade for compassSoundPingFadeTime; a silenced shot must not ping. The frag case (an offhand throw raises
-//! no fire event, so no ping) returns once the listen-server bot throws (#486); until then the client unit test in
-//! `netplay/hud.rs` covers the `WEAPTYPE_GRENADE` rule.
+//! then fade for compassSoundPingFadeTime; a silenced shot must not ping. The frag case: an offhand throw raises no
+//! fire event, so it pings nothing; the listen-server bot's throw is proven by the `grenade` entity on the server.
 //! Reference: KisakCOD MP 1.8 (GPL-3.0), cgame/cg_weapons.cpp:2552-2558,
 //! cgame_mp/cg_compassfriendlies_mp.cpp:246,589-600. 1.7 unverified.
 use crate::control::Driven;
@@ -17,6 +16,8 @@ const SILENCED: &str = "mp5_silencer_mp";
 const BURST_MS: u32 = 500;
 /// Long enough for the sound hold and fade to end.
 const SETTLE: Duration = Duration::from_secs(5);
+/// Attempts at one case: the match can still kill the idle bot (#494 saw it respawn mid-case).
+const ATTEMPTS: u32 = 3;
 
 /// The HUD's cumulative compass counters.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -52,7 +53,7 @@ fn verdict(
     Ok(())
 }
 
-fn exec(c: &mut Driven, line: &str) -> Result<(), String> {
+pub(super) fn exec(c: &mut Driven, line: &str) -> Result<(), String> {
     c.ask(json!({"cmd": "server", "op": "exec", "line": line}))?;
     Ok(())
 }
@@ -72,7 +73,7 @@ fn counts(c: &mut Driven) -> Result<Counts, String> {
 }
 
 /// The server's record of client `slot`.
-fn server_client(c: &mut Driven, slot: u64) -> Result<Value, String> {
+pub(super) fn server_client(c: &mut Driven, slot: u64) -> Result<Value, String> {
     let r = c.ask(json!({"cmd": "server", "op": "state", "what": "clients"}))?;
     r["clients"]
         .as_array()
@@ -80,8 +81,22 @@ fn server_client(c: &mut Driven, slot: u64) -> Result<Value, String> {
         .ok_or_else(|| format!("the server has no client {slot}"))
 }
 
+/// What a failure needs of a server client record: its weapons, life and position.
+fn body(p: &Value) -> String {
+    format!(
+        "weapon {} weapons {} alive {} spawn_count {} deaths {} shots {} origin {}",
+        p["weapon_name"],
+        p["weapons"],
+        p["alive"],
+        p["spawn_count"],
+        p["deaths"],
+        p["shots"],
+        p["origin"]
+    )
+}
+
 /// The slot of a live bot on team `team` (1 axis, 2 allies, as both the client and the server number them).
-fn enemy_bot(c: &mut Driven, team: u64) -> Result<u64, String> {
+pub(super) fn enemy_bot(c: &mut Driven, team: u64) -> Result<u64, String> {
     let end = Instant::now() + Duration::from_secs(20);
     loop {
         let r = c.ask(json!({"cmd": "server", "op": "state", "what": "clients"}))?;
@@ -104,35 +119,264 @@ fn enemy_bot(c: &mut Driven, team: u64) -> Result<u64, String> {
     }
 }
 
-/// One case: the bot shoots `weapon`; the compass must ping or not.
+/// Puts the bot at `spot` (`devtele` arguments) and has it give and raise `weapon`, so the burst after it is the
+/// weapon's fire and not its raise. Only a bot seen dead or respawned (a fresh inventory, somewhere else) is put back
+/// and given it again; a living bot that does not raise it within the hook's own wait fails. Returns the spawn count
+/// the bot holds it in.
+fn raise(c: &mut Driven, bot: u64, spot: &str, label: &str, weapon: &str) -> Result<Value, String> {
+    let end = Instant::now() + Duration::from_secs(30);
+    let (mut placed, mut issued) = (Value::Null, Instant::now());
+    loop {
+        let p = server_client(c, bot)?;
+        if p["alive"] == json!(true) && p["spawn_count"] != placed {
+            exec(c, &format!("devtele {bot} {spot}"))?;
+            exec(c, &format!("devbotfire {bot} {weapon} 0"))?;
+            (placed, issued) = (p["spawn_count"].clone(), Instant::now());
+        }
+        c.pause(Duration::from_millis(500))?;
+        let held = server_client(c, bot)?;
+        let same_life = held["alive"] == json!(true) && held["spawn_count"] == placed;
+        if same_life && held["weapon_name"] == weapon {
+            return Ok(placed);
+        }
+        // The hook asks for the weapon for 5 s (`DEV_RAISE_WAIT_MS` in `server/src/bot.rs`).
+        if (same_life && issued.elapsed() > Duration::from_secs(6)) || Instant::now() > end {
+            return Err(format!(
+                "{label}: bot {bot} never raised {weapon}: {}",
+                body(&held)
+            ));
+        }
+    }
+}
+
+/// One case: the bot, at `spot`, shoots `weapon`; the compass must ping or not. An attempt in which the bot
+/// respawned (something in the match killed it; the person's pings and its weapon are then another life's) proves
+/// nothing and is made again, up to [`ATTEMPTS`] times. So is one in which the person (client `me`) died: the bot's
+/// burst or another player can kill them, and a respawned person's compass holds another life's pings. The bot
+/// stands 96 units along x from where the person is at each attempt's start.
 fn case(
     c: &mut Driven,
+    me: u64,
     bot: u64,
     label: &str,
     weapon: &str,
     pings: bool,
 ) -> Result<String, String> {
-    // Give and raise the weapon first, so the burst below is its fire and not the raise.
-    exec(c, &format!("devbotfire {bot} {weapon} 0"))?;
-    c.pause(Duration::from_secs(2))?;
-    c.pause(SETTLE)?;
-    let before = counts(c)?;
-    let was = server_client(c, bot)?;
-    exec(c, &format!("devbotfire {bot} {weapon} {BURST_MS}"))?;
-    c.pause(Duration::from_millis(u64::from(BURST_MS) + 1500))?;
-    c.pause(Duration::from_secs(5))?;
-    let after = counts(c)?;
-    let now = server_client(c, bot)?;
+    let mut lost = Vec::new();
+    for attempt in 1..=ATTEMPTS {
+        let person = alive_person(c, me)?;
+        let o = &person["origin"];
+        let at = |i: usize| o[i].as_f64().unwrap_or(0.0);
+        let spot = format!("{} {} {}", at(0) + 96.0, at(1), at(2));
+        let placed = raise(c, bot, &spot, label, weapon)?;
+        c.pause(SETTLE)?;
+        let before = counts(c)?;
+        let was = server_client(c, bot)?;
+        // Killed while settling: the burst would be another life's, without the weapon.
+        if was["spawn_count"] != placed
+            || was["weapon_name"] != weapon
+            || was["alive"] != json!(true)
+        {
+            lost.push(format!(
+                "attempt {attempt} lost the weapon while settling: {}",
+                body(&was)
+            ));
+            continue;
+        }
+        exec(c, &format!("devbotfire {bot} {weapon} {BURST_MS}"))?;
+        c.pause(Duration::from_millis(u64::from(BURST_MS) + 1500))?;
+        c.pause(Duration::from_secs(5))?;
+        let after = counts(c)?;
+        let now = server_client(c, bot)?;
+        let person_now = server_client(c, me)?;
+        if now["spawn_count"] != was["spawn_count"] || now["alive"] != json!(true) {
+            lost.push(format!(
+                "attempt {attempt} before: {}; after: {}",
+                body(&was),
+                body(&now)
+            ));
+            continue;
+        }
+        if person_now["spawn_count"] != person["spawn_count"] || person_now["alive"] != json!(true)
+        {
+            lost.push(format!(
+                "attempt {attempt}: the person died (deaths {} -> {}, health {})",
+                person["deaths"], person_now["deaths"], person_now["health"]
+            ));
+            continue;
+        }
+        return finish(c, bot, label, pings, (before, after), (&was, &now))
+            .map(|s| retried(s, &lost));
+    }
+    Err(format!(
+        "{label}: the bot or the person died during every attempt: {}",
+        lost.join("; ")
+    ))
+}
+
+/// How long the bot holds the frag key: past the frag's hold time, so the release throws it.
+const FRAG_MS: u32 = 1000;
+
+/// Lets `d` pass while sampling the server's entities for a thrown grenade (classname `grenade`) and the bot's weapon
+/// state, so a throw that never happens says where the offhand path stopped. The server's view, not the client's: a
+/// grenade can leave the person's PVS.
+fn watch_for_grenade(c: &mut Driven, bot: u64, d: Duration) -> Result<(bool, Vec<String>), String> {
+    let end = Instant::now() + d;
+    let (mut seen, mut trace) = (false, Vec::<String>::new());
+    while Instant::now() < end {
+        let ents = c.ask(json!({"cmd": "server", "op": "state", "what": "entities"}))?;
+        seen |= grenade_in(&ents);
+        let p = server_client(c, bot)?;
+        let line = format!(
+            "state {} weapon {} flags {} offhand {} fuse {} pm_flags {} buttons {}",
+            p["weapon_state"],
+            p["weapon"],
+            p["weapon_flags"],
+            p["offhand_index"],
+            p["grenade_time_left"],
+            p["pm_flags"],
+            p["buttons"]
+        );
+        if trace.last() != Some(&line) {
+            trace.push(line);
+        }
+        c.pause(Duration::from_millis(100))?;
+    }
+    Ok((seen, trace))
+}
+
+/// Whether the server's entity list (`state entities`; a section that is not an object comes back as the reply's
+/// `value`) holds a thrown grenade (#486: read as the bare reply it never did, so every throw looked missing).
+fn grenade_in(reply: &Value) -> bool {
+    reply["value"]
+        .as_array()
+        .is_some_and(|l| l.iter().any(|e| e["classname"] == json!("grenade")))
+}
+
+/// The frag case: the bot, 96 units along x from the person, throws a frag through the offhand path. The throw must be
+/// proven (a `grenade` entity on the server, no `FireWeapon` shot) and must not ping the compass: an offhand throw
+/// raises no fire event (`WEAPTYPE_GRENADE`). The frag can hurt or kill the person or the bot itself; a death changes
+/// no fire or flag ping, so a seen grenade settles the case either way, and only a bot that respawned without one
+/// (another life, another inventory) makes the attempt again.
+fn frag_case(c: &mut Driven, me: u64, bot: u64) -> Result<String, String> {
+    let mut lost = Vec::new();
+    for attempt in 1..=ATTEMPTS {
+        let person = alive_person(c, me)?;
+        let o = &person["origin"];
+        let at = |i: usize| o[i].as_f64().unwrap_or(0.0);
+        exec(
+            c,
+            &format!("devtele {bot} {} {} {}", at(0) + 96.0, at(1), at(2)),
+        )?;
+        c.pause(SETTLE)?;
+        let before = counts(c)?;
+        let was = server_client(c, bot)?;
+        if was["alive"] != json!(true) {
+            lost.push(format!(
+                "attempt {attempt}: the bot died settling: {}",
+                body(&was)
+            ));
+            continue;
+        }
+        exec(c, &format!("devbotfire {bot} frag {FRAG_MS}"))?;
+        let (thrown, trace) =
+            watch_for_grenade(c, bot, Duration::from_millis(u64::from(FRAG_MS) + 1500))?;
+        c.pause(SETTLE)?;
+        let after = counts(c)?;
+        let now = server_client(c, bot)?;
+        if !thrown && now["spawn_count"] != was["spawn_count"] {
+            lost.push(format!(
+                "attempt {attempt} before: {}; after: {}; trace [{}]",
+                body(&was),
+                body(&now),
+                trace.join(" | ")
+            ));
+            continue;
+        }
+        let shots = now["shots"]
+            .as_u64()
+            .unwrap_or(0)
+            .saturating_sub(was["shots"].as_u64().unwrap_or(0));
+        frag_verdict(thrown, shots, before, after).map_err(|e| {
+            format!(
+                "{e}; bot {bot} before: {}; after: {}; trace [{}]",
+                body(&was),
+                body(&now),
+                trace.join(" | ")
+            )
+        })?;
+        return Ok(retried(
+            format!("grenade: thrown, 0 shots, counters {before:?} -> {after:?}"),
+            &lost,
+        ));
+    }
+    Err(format!(
+        "grenade: the bot died during every attempt: {}",
+        lost.join("; ")
+    ))
+}
+
+/// The frag case's verdict: a grenade entity proves the throw, which is no `FireWeapon` shot and pings nothing.
+fn frag_verdict(thrown: bool, shots: u64, before: Counts, after: Counts) -> Result<(), String> {
+    if !thrown {
+        return Err("grenade: no grenade entity on the server; the bot never threw".into());
+    }
+    if shots != 0 {
+        return Err(format!(
+            "grenade: the throw counted {shots} FireWeapon shots"
+        ));
+    }
+    if after != before {
+        return Err(format!(
+            "grenade: want no compass ping, counters {before:?} -> {after:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// The person's server state once they are alive (a killed person respawns within a few seconds).
+fn alive_person(c: &mut Driven, me: u64) -> Result<Value, String> {
+    let end = Instant::now() + Duration::from_secs(15);
+    loop {
+        let p = server_client(c, me)?;
+        if p["alive"] == json!(true) {
+            return Ok(p);
+        }
+        if Instant::now() > end {
+            return Err(format!("the person did not respawn: {}", body(&p)));
+        }
+        c.pause(Duration::from_millis(500))?;
+    }
+}
+
+/// A passing case's note, naming the attempts the bot died in.
+fn retried(note: String, lost: &[String]) -> String {
+    if lost.is_empty() {
+        note
+    } else {
+        format!(
+            "{note} (bot died in {} earlier attempts: {})",
+            lost.len(),
+            lost.join("; ")
+        )
+    }
+}
+
+/// The verdict on one attempt in which the bot lived throughout.
+fn finish(
+    c: &mut Driven,
+    bot: u64,
+    label: &str,
+    pings: bool,
+    (before, after): (Counts, Counts),
+    (was, now): (&Value, &Value),
+) -> Result<String, String> {
     let shots = now["shots"]
         .as_u64()
         .unwrap_or(0)
         .saturating_sub(was["shots"].as_u64().unwrap_or(0));
-    verdict(label, pings, before, after, shots).map_err(|e| {
-        format!(
-            "{e}; bot {bot} before: weapon {} alive {}; after: weapon {} weapons {} alive {} origin {}",
-            was["weapon"], was["alive"], now["weapon"], now["weapons"], now["alive"], now["origin"]
-        )
-    })?;
+    verdict(label, pings, before, after, shots)
+        .map_err(|e| format!("{e}; bot {bot} before: {}; after: {}", body(was), body(now)))?;
     if pings {
         let played = c
             .lookup("hud.report.last_fire_played_ms")?
@@ -146,31 +390,44 @@ fn case(
             .lookup("hud.report.last_fire_mark_ms")?
             .as_i64()
             .ok_or("missing rendered mark lifetime")?;
-        duration_verdict(played, hold, mark, 2000)?;
+        let gone = c
+            .lookup("hud.report.last_fire_gone_ms")?
+            .as_i64()
+            .ok_or("missing first frame without the mark")?;
+        duration_verdict(played, hold, (mark, gone), 2000)?;
     }
     let length = c.lookup("hud.report.last_fire_ping_ms")?;
     let played = c.lookup("hud.report.last_fire_played_ms")?;
     let mark = c.lookup("hud.report.last_fire_mark_ms")?;
+    let gone = c.lookup("hud.report.last_fire_gone_ms")?;
     Ok(format!(
-        "{label}: {} fire pings, {} flag pings, {} marks drawn, hold {length} ms, audio {played} ms, mark lifetime {mark} ms",
+        "{label}: {} fire pings, {} flag pings, {} marks drawn, hold {length} ms, audio {played} ms, mark lifetime {mark}-{gone} ms",
         after.fire_pings - before.fire_pings,
         after.flag_pings - before.flag_pings,
         after.marks - before.marks,
     ))
 }
 
-/// At 60 Hz allow several frames of snapshot/draw scheduling, but never the 351 ms fixed-hold error.
-fn duration_verdict(played: i64, hold: i64, mark: i64, fade: i64) -> Result<(), String> {
-    if hold != played || (mark - (played + fade)).abs() > 200 {
+/// The mark's lifetime lies between its age on the last frame that drew it (`mark`) and on the first that did not
+/// (`gone`, 0 when unseen). At a few frames a second those are hundreds of milliseconds apart (#499), so the wanted
+/// lifetime must fall in that span, give or take a few 60 Hz frames of snapshot and draw scheduling; never the
+/// 351 ms fixed-hold error.
+fn duration_verdict(
+    played: i64,
+    hold: i64,
+    (mark, gone): (i64, i64),
+    fade: i64,
+) -> Result<(), String> {
+    let want = played + fade;
+    if hold != played || mark > want + 200 || mark.max(gone) < want - 200 {
         return Err(format!(
-            "fire timing: played {played} ms, held {hold} ms, mark {mark} ms; want {} ms",
-            played + fade
+            "fire timing: played {played} ms, held {hold} ms, mark {mark} ms, gone {gone} ms; want {want} ms"
         ));
     }
     Ok(())
 }
 
-/// Unsilenced shots ping the compass for the fire sound's length; silenced shots do not ping at all.
+/// Unsilenced shots ping the compass for the fire sound's length; silenced shots and a thrown frag do not ping at all.
 pub(super) fn check(c: &mut Driven) -> Result<String, String> {
     let team = c.lookup("player.team")?.as_u64().unwrap_or(0);
     let enemy = match team {
@@ -181,23 +438,47 @@ pub(super) fn check(c: &mut Driven) -> Result<String, String> {
     exec(c, "set bot_idle 1")?;
     exec(c, "set developer 1")?;
     c.ask(json!({"cmd":"cvar", "name":"compassSoundPingFadeTime", "value":"2"}))?;
+    let me = c
+        .lookup("player.client")?
+        .as_u64()
+        .ok_or("no client slot")?;
+    let mut person = server_client(c, me)?;
+    let mut bot_home = None;
     let result: Result<Vec<String>, String> = (|| {
         let bot = enemy_bot(c, enemy)?;
-        let origin = c.lookup("player.origin")?;
-        let at = |i: usize| origin[i].as_f64().unwrap_or(0.0);
-        exec(
-            c,
-            &format!("devtele {bot} {} {} {}", at(0) + 96.0, at(1), at(2)),
-        )?;
+        bot_home = Some((bot, server_client(c, bot)?["origin"].clone()));
         // `case` compares the independently played sound with the hold and final drawn mark lifetime.
-        Ok(vec![
-            case(c, bot, "unsilenced", UNSILENCED, true)?,
-            case(c, bot, "silenced", SILENCED, false)?,
-        ])
+        let notes = vec![
+            case(c, me, bot, "unsilenced", UNSILENCED, true)?,
+            case(c, me, bot, "silenced", SILENCED, false)?,
+            frag_case(c, me, bot)?,
+        ];
+        // A death `case` repeated an attempt for is in its note, and the frag may kill the person; the release below
+        // must not add one.
+        person = alive_person(c, me)?;
+        Ok(notes)
     })();
+    // Put the bot back where it stood before letting it think again: released 96 units from the person, an enemy
+    // with a raised SMG can kill them at the start of the next step.
+    if let Some((bot, home)) = bot_home
+        && let Some(o) = home.as_array().filter(|o| o.len() == 3)
+    {
+        exec(c, &format!("devtele {bot} {} {} {}", o[0], o[1], o[2]))?;
+    }
     exec(c, "set bot_idle 0")?;
     exec(c, "set developer 0")?;
-    Ok(format!("compass: {}", result?.join("; ")))
+    let after = server_client(c, me)?;
+    let mut notes = result?;
+    if after["deaths"] != person["deaths"] || after["alive"] != json!(true) {
+        return Err(format!(
+            "the person died releasing the bot: before {person}, after {after}"
+        ));
+    }
+    notes.push(format!(
+        "person health {} -> {}",
+        person["health"], after["health"]
+    ));
+    Ok(format!("compass: {}", notes.join("; ")))
 }
 
 #[cfg(test)]
@@ -232,10 +513,40 @@ mod tests {
 
     #[test]
     fn lifetime_rejects_a_fixed_two_seconds_and_handles_unknown_audio() {
-        assert!(duration_verdict(1649, 1649, 3640, 2000).is_ok());
-        assert!(duration_verdict(1649, 2000, 4000, 2000).is_err());
-        assert!(duration_verdict(1649, 1649, 2000, 2000).is_err());
-        assert!(duration_verdict(0, 0, 1990, 2000).is_ok());
-        assert!(duration_verdict(0, 2000, 4000, 2000).is_err());
+        assert!(duration_verdict(1649, 1649, (3640, 3656), 2000).is_ok());
+        assert!(duration_verdict(1649, 2000, (4000, 4016), 2000).is_err());
+        assert!(duration_verdict(1649, 1649, (2000, 2016), 2000).is_err());
+        assert!(duration_verdict(0, 0, (1990, 0), 2000).is_ok());
+        assert!(duration_verdict(0, 2000, (4000, 4016), 2000).is_err());
+    }
+
+    #[test]
+    fn lifetime_spans_a_slow_frame_but_not_a_short_mark() {
+        // #494: the last drawn frame 224 ms short of the fade's end, the next frame 300 ms later past it.
+        assert!(duration_verdict(1649, 1649, (3425, 3725), 2000).is_ok());
+        assert!(duration_verdict(1649, 1649, (3425, 0), 2000).is_err());
+        assert!(duration_verdict(1649, 1649, (3000, 3100), 2000).is_err());
+        assert!(duration_verdict(1649, 1649, (3900, 4200), 2000).is_err());
+    }
+
+    #[test]
+    fn a_grenade_is_found_in_the_replys_value() {
+        let reply = json!({"id": 3, "ok": true, "value": [
+            {"classname": "player", "number": 0},
+            {"classname": "grenade", "number": 70},
+        ]});
+        assert!(grenade_in(&reply));
+        let none = json!({"id": 4, "ok": true, "value": [{"classname": "player", "number": 0}]});
+        assert!(!grenade_in(&none));
+    }
+
+    #[test]
+    fn a_frag_must_be_thrown_count_no_shot_and_ping_nothing() {
+        assert!(frag_verdict(true, 0, c(2, 1, 9), c(2, 1, 9)).is_ok());
+        assert!(frag_verdict(false, 0, c(2, 1, 9), c(2, 1, 9)).is_err());
+        assert!(frag_verdict(true, 1, c(2, 1, 9), c(2, 1, 9)).is_err());
+        assert!(frag_verdict(true, 0, c(2, 1, 9), c(3, 1, 9)).is_err());
+        assert!(frag_verdict(true, 0, c(2, 1, 9), c(2, 2, 9)).is_err());
+        assert!(frag_verdict(true, 0, c(2, 1, 9), c(2, 1, 10)).is_err());
     }
 }

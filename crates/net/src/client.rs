@@ -213,13 +213,18 @@ impl<T: Transport> NetClient<T> {
             let Some((_, rec)) = d.next.take() else { break };
             match rec {
                 Record::Command(line) => match crate::ui::ServerCmd::parse(&line) {
+                    // The look's, as in a live session (`Session::parse`).
+                    Some(
+                        crate::ui::ServerCmd::Vision { .. }
+                        | crate::ui::ServerCmd::ShellShock { .. },
+                    )
+                    | None => self.commands.push(line),
                     Some(cmd) => {
                         if let crate::ui::ServerCmd::Map { name } = &cmd {
                             self.map.clone_from(name);
                         }
                         d.ui.apply(cmd);
                     }
-                    None => self.commands.push(line),
                 },
                 Record::NewMap => self.snaps.clear(),
                 Record::Snapshot(s) => {

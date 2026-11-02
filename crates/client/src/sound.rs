@@ -61,6 +61,28 @@ pub fn mix_of(cvars: &crate::input::Cvars) -> (u32, bool) {
     (fade, reverb)
 }
 
+/// `snd_levelFadeTime`'s default: the ms every entity channel takes to fade in when a level starts.
+pub const LEVEL_FADE_MS: u32 = 250;
+
+/// `snd_levelFadeTime` (ms, 0 to 5000). A CHEAT dvar like [`mix_of`]'s: without `sv_cheats` the stock 250 stands.
+pub fn level_fade_of(cvars: &crate::input::Cvars) -> u32 {
+    if !cvars.bool("sv_cheats") {
+        return LEVEL_FADE_MS;
+    }
+    cvars
+        .get("snd_levelFadeTime")
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .map_or(LEVEL_FADE_MS, |v| v.clamp(0, 5000) as u32)
+}
+
+/// The latest level fade-in, for the report: its length and how loud the quietest channel was after 300 ms.
+struct FadeWatch {
+    ms: u32,
+    /// Frame time since the fade began, ms.
+    elapsed: f32,
+    after_300ms: Option<f32>,
+}
+
 /// `snd_enveffectsprio_shellshock`, and the channel volume priority of `snd_channelvolprio_shellshock`.
 const SHOCK_REVERB: usize = 2;
 const SHOCK_VOLUMES: u8 = 3;
@@ -107,6 +129,14 @@ pub struct ClientSound {
     breath: crate::breath::Breath,
     /// What the held breath dips each channel to, by channel name; others take the stock 0.5.
     breath_volumes: Vec<(String, f32)>,
+    /// A level began (`SND_MapInit`) before the tables were ready: its fade, in ms, starts when they are.
+    level_fade: Option<u32>,
+    fade_watch: Option<FadeWatch>,
+    /// The listener's yaw (radians counter-clockwise from +x), for `snd_playLocal`.
+    yaw: f32,
+    /// `milesGlob.eq`: every band the EQ commands touched, by channel index, EQ and band, with whether it is on
+    /// (a deactivated band keeps its settings).
+    eq: std::collections::BTreeMap<(usize, u8, u8), (audio::eq::Band, bool)>,
 }
 
 /// Who an event belongs to.
@@ -156,6 +186,10 @@ impl ClientSound {
             entity_loops: HashMap::new(),
             breath: crate::breath::Breath::default(),
             breath_volumes: Vec::new(),
+            level_fade: None,
+            fade_watch: None,
+            yaw: 0.0,
+            eq: std::collections::BTreeMap::new(),
         }
     }
 
@@ -216,6 +250,261 @@ impl ClientSound {
         self.footsteps = on;
     }
 
+    /// `SND_PlayLocal_f`: plays `alias` `dist` units from the listener, `yaw` degrees to its left and `pitch`
+    /// degrees up (`RelativeToListener`); returns where, or `None` when there is no such alias.
+    pub fn play_local(&mut self, alias: &str, dist: f32, yaw: f32, pitch: f32) -> Option<[f32; 3]> {
+        let (eye, listener_yaw) = (self.eye, self.yaw);
+        let s = self.ready()?;
+        if !s.bank.has(alias) {
+            return None;
+        }
+        // `AngleVectors` of (-pitch, listener yaw - yaw): x forward, y left, z up.
+        let y = listener_yaw - yaw.to_radians();
+        let p = (-pitch).to_radians();
+        let dir = [p.cos() * y.cos(), p.cos() * y.sin(), -p.sin()];
+        let at = [0, 1, 2].map(|i| eye[i] + dir[i] * dist);
+        s.play(
+            alias,
+            Cue {
+                origin: Some(at),
+                ..Cue::default()
+            },
+        );
+        Some(at)
+    }
+
+    /// The EQ console commands (`snd_setEq`, `snd_setEqFreq`, `snd_setEqGain`, `snd_setEqQ`, `snd_setEqType`,
+    /// `snd_deactivateEq`; snd.cpp `SND_*Eq*_f`): `cmd` is the command word and its arguments. Returns the console
+    /// lines.
+    pub fn eq_command(&mut self, cmd: &[String]) -> Vec<String> {
+        use audio::eq::{Band, EqType};
+        let mut out = Vec::new();
+        let verb = cmd[0].to_ascii_lowercase();
+        let arg = |i: usize| cmd.get(i).map_or("", String::as_str);
+        let atof = |i: usize| arg(i).trim().parse::<f32>().unwrap_or(0.0);
+        const BLANK: Band = Band {
+            kind: EqType::LowPass,
+            gain_db: 0.0,
+            freq: 0.0,
+            q: 0.0,
+        };
+        let parse_type = |s: &str, out: &mut Vec<String>| {
+            let t = EqType::parse(s);
+            if t.is_none() {
+                out.push(format!(
+                    "invalid eq type string '{s}', it must be one of the following strings:"
+                ));
+                out.extend(EqType::NAMES.iter().map(|n| format!("  {n}")));
+            }
+            t
+        };
+        if verb == "snd_deactivateeq" {
+            if !(2..=4).contains(&cmd.len()) {
+                out.push("USAGE: snd_deactivateEq <int eqIndex> [(optional) const char *channelName] [(optional) int band]".into());
+                return out;
+            }
+            let eq = crate::input::config::atoi(arg(1));
+            if !(0..2).contains(&eq) {
+                out.push(format!("invalid 'eqIndex' {eq}, must be >= 0 and < 2"));
+                return out;
+            }
+            let eq = eq as u8;
+            match cmd.len() {
+                2 => {
+                    for ch in 0..self.channel_count() {
+                        for band in 0..3 {
+                            self.apply_eq(ch, eq, band, None);
+                        }
+                    }
+                }
+                n => {
+                    let bands = if n == 4 {
+                        let band = crate::input::config::atoi(arg(3));
+                        if !(0..=2).contains(&band) {
+                            out.push(format!("invalid 'band' {band}, must be >= 0 and < 3"));
+                            return out;
+                        }
+                        band as u8..band as u8 + 1
+                    } else {
+                        0..3
+                    };
+                    for band in bands {
+                        match self.channel_index(arg(2)) {
+                            Some(ch) => self.apply_eq(ch, eq, band, None),
+                            None => out.push(format!(
+                                "Unknown channel name ({}), please check channel definitions file",
+                                arg(2)
+                            )),
+                        }
+                    }
+                }
+            }
+            return out;
+        }
+        let (argc, usage) = match verb.as_str() {
+            "snd_seteq" => (
+                8,
+                "USAGE: snd_setEq <const char *channelName> <int eqIndex> <int band> <const char *type> <float gain> <float freq> <float q>",
+            ),
+            "snd_seteqfreq" => (
+                5,
+                "USAGE: snd_setEqFreq <const char *channelName> <int eqIndex> <int band> <float freq>",
+            ),
+            "snd_seteqgain" => (
+                5,
+                "USAGE: snd_setEqGain <const char *channelName> <int eqIndex> <int band> <float gain>",
+            ),
+            "snd_seteqq" => (
+                5,
+                "USAGE: snd_setEqQ <const char *channelName> <int eqIndex> <int band> <float q>",
+            ),
+            "snd_seteqtype" => (
+                5,
+                "USAGE: snd_setEqType <const char *channelName> <int eqIndex> <int band> <const char *type>",
+            ),
+            _ => return out,
+        };
+        if cmd.len() != argc {
+            out.push(usage.into());
+            if verb == "snd_seteq" {
+                out.extend(self.eq_params());
+            }
+            return out;
+        }
+        // `SND_ParseChannelAndBand_f`.
+        let Some(ch) = self.channel_index(arg(1)) else {
+            out.push(format!(
+                "Unknown channel name ({}), please check channel definitions file",
+                arg(1)
+            ));
+            return out;
+        };
+        let eq = crate::input::config::atoi(arg(2));
+        if !(0..2).contains(&eq) {
+            out.push(format!("invalid 'eqIndex' {eq}, must be >= 0 and < 2"));
+            return out;
+        }
+        let band = crate::input::config::atoi(arg(3));
+        if !(0..=2).contains(&band) {
+            out.push(format!("invalid 'band' {band}, must be >= 0 and < 3"));
+            return out;
+        }
+        let (eq, band) = (eq as u8, band as u8);
+        let mut b = self.eq.get(&(ch, eq, band)).map_or(BLANK, |(b, _)| *b);
+        match verb.as_str() {
+            "snd_seteq" => {
+                let Some(kind) = parse_type(arg(4), &mut out) else {
+                    return out;
+                };
+                let (gain, freq, q) = (atof(5), atof(6), atof(7));
+                if !(0.0..=20000.0).contains(&freq) {
+                    out.push(format!(
+                        "invalid 'freq' {freq:.6}, must be >= 0 and <= 20000"
+                    ));
+                    return out;
+                }
+                if q <= 0.0 {
+                    out.push(format!("invalid 'q' {q:.6}, must be > 0"));
+                    return out;
+                }
+                b = Band {
+                    kind,
+                    gain_db: gain,
+                    freq,
+                    q,
+                };
+            }
+            "snd_seteqfreq" => {
+                let freq = atof(4);
+                if !(0.0..=20000.0).contains(&freq) {
+                    out.push(format!(
+                        "invalid 'freq' {freq:.6}, must be >= 0 and < 20000"
+                    ));
+                    return out;
+                }
+                b.freq = freq;
+            }
+            "snd_seteqgain" => b.gain_db = atof(4),
+            "snd_seteqq" => {
+                let q = atof(4);
+                if q <= 0.0 {
+                    out.push(format!("invalid 'q' {q:.6}, must be > 0"));
+                    return out;
+                }
+                b.q = q;
+            }
+            _ => {
+                let Some(kind) = parse_type(arg(4), &mut out) else {
+                    return out;
+                };
+                b.kind = kind;
+            }
+        }
+        self.apply_eq(ch, eq, band, Some(b));
+        out
+    }
+
+    /// How many entity channels the sound tables define (none before they are ready).
+    fn channel_count(&mut self) -> usize {
+        self.ready().map_or(0, |s| s.bank.channels.len())
+    }
+
+    /// `SND_GetEntChannelFromName`.
+    fn channel_index(&mut self, name: &str) -> Option<usize> {
+        self.ready()?
+            .bank
+            .channels
+            .iter()
+            .position(|c| c.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Turns one band on with `set`'s settings, or off keeping its settings (`None`), and hands it to the mixer.
+    fn apply_eq(&mut self, ch: usize, eq: u8, band: u8, set: Option<audio::eq::Band>) {
+        match set {
+            Some(b) => {
+                self.eq.insert((ch, eq, band), (b, true));
+            }
+            None => {
+                if let Some(e) = self.eq.get_mut(&(ch, eq, band)) {
+                    e.1 = false;
+                }
+            }
+        }
+        if let Some(s) = self.ready() {
+            let name = s.bank.channels[ch].name.clone();
+            s.set_eq(&name, eq, band, set);
+        }
+    }
+
+    /// `SND_PrintEqParams`: every channel and its bands that are on.
+    fn eq_params(&mut self) -> Vec<String> {
+        let names: Vec<String> = self
+            .ready()
+            .map(|s| s.bank.channels.iter().map(|c| c.name.clone()).collect())
+            .unwrap_or_default();
+        let mut out = vec![
+            "Current EQ Settings".to_owned(),
+            "---------------".to_owned(),
+        ];
+        for (ch, name) in names.iter().enumerate() {
+            out.push(format!("+ {name}"));
+            for ((_, _, band), (b, _)) in self
+                .eq
+                .range((ch, 0, 0)..=(ch, u8::MAX, u8::MAX))
+                .filter(|(_, (_, on))| *on)
+            {
+                out.push(format!(
+                    "\t{band} {} {:.6} Hz {:.6} dB {:.6} q",
+                    b.kind.name(),
+                    b.freq,
+                    b.gain_db,
+                    b.q
+                ));
+            }
+        }
+        out
+    }
+
     fn ready(&mut self) -> Option<&mut Sound> {
         if let State::Loading(rx) = &self.state {
             match rx.try_recv() {
@@ -232,7 +521,36 @@ impl ClientSound {
             }
         }
         match &mut self.state {
-            State::Ready(s) => Some(s),
+            State::Ready(s) => {
+                if let Some(ms) = self.level_fade.take() {
+                    s.level_fade(ms);
+                    self.fade_watch = Some(FadeWatch {
+                        ms,
+                        elapsed: 0.0,
+                        after_300ms: None,
+                    });
+                }
+                Some(s)
+            }
+            _ => None,
+        }
+    }
+
+    /// `SND_MapInit` when a level starts: every entity channel fades in from silence over `fade_ms`
+    /// (`snd_levelFadeTime`); with the tables still loading, from when they are ready. The stock stop of every
+    /// sound that goes with it comes from a fresh mixer for a new map, and from the server's `stopsounds` for a
+    /// restarted one.
+    pub fn map_init(&mut self, fade_ms: u32) {
+        self.level_fade = Some(fade_ms);
+        self.fade_watch = None;
+        self.ready();
+    }
+
+    /// The latest level fade-in: its configured milliseconds, the quietest channel's volume in the first chunk mixed
+    /// after it began, and after 300 ms of frames (`None` until then). `None` before it began.
+    pub fn level_fade(&self) -> Option<(u32, f32, Option<f32>)> {
+        match (&self.state, &self.fade_watch) {
+            (State::Ready(s), Some(w)) => Some((w.ms, s.stats().level_fade_start(), w.after_300ms)),
             _ => None,
         }
     }
@@ -263,11 +581,20 @@ impl ClientSound {
     /// Once a frame: the listener (the eye, `yaw` in radians counter-clockwise from +x) and the mixer's upkeep.
     pub fn frame(&mut self, eye: [f32; 3], yaw: f32, dt: f32) {
         self.eye = eye;
+        self.yaw = yaw;
         let Some(s) = self.ready() else { return };
         s.set_listener(eye, yaw);
         #[cfg(target_arch = "wasm32")]
         s.pump();
-        s.tick(Duration::from_secs_f32(dt.clamp(0.0, 0.25)));
+        let dt = dt.clamp(0.0, 0.25);
+        s.tick(Duration::from_secs_f32(dt));
+        let lowest = s.stats().channel_volume_min();
+        if let Some(w) = self.fade_watch.as_mut() {
+            w.elapsed += dt * 1000.0;
+            if w.after_300ms.is_none() && w.elapsed >= 300.0 {
+                w.after_300ms = Some(lowest);
+            }
+        }
         for l in std::mem::take(&mut self.pending) {
             self.run(&l);
         }
@@ -1074,6 +1401,13 @@ impl ClientSound {
                     "explosion_cues": s.played.aliases.iter().filter(|(k, _)| k.contains("explo")).map(|(_, v)| v).sum::<u64>(),
                     "top_aliases": top.iter().take(12).map(|(k, v)| json!([k, v])).collect::<Vec<_>>(),
                     "dropped_before_ready": dropped,
+                    // `SND_MapInit`'s fade-in of the level begun last: the quietest channel's volume in the first
+                    // mixed chunk, and after 300 ms of frames (null until then).
+                    "level_fade": self.fade_watch.as_ref().map(|w| json!({
+                        "ms": w.ms,
+                        "start": st.level_fade_start(),
+                        "after_300ms": w.after_300ms,
+                    })),
                 })
             }
             State::Loading(_) => json!({"ready": false, "dropped_before_ready": dropped}),
@@ -2008,11 +2342,17 @@ mod tests {
             ("sv_cheats", "0"),
             ("snd_slaveFadeTime", "100"),
             ("snd_enableReverb", "0"),
+            ("snd_levelFadeTime", "1000"),
         ];
         assert_eq!(mix_of(&cvars(&[])), (500, true));
         assert_eq!(mix_of(&cvars(&set)), (500, true));
+        assert_eq!(level_fade_of(&cvars(&[])), 250);
+        assert_eq!(level_fade_of(&cvars(&set)), 250);
         let on: Vec<_> = set.iter().copied().chain([("sv_cheats", "1")]).collect();
         assert_eq!(mix_of(&cvars(&on)), (100, false));
+        assert_eq!(level_fade_of(&cvars(&on)), 1000);
+        let long = [("sv_cheats", "1"), ("snd_levelFadeTime", "9999")];
+        assert_eq!(level_fade_of(&cvars(&long)), 5000);
     }
 
     #[test]

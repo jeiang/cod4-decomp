@@ -128,7 +128,11 @@ impl Parser {
                     self.expect(Tok::Semi)?;
                     self.animtree = Some(name);
                 }
-                Tok::Ident(_) => s.functions.push(self.function()?),
+                Tok::Ident(_) => {
+                    let mut f = self.function()?;
+                    f.dev = in_dev;
+                    s.functions.push(f);
+                }
                 t => return self.err(format!("unexpected {t:?} at top level")),
             }
         }
@@ -156,6 +160,7 @@ impl Parser {
             body,
             line,
             animtree: self.animtree.clone(),
+            dev: false,
         })
     }
 

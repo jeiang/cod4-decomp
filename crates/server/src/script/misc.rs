@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// `devaddpitch`, `devaddyaw` and `devaddroll` translated from KisakCOD (game/g_scr_mover.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
+// `devaddpitch`, `devaddyaw` and `devaddroll` translated from KisakCOD (game/g_scr_mover.cpp), and `laseron`/`laseroff`,
+// `enableaimassist`/`disableaimassist` and the turret arcs from KisakCOD (game_mp/g_scr_main_mp.cpp); GPL-3.0,
+// copyright the KisakCOD contributors and Activision.
 //! The remaining builtins: server administration, the developer file functions, queries with
 //! fixed answers on a dedicated server, and the names that only matter once their milestone
 //! lands (accepted and logged once).
@@ -23,8 +25,6 @@ const fn m(f: MethFn) -> Impl<MethFn> {
 }
 
 const M5: &str = "M5 connect and play";
-const M8: &str = "M8 FX, decals, post";
-const VEH: &str = "M8 vehicles";
 
 pub const FUNCS: &[(&str, Impl<FuncFn>)] = &[
     ("kick", f(kick)),
@@ -35,14 +35,6 @@ pub const FUNCS: &[(&str, Impl<FuncFn>)] = &[
         "getassignedteam",
         f(|_, _, a| a.entity(0).map(|_| Value::Int(0))),
     ),
-    // The script file functions exist only in developer builds of the original; a release
-    // build answers every call with the failure value.
-    ("openfile", f(|_, _, _| Ok(Value::Int(-1)))),
-    ("closefile", f(|_, _, _| Ok(Value::Int(-1)))),
-    ("fprintln", f(|_, _, _| Ok(Value::Int(-1)))),
-    ("fprintfields", f(|_, _, _| Ok(Value::Int(-1)))),
-    ("freadln", f(|_, _, _| Ok(Value::Int(-1)))),
-    ("fgetarg", f(|_, _, _| Ok(Value::str("")))),
     ("quitlobby", Later(M5)),
     ("quitparty", Later(M5)),
     ("startparty", Later(M5)),
@@ -60,21 +52,81 @@ pub const METHODS: &[(&str, Impl<MethFn>)] = &[
         m(|_, _, _, _| Ok(Value::Undefined)),
     ),
     ("stoprumble", m(|_, _, _, _| Ok(Value::Undefined))),
-    ("enableaimassist", Later(M5)),
-    ("disableaimassist", Later(M5)),
-    ("laseron", Later(M8)),
-    ("laseroff", Later(M8)),
+    (
+        "enableaimassist",
+        m(|g, _, e, _| set_aim_assist(g, e, true)),
+    ),
+    (
+        "disableaimassist",
+        m(|g, _, e, _| set_aim_assist(g, e, false)),
+    ),
+    ("laseron", m(|g, _, e, _| set_laser(g, e, true))),
+    ("laseroff", m(|g, _, e, _| set_laser(g, e, false))),
     ("devaddpitch", m(|g, _, e, a| dev_add_rotate(g, e, a, 1))),
     ("devaddyaw", m(|g, _, e, a| dev_add_rotate(g, e, a, 2))),
     ("devaddroll", m(|g, _, e, a| dev_add_rotate(g, e, a, 0))),
     ("buttonpressed", m(|_, _, _, _| Ok(Value::Int(0)))),
-    ("settargetent", Later(VEH)),
-    ("cleartargetent", Later(VEH)),
-    ("setleftarc", Later(VEH)),
-    ("setrightarc", Later(VEH)),
-    ("settoparc", Later(VEH)),
-    ("setbottomarc", Later(VEH)),
+    // `settargetent`/`cleartargetent` exist only as HUD element methods in the original tables.
+    ("setleftarc", m(|g, _, e, a| set_arc(g, e, a, Arc::Left))),
+    ("setrightarc", m(|g, _, e, a| set_arc(g, e, a, Arc::Right))),
+    ("settoparc", m(|g, _, e, a| set_arc(g, e, a, Arc::Top))),
+    (
+        "setbottomarc",
+        m(|g, _, e, a| set_arc(g, e, a, Arc::Bottom)),
+    ),
 ];
+
+/// `laseron` / `laseroff`: `ScrCmd_LaserOn`/`ScrCmd_LaserOff` (KisakCOD `game_mp/g_scr_main_mp.cpp:1904-1918`) set or
+/// clear the entity's laser flag; clients looking through night vision draw a script model's laser from its
+/// `tag_laser` (or `tag_flash`).
+fn set_laser(g: &mut Game, e: EntRef, on: bool) -> R {
+    live(g, e)?;
+    if let Some(ent) = g.ent_mut(e.num) {
+        ent.x.laser = on;
+    }
+    Ok(Value::Undefined)
+}
+
+/// `enableaimassist` / `disableaimassist`: `GScr_EnableAimAssist`/`GScr_DisableAimAssist` (KisakCOD
+/// `game_mp/g_scr_main_mp.cpp:2151-2170`): a brush model the clients' aim assist may target.
+fn set_aim_assist(g: &mut Game, e: EntRef, on: bool) -> R {
+    live(g, e)?;
+    let Some(ent) = g.ent_mut(e.num).filter(|ent| ent.brush_model.is_some()) else {
+        return Err("Currently only supported on entities with brush models".into());
+    };
+    ent.x.aim_assist = on;
+    Ok(Value::Undefined)
+}
+
+#[derive(Clone, Copy)]
+enum Arc {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+/// `setleftarc(deg)` and the other three: `GScr_SetLeftArc` and friends (KisakCOD
+/// `game_mp/g_scr_main_mp.cpp:5149-5198`). The right and top arcs are the negated minimum yaw and pitch, the left
+/// and bottom the maximum; none may cross the turret's forward direction.
+fn set_arc(g: &mut Game, e: EntRef, a: Args, arc: Arc) -> R {
+    live(g, e)?;
+    if g.ent(e.num).is_none_or(|ent| ent.turret.is_none()) {
+        return Err("entity is not a turret".into());
+    }
+    let deg = a.float(0)?;
+    let t = g
+        .ent_mut(e.num)
+        .and_then(|ent| ent.turret.as_deref_mut())
+        .expect("checked above");
+    match arc {
+        Arc::Right => t.arc_min[1] = (-deg).min(0.0),
+        Arc::Left => t.arc_max[1] = deg.max(0.0),
+        Arc::Top => t.arc_min[0] = (-deg).min(0.0),
+        Arc::Bottom => t.arc_max[0] = deg.max(0.0),
+    }
+    Ok(Value::Undefined)
+}
 
 /// `kick(n)` / `ban(n)`: the client in slot `n` is dropped. There is no persistent ban list,
 /// so a ban lasts as long as a kick.

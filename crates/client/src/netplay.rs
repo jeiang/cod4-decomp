@@ -103,6 +103,8 @@ impl Laps {
 
 /// How often the scoreboard asks for fresh rows while it is up (`UpdateScores`).
 const SCORES_INTERVAL: Duration = Duration::from_secs(2);
+/// The least time between two scoreboard requests made by single scores for a missing row (`scoresRequestTime`).
+const SCORES_MISSING_INTERVAL: Duration = Duration::from_secs(10);
 /// How long a player model is kept after the snapshots stop mentioning it.
 const GONE_AFTER: Duration = Duration::from_millis(500);
 
@@ -173,6 +175,8 @@ pub struct Switches {
     pub killcam: crate::camera::KillCamTune,
     /// `phys_bulletUpBias` and `phys_bulletSpinScale`.
     pub bullet: fx::BulletTune,
+    /// `nightVisionDisableEffects` is off: the goggles' vision set and overlay apply (`CG_LookingThroughNightVision`).
+    pub night_vision_effects: bool,
 }
 
 impl Default for Switches {
@@ -190,6 +194,7 @@ impl Default for Switches {
             ragdoll_tunables: crate::ragdoll::Tunables::default(),
             killcam: crate::camera::KillCamTune::default(),
             bullet: fx::BulletTune::default(),
+            night_vision_effects: true,
         }
     }
 }
@@ -222,6 +227,7 @@ impl Switches {
             ragdoll_tunables: crate::ragdoll::Tunables::read(c),
             killcam: crate::camera::KillCamTune::read(c),
             bullet: bullet_tune(c),
+            night_vision_effects: !c.bool("nightVisionDisableEffects"),
         }
     }
 }
@@ -380,6 +386,10 @@ struct Counters {
     /// The most other players drawn in one frame, and why the others could not be built (a model or animation the
     /// zones lack): a player the snapshot has but the picture does not.
     max_players_drawn: usize,
+    /// Every living client the picture should hold and every client actually drawn, so deaths and joins at different
+    /// frames cannot make the per-frame maxima disagree for a player who was drawn.
+    players_seen: std::collections::BTreeSet<u16>,
+    players_drawn: std::collections::BTreeSet<u16>,
     player_faults: std::collections::BTreeSet<String>,
     /// Names of the torso clips (`pt_*`) seen playing on other players: fire, reload, melee, throw, pullout, flinch.
     torso_clips: std::collections::BTreeSet<&'static str>,
@@ -535,22 +545,34 @@ pub struct NetPlay {
     fog: crate::fog::FogState,
     /// The other players as the last frame's view saw them, for overhead names and head icons.
     scan: crate::hud::NameScan,
+    /// `cg.crosshairClientNum`: the last player the crosshair scan took, 0 until one (the cleared cgame state).
+    crosshair_client: u16,
     /// The state the HUD shows (predicted, or the followed player's) and the view yaw in degrees, from the last frame.
     hud_view: Option<(PlayerState, f32)>,
     /// The crosshair of the held weapon from the last frame; `None` when dead, watching another player or the weapon
     /// has no reticle. The HUD draws it; the field of view is the app's to fill in.
     reticle: Option<Reticle>,
+    /// Every drawn frame's predicted weapon state, counted per state as `[frames, frames with a visible crosshair]`
+    /// since the net play began, so the control channel can tell a short state (a pistol's quick drop and raise) from
+    /// one never shown without polling every frame (#494).
+    crosshair_state_frames: [[u32; 2]; 32],
     sound: ClientSound,
     events: Events,
     /// The client's estimate of the server clock at the last frame, for the HUD.
     live_time: i32,
     kill_icons: HashMap<String, crate::hud::KillIcon>,
     scores_asked: Option<Instant>,
+    /// When a missing row last asked for the scoreboard.
+    scores_missing_asked: Option<Instant>,
     server_addr: String,
     effects: Effects,
     tracer_cvars: crate::tracer::Cvars,
     switches: Switches,
     tracer_material: Option<std::sync::Arc<assets::zone::gfx::Material>>,
+    /// `gfx_laser`, which laser sights are drawn with; none, none are drawn.
+    laser_material: Option<std::sync::Arc<assets::zone::gfx::Material>>,
+    /// The laser sights of this frame's script models, drawn with the effects.
+    lasers: Vec<crate::laser::Beam>,
     /// Earthquakes shaking the view.
     shakes: sim::shake::CameraShakes,
     props: Props,
@@ -572,6 +594,8 @@ pub struct NetPlay {
     levels: u32,
     /// `clientSideEffects`, from the cvar store each frame; read when a level starts.
     client_side_effects: bool,
+    /// `snd_levelFadeTime`, from the cvar store each frame; read when a level starts.
+    level_fade_ms: u32,
     stat_sync: crate::profile::StatSync,
     /// The rotor rig of each helicopter model drawn (`None` when the model or its animation is missing), and the
     /// seconds the rotors have turned.
@@ -673,8 +697,10 @@ impl NetPlay {
             ads_dof: crate::dof::AdsDof::default(),
             fog: crate::fog::FogState::default(),
             scan: crate::hud::NameScan::default(),
+            crosshair_client: 0,
             hud_view: None,
             reticle: None,
+            crosshair_state_frames: [[0; 2]; 32],
             sound,
             props: Props::new(
                 lib.content
@@ -689,6 +715,8 @@ impl NetPlay {
             tracer_cvars: crate::tracer::Cvars::default(),
             switches: Switches::default(),
             tracer_material: None,
+            laser_material: None,
+            lasers: Vec::new(),
             shakes: Default::default(),
             lib,
             models_warmed: HashSet::new(),
@@ -697,6 +725,7 @@ impl NetPlay {
             live_time: 0,
             kill_icons: HashMap::new(),
             scores_asked: None,
+            scores_missing_asked: None,
             server_addr: server.to_string(),
             fx_demo: None,
             want_flesh_hit: false,
@@ -704,6 +733,7 @@ impl NetPlay {
             new_level: None,
             levels: 0,
             client_side_effects: true,
+            level_fade_ms: crate::sound::LEVEL_FADE_MS,
             stat_sync: crate::profile::StatSync::default(),
             rotors: HashMap::new(),
             rotor_clock: 0.0,
@@ -917,12 +947,31 @@ impl NetPlay {
             self.scores_asked = Some(Instant::now());
             self.net.request_scores();
         }
+        // A single score for a player the scoreboard lacks asks for the scoreboard, at most every 10 s
+        // (`CG_SetSingleClientScore`, KisakCOD `cgame_mp/cg_servercmds_mp.cpp:810-814`).
+        if self
+            .net
+            .ui()
+            .is_some_and(net::ui::ClientUiState::take_scores_missing)
+            && self
+                .scores_missing_asked
+                .is_none_or(|t| t.elapsed() >= SCORES_MISSING_INTERVAL)
+        {
+            self.scores_missing_asked = Some(Instant::now());
+            self.net.request_scores();
+        }
     }
 
-    /// The material the tracers are drawn with (`gfx_tracer`, from the UI zones), kept across levels.
-    pub fn set_tracer_material(&mut self, m: Option<std::sync::Arc<assets::zone::gfx::Material>>) {
-        self.effects.set_tracer_material(m.clone());
-        self.tracer_material = m;
+    /// The materials the tracers (`gfx_tracer`) and laser sights (`gfx_laser`) are drawn with, from the UI zones; kept
+    /// across levels.
+    pub fn set_beam_materials(
+        &mut self,
+        tracer: Option<std::sync::Arc<assets::zone::gfx::Material>>,
+        laser: Option<std::sync::Arc<assets::zone::gfx::Material>>,
+    ) {
+        self.effects.set_tracer_material(tracer.clone());
+        self.tracer_material = tracer;
+        self.laser_material = laser;
     }
 
     /// What the player has set about tracers (`cg_tracerchance` and the like).
@@ -982,6 +1031,7 @@ impl NetPlay {
             let sound = &mut self.sound;
             self.hearing.close_all(|p| sound.close_voice_pipe(p));
         }
+        self.sound.map_init(self.level_fade_ms);
         self.pred = Predictor::default();
         self.cmd_time = 0;
         self.drawn_at = None;
@@ -999,6 +1049,8 @@ impl NetPlay {
         self.last_eye = None;
         self.last_view = None;
         self.camera.reset();
+        // The new level's cgame starts without the old one's shell shock (its clock restarts near zero).
+        self.look.end_shock();
         self.ads_dof = crate::dof::AdsDof::default();
         self.fog.reset();
         self.scan = crate::hud::NameScan::default();
@@ -1123,6 +1175,37 @@ impl NetPlay {
             .is_some_and(|s| s.ps.other_flags & sim::pm::other::PLAYER != 0)
     }
 
+    /// `CG_VoiceChat_f`'s test: `None` before the first snapshot (the command does nothing), otherwise whether the
+    /// player may voice chat (in the intermission or in the game, not spectating).
+    pub fn voice_chat_allowed(&self) -> Option<bool> {
+        self.net.latest().map(|s| {
+            s.ps.pm_type == PmType::Intermission || s.ps.other_flags & sim::pm::other::PLAYER != 0
+        })
+    }
+
+    /// The server this client joined, as given to connect (`clientinfo`'s `Server:` line).
+    pub fn server_addr(&self) -> &str {
+        &self.server_addr
+    }
+
+    /// Every configstring the server set, by index (`CL_Configstrings_f`).
+    pub fn configstrings(&self) -> Vec<(u16, String)> {
+        let Some(ui) = self.net.ui_ref() else {
+            return Vec::new();
+        };
+        (0..net::ui::cs::MAX)
+            .filter_map(|i| {
+                let s = ui.config(i);
+                (!s.is_empty()).then(|| (i, s.to_owned()))
+            })
+            .collect()
+    }
+
+    /// The match's sound system, for the sound console commands.
+    pub fn sound_mut(&mut self) -> &mut ClientSound {
+        &mut self.sound
+    }
+
     /// `IN_CenterView`: the view levels (the pitch the commands send is the server's `delta_angles` alone), once
     /// connected.
     pub fn center_view(&mut self) {
@@ -1192,6 +1275,33 @@ impl NetPlay {
     /// `snd_slaveFadeTime` and `snd_enableReverb`, from the cvar store each frame.
     pub fn set_sound_mix(&mut self, mix: (u32, bool)) {
         self.sound.set_mix(mix);
+    }
+
+    /// `SND_MapInit` once the cvar store is ready: the initial level fades in over the configured time.
+    pub fn map_init(&mut self, fade_ms: u32) {
+        self.level_fade_ms = fade_ms;
+        self.sound.map_init(fade_ms);
+    }
+
+    /// `snd_levelFadeTime`, from the cvar store each frame: the sound fade-in of the next level.
+    pub fn set_level_fade_time(&mut self, ms: u32) {
+        self.level_fade_ms = ms;
+    }
+
+    /// The level's sound fade-in so far: its configured milliseconds, the quietest channel's volume in the first
+    /// mixed chunk, and after 300 ms (`None` until then). `None` before the tables are ready.
+    pub fn level_fade(&self) -> Option<(u32, f32, Option<f32>)> {
+        self.sound.level_fade()
+    }
+
+    /// Starts the eye bob probe over: [`eye_bob`](Self::eye_bob) is the most the eye bobbed after this.
+    pub fn bob_mark(&mut self) {
+        self.c.view_bob_max = 0.0;
+    }
+
+    /// The most the eye bobbed up or down since [`bob_mark`](Self::bob_mark) (or the start), units.
+    pub fn eye_bob(&self) -> f32 {
+        self.c.view_bob_max
     }
 
     /// `cg_footsteps`, from the cvar store each frame.
@@ -1419,8 +1529,10 @@ impl NetPlay {
             self.c.kill_cam_frames += u64::from(kill.is_some());
             self.c.dof_frames += u64::from(dof.active());
             let (events, commands) = self.take_events(&snap);
-            self.look
-                .goggles(ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0, st);
+            self.look.goggles(
+                ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0,
+                self.switches.night_vision_effects,
+            );
             let look = self.look.frame(st);
             self.shock_effects(&look);
             // The effects the followed player's guns and the map's events start are as visible to a watcher.
@@ -1589,6 +1701,15 @@ impl NetPlay {
         self.last_eye = Some(eye);
         self.hud_view = Some((ps.clone(), yaw_deg));
         self.reticle = if dead { None } else { self.reticle_of(&ps) };
+        let frames = &mut self.crosshair_state_frames[usize::from(ps.weapon_state).min(31)];
+        frames[0] += 1;
+        if self
+            .reticle
+            .as_ref()
+            .is_some_and(|r| crate::crosshair::alpha(r) > 0.0)
+        {
+            frames[1] += 1;
+        }
         // The hands hang off the render eye, with the camera's angles on the aim.
         let mut seen = [
             aim[0] + cam.angles[0],
@@ -1622,6 +1743,8 @@ impl NetPlay {
         if new_life(&mut self.last_spawn, ps.spawn_count) {
             // `CG_Respawn`: the weapon in hand is the selected one.
             self.want_weapon = None;
+            // The spawn cleared the player state's shell shock: the cgame's ends with it.
+            self.look.end_shock();
             self.note_latest_primary(ps.weapon as u16);
         }
         let mut fb = scan_own(&mut self.own_events, &ps, &events);
@@ -1632,9 +1755,11 @@ impl NetPlay {
         laps.lap("hear+feedback");
         let (events, commands) = self.take_events(&snap);
         // The player's own goggles, from the predicted state (`CG_LookingThroughNightVision` reads
-        // `predictedPlayerState.weapFlags`).
-        self.look
-            .goggles(ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0, st);
+        // `predictedPlayerState.weapFlags`, and `nightVisionDisableEffects` before it).
+        self.look.goggles(
+            ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0,
+            self.switches.night_vision_effects,
+        );
         let look = self.look.frame(st);
         self.shock_effects(&look);
         laps.lap("events+look");
@@ -1646,6 +1771,12 @@ impl NetPlay {
         };
         laps.lap("remote_players");
         self.scan_names(st, own, eye, view, dead);
+        // `CG_ScanForCrosshairEntity` clears and sets the crosshair bits on the predicted state every frame.
+        if let Some((v, _)) = self.hud_view.as_mut() {
+            v.weapon_flags = (v.weapon_flags
+                & !(sim::pm::wf::FRIEND_IN_CROSSHAIR | sim::pm::wf::ENEMY_IN_CROSSHAIR))
+                | self.scan.weap_flags;
+        }
         models.extend(self.script_models(dt, st, own));
         let brush_models = self.brush_models(&snap, st);
         models.extend(self.items(&snap));
@@ -1928,6 +2059,16 @@ impl NetPlay {
         });
         let projectiles = self.projectiles(&flying, st);
         if let Some(snap) = self.net.latest() {
+            self.effects.smoke(
+                &snap.entities,
+                &|w| {
+                    self.weapons
+                        .get(w)
+                        .and_then(|i| self.lib.content.weapon(&i.name))
+                        .cloned()
+                },
+                st,
+            );
             self.effects.world_fx(&snap.entities, &self.events, eye, st);
             self.effects.update_script_bolts(&snap.entities, st);
         }
@@ -1938,6 +2079,28 @@ impl NetPlay {
         self.props.update(dt, self.boxes.world());
         self.prop_effects();
         let mut drawn = self.effects.draw(eye, yaw, pitch, roll);
+        let lasers = std::mem::take(&mut self.lasers);
+        if !lasers.is_empty() {
+            logging::dedup!(
+                WARN,
+                "laser-light",
+                issue = 516,
+                "laser sights are drawn without their post light (gfx_laser_light), see #516"
+            );
+            if self.laser_material.is_none() {
+                logging::dedup!(
+                    WARN,
+                    "laser-material",
+                    issue = 411,
+                    "laser sights are not drawn: the gfx_laser material is not loaded (#411)"
+                );
+            }
+        }
+        if let Some(m) = &self.laser_material
+            && let Some(mesh) = crate::laser::mesh(m, &lasers, eye)
+        {
+            drawn.meshes.push(mesh);
+        }
         drawn.models.extend(projectiles);
         drawn.sway = self.shakes.sway(st, eye.to_array());
         self.c.shake_max = self
@@ -1971,6 +2134,12 @@ impl NetPlay {
         let index = sim::pm::viewmodel_weapon(ps);
         let weapon = self.lib.content.weapon(self.weapons.name(index))?.clone();
         let spread_deg = aim_spread_degrees(self.weapons.info(index), ps, &self.params.weapon);
+        // `CG_CalcCrosshairColor` asks the weapon in hand, not the offhand one the viewmodel may be showing.
+        let color_change = self
+            .lib
+            .content
+            .weapon(self.weapons.name(ps.weapon as u16))
+            .is_some_and(|d| d.crosshair_color_change != 0);
         Some(Reticle {
             weapon,
             spread_deg,
@@ -1979,6 +2148,9 @@ impl NetPlay {
             tan_half_fov_y: 0.0,
             alpha_scale: self.switches.crosshair_alpha,
             alpha_min: self.switches.crosshair_alpha_min,
+            grenade_time_left: ps.grenade_time_left,
+            color_change,
+            color: [1.0; 3],
         })
     }
 
@@ -2450,6 +2622,7 @@ impl NetPlay {
         vm.kick_gun(speed);
         vm.set_felt(self.fx.hit, self.look.shock_end());
         vm.set_clip_empty(clip_empty);
+        vm.set_bob(self.params.bob);
         let models = vm.update(&shown, dt);
         for alias in vm.take_sounds() {
             self.sound.play_ui(&alias);
@@ -2555,8 +2728,35 @@ impl NetPlay {
                             out.push(m);
                         }
                     }
-                    self.effects
-                        .script_model_tags(e.number, &out[before..], &self.lib.content);
+                    self.effects.script_model_tags(
+                        e.number,
+                        e.model,
+                        &out[before..],
+                        &self.lib.content,
+                    );
+                    // `CG_Laser_Add` (cg_ents.cpp): a laser the scripts turned on shows through night vision.
+                    if e.eflags & eflags::LASER != 0 && self.look.night_vision() {
+                        let tag = |t: &str| {
+                            crate::effects::model_tag_frame(&out[before..], &self.lib.content, t)
+                        };
+                        if let Some(f) = tag("tag_laser").or_else(|| tag("tag_flash")) {
+                            let forward = f.axis[0];
+                            let reach = f.origin + forward * crate::laser::RANGE;
+                            let tr = self.boxes.world().trace(
+                                f.origin.to_array(),
+                                reach.to_array(),
+                                [0.0; 3],
+                                [0.0; 3],
+                                e.number,
+                                sim::contents::MASK_SHOT,
+                            );
+                            self.lasers.push(crate::laser::Beam::new(
+                                f.origin,
+                                forward,
+                                tr.fraction,
+                            ));
+                        }
+                    }
                     drawn += 1;
                     self.c.script_model_parts_max =
                         self.c.script_model_parts_max.max(out.len() - before);
@@ -2637,8 +2837,12 @@ impl NetPlay {
             m.origin = e.origin;
             m.angles = e.angles;
             m.light_origin = e.origin;
-            self.effects
-                .script_model_tags(e.number, std::slice::from_ref(&m), &self.lib.content);
+            self.effects.script_model_tags(
+                e.number,
+                e.model,
+                std::slice::from_ref(&m),
+                &self.lib.content,
+            );
             out.push(m);
         }
         out
@@ -2680,8 +2884,12 @@ impl NetPlay {
                 continue;
             };
             // A script's `playfxontag` on the projectile rides its model, as on its DObj.
-            self.effects
-                .script_model_tags(e.number, std::slice::from_ref(&m), &self.lib.content);
+            self.effects.script_model_tags(
+                e.number,
+                e.model,
+                std::slice::from_ref(&m),
+                &self.lib.content,
+            );
             // Not drawn until its launch time (a rocket leaves the tube before it shows).
             let until_launch = ((e.eflags.wrapping_sub(st as u32) << 8) as i32) >> 8;
             if until_launch <= 0 {
@@ -2739,8 +2947,12 @@ impl NetPlay {
             if let Some(r) = rotors {
                 m.bones = r.pose(self.rotor_clock).to_vec();
             }
-            self.effects
-                .script_model_tags(e.number, std::slice::from_ref(&m), &self.lib.content);
+            self.effects.script_model_tags(
+                e.number,
+                e.model,
+                std::slice::from_ref(&m),
+                &self.lib.content,
+            );
             out.push(m);
         }
         self.c.vehicles_seen = seen;
@@ -2795,6 +3007,11 @@ impl NetPlay {
             // pose the player was last seen in.
             if e.eflags & eflags::DEAD != 0 {
                 continue;
+            }
+            if e.client != own || show_own {
+                // A living player the picture should hold; a dead one is only its corpse, and the own body bolted
+                // to a script model without third person is in the snapshot but never drawn.
+                self.c.players_seen.insert(e.client);
             }
             let weapon = self
                 .weapons
@@ -2944,9 +3161,10 @@ impl NetPlay {
             }
             let instances = r.player.instances(e.origin);
             self.effects
-                .script_model_tags(e.number, &instances, &self.lib.content);
+                .script_model_tags(e.number, e.model, &instances, &self.lib.content);
             if e.client != own || show_own {
                 drawn += 1;
+                self.c.players_drawn.insert(e.client);
                 out.extend(instances);
             }
         }
@@ -3036,6 +3254,7 @@ impl NetPlay {
         };
         self.c.cmd_drawn = d;
         report["fx"]["tracers_max"] = json!(self.c.fx_tracers_max);
+        report["fx"]["flesh_hits"] = json!(self.effects.flesh_hits);
         let bolts = self.effects.bolted_stats();
         report["fx"]["bolted"] = json!({
             "active": bolts.active,
@@ -3074,6 +3293,8 @@ impl NetPlay {
         report["fx"]["ambient_sounds"] = self.effects.ambient().sounds.len().into();
         report["fx"]["ambient_live_effects_max"] = self.c.ambient_live_max.into();
         report["fx"]["looped_fx_max"] = self.c.looped_fx_max.into();
+        report["fx"]["persistent_smoke"] = self.effects.smoke_report();
+        report["fx"]["persistent_smoke_quads"] = self.effects.smoke_quads().into();
         report["fx"]["corpses_max"] = self.c.corpses_max.into();
         report["fx"]["camera_shake_max"] = self.c.shake_max.into();
         report["fx"]["camera_sway_max"] = self.c.sway_max.into();
@@ -3100,6 +3321,8 @@ impl NetPlay {
         report["damage_flash_max"] = json!(self.c.max_damage_flash);
         report["damage_wedges_max"] = json!(self.c.max_damage_wedges);
         report["players_drawn_max"] = self.c.max_players_drawn.into();
+        report["players_seen"] = json!(self.c.players_seen);
+        report["players_drawn"] = json!(self.c.players_drawn);
         report["player_faults"] = json!(self.c.player_faults);
         report["torso_clips"] = json!(self.c.torso_clips);
         report["remote_weapon_frames"] = self.c.remote_weapon_frames.into();

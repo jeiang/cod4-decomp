@@ -259,6 +259,11 @@ pub mod wf {
     /// The viewmodel is an offhand weapon (`PWF_USING_OFFHAND`).
     pub const USING_OFFHAND: u32 = 0x2;
     pub const HOLD_BREATH: u32 = 0x4;
+    /// The crosshair is on a teammate. In multiplayer only the client sets it, on its predicted state, each frame
+    /// (KisakCOD `cgame_mp/cg_draw_mp.cpp` `CG_ScanForCrosshairEntity`); the server never does.
+    pub const FRIEND_IN_CROSSHAIR: u32 = 0x8;
+    /// The crosshair is on an enemy within the weapon's `enemyCrosshairRange` (client-set, as above).
+    pub const ENEMY_IN_CROSSHAIR: u32 = 0x10;
     /// Aiming down sights is blocked.
     pub const NO_ADS: u32 = 0x20;
     pub const NIGHTVISION: u32 = 0x40;

@@ -22,7 +22,7 @@ use crate::bot::{BotShared, Brain};
 use crate::client::{Client, Conn, Session, Team};
 use crate::cmd::{Argv, CommandBuffer, split_commands};
 use crate::content::{Content, Install};
-use crate::cvar::{self, Cvars};
+use crate::cvar::{self, Cvars, Kind};
 use crate::game::{self, Game};
 use crate::netsv::{Inbound, NetSv, Peer, is_lan};
 use crate::rcon::{self, Throttle, Verdict};
@@ -66,7 +66,7 @@ fn plain_text(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).collect()
 }
 
-/// `SV_GetChallenge`/`SV_Status`: the server's keywords, with the stock `demo ` marker under `fs_restrict`.
+/// `SVC_Status`/`SVC_GameCompleteStatus`: the server's keywords, with the stock `demo ` marker under `fs_restrict`.
 fn server_keywords(c: &Cvars) -> String {
     let keywords = c.string("sv_keywords");
     if c.bool("fs_restrict") {
@@ -74,6 +74,49 @@ fn server_keywords(c: &Cvars) -> String {
     } else {
         keywords.to_owned()
     }
+}
+
+/// `FS_iwIwd(name, "main")` (KisakCOD `qcommon/files.cpp:57`): one of the stock IWDs of `main`, `main/iw_00` to
+/// `main/iw_24` (`name` lowercase, `/`, extension kept).
+fn stock_iwd(name: &str) -> bool {
+    name.strip_prefix("main/iw_")
+        .and_then(|n| n.strip_suffix(".iwd"))
+        .is_some_and(|n| n.len() == 2 && n.bytes().all(|b| b.is_ascii_digit()) && n <= "24")
+}
+
+/// Whether `sv_referencedIwdNames` would name an IWD that is not a stock one of `main`, which makes `getinfo` and
+/// `getstatus` say `mod 1` (KisakCOD `server_mp/sv_main_mp.cpp:609-626`). The original lists the IWDs outside `main`
+/// and those of `main` a file was read from (`FS_ReferencedIwdNames`); this counts every non-localized IWD on the
+/// search path, so an extra IWD in `main` nothing was read from counts too.
+fn foreign_iwds(install: &Install) -> bool {
+    install
+        .vfs
+        .pure_iwds(&install.root)
+        .iter()
+        .any(|(name, _)| !stock_iwd(name))
+}
+
+/// The command line a listen server (the one a player starts from the client) boots with: `dedicated 0`, as the
+/// client program registers it, and `sv_pure 1`, which is ours: the original registers `sv_pure` 0 and its menus never
+/// set it, so its listen server is impure and says `mod 1` (README, `sv_pure`). `game` is the client's `fs_game`.
+pub fn listen_cmdline(port: u16, game: &str) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "+set",
+        "dedicated",
+        "0",
+        "+set",
+        "sv_pure",
+        "1",
+        "+set",
+        "net_port",
+        &port.to_string(),
+    ]
+    .map(String::from)
+    .to_vec();
+    if !game.is_empty() {
+        args.extend(["+set", "fs_game", game].map(String::from));
+    }
+    args
 }
 
 /// `Scr_CompileScripts`' `developer_script`: the `/# ... #/` blocks only compile when it is on.
@@ -188,7 +231,7 @@ pub const COMMANDS: &[&str] = &[
     "expect",
     "until",
     // Test hooks: `devtele`, `devrun`, `devgrenade`, `devhardpoint`, `devradar`, `devheli`, `devkill`, `devshoot`,
-    // `devbotfire`.
+    // `devbotfire`, `devobjective`, `devline`.
     "devtele",
     "devrun",
     "devgrenade",
@@ -198,6 +241,8 @@ pub const COMMANDS: &[&str] = &[
     "devkill",
     "devshoot",
     "devbotfire",
+    "devobjective",
+    "devline",
     // Players and administration.
     "clientkick",
     "tempbanclient",
@@ -218,9 +263,17 @@ pub const COMMANDS: &[&str] = &[
     "togglep",
     "reset",
     "setfromdvar",
+    "dvar_bool",
+    "dvar_int",
+    "dvar_float",
     "cvarlist",
     "dvarlist",
     "dvardump",
+    // Perks, configs and memory (`SV_SetPerk_f`, `Com_WriteConfig_f`, `Com_Meminfo_f`).
+    "setperk",
+    "writeconfig",
+    "writedefaults",
+    "meminfo",
     // The command list and the console's print channels (the stock configs run `con_showchannel`).
     "cmdlist",
     "con_showchannel",
@@ -229,25 +282,19 @@ pub const COMMANDS: &[&str] = &[
     "con_visiblechannellist",
 ];
 
-/// Stock dedicated-server commands this server does not carry out (#479): accepted with a warning that names them,
-/// so a config or an admin's line is not `Unknown command`.
-const MISSING: &[&str] = &[
-    "scriptdebugger",
-    "scriptvarusage",
-    "stringusage",
-    "scriptusage",
-    "scriptprofile",
-    "scriptbuiltin",
-    "setperk",
-    "dvar_bool",
-    "dvar_int",
-    "dvar_float",
-    "writeconfig",
-    "writedefaults",
-    "meminfo",
-    "tempmeminfo",
-    "dumpraw",
-];
+/// Stock dedicated-server commands this server does not carry out: accepted with a warning that names them and the
+/// issue that tracks them, so a config or an admin's line is not `Unknown command`. The 1.8 debug-build commands
+/// (`scriptdebugger`, `scriptvarusage`, `scriptprofile`, `scriptbuiltin`, `tempmeminfo`, `dumpraw`) are not in
+/// iw3mp.exe 1.7 and are unknown, as there.
+const MISSING: &[(&str, u32)] = &[("stringusage", 535), ("scriptusage", 535)];
+
+/// The issue a known-but-unimplemented stock command is tracked by.
+fn missing_issue(name: &str) -> Option<u32> {
+    MISSING
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, issue)| *issue)
+}
 
 /// Commands of the client console that mean nothing to a headless server; accepted silently
 /// so the stock configs run unchanged.
@@ -265,7 +312,7 @@ pub fn accepts(name: &str) -> bool {
     let l = name.to_ascii_lowercase();
     COMMANDS.contains(&l.as_str())
         || CLIENT_ONLY.contains(&l.as_str())
-        || MISSING.contains(&l.as_str())
+        || missing_issue(&l).is_some()
 }
 
 struct Running {
@@ -285,12 +332,24 @@ const BOT_JOIN_MS: i32 = 5000;
 /// The bot's menu choices as script (the stock `_dev` script has them behind developer mode).
 const TEST_CLIENT_GSC: &str = include_str!("testclient.gsc");
 
+/// The `devline` hook's script: the line's ends, where the string goes and how many frames both stay.
+const DEVLINE_GSC: &str = "main(start, end, text_at, frames)\n{\n\tline(start, end, (1, 1, 0), 1, 0, frames);\n\tprint3d(text_at, \"devline\", (1, 1, 1), 1, 0.25, frames);\n}\n";
+
+/// The compiled `devline` script and the VM that runs it.
+struct DevLine {
+    vm: Vm,
+    dispatch: Dispatch,
+    main: gsc::bytecode::FuncId,
+}
+
 /// What a client is told when its IWDs are not the server's and `sv_pure` is on.
 pub const IMPURE: &str = "Unpure client detected: your IWD files differ from this server's (sv_pure is on). Verify your game files, and remove extra .iwd files from main and the mod folder.";
 
 pub struct Server {
     pub game: Game,
     install: Install,
+    /// The `devline` hook's script, compiled on first use and kept for the server's lifetime.
+    devline: Option<DevLine>,
     run: Option<Running>,
     cbuf: CommandBuffer,
     /// The console's print channels (`con_showchannel`, ...). The output itself is not filtered: the original's
@@ -342,6 +401,8 @@ pub struct Server {
     /// Whether this server may tell masters about itself (set by [`Self::announce_to_masters`]).
     masters_allowed: bool,
     heartbeats: crate::heartbeat::Heartbeats,
+    /// The search path holds an IWD that is not one of `main`'s stock `iw_00`..`iw_24` (see [`foreign_iwds`]).
+    foreign_iwds: bool,
 }
 
 /// Set by a signal handler (SIGINT, SIGTERM) so the server leaves its loop and says goodbye to its masters.
@@ -352,175 +413,338 @@ pub fn request_stop() {
     STOP_REQUESTED.store(true, Ordering::Relaxed);
 }
 
-fn register_core_dvars(c: &mut Cvars) {
+/// The registrations of the server's dvars (`Dvar_Register*`): name, type and range, default, flags. Each is the
+/// stock one (KisakCOD MP 1.8, re-checked against the 1.7 binary's registration calls) unless a comment says why
+/// not; the unit test `core_dvars_are_registered_as_stock` holds them to the stock list.
+fn core_dvars() -> Vec<(&'static str, Kind, String, u32)> {
     use cvar::*;
-    for (n, d, f) in [
-        ("dedicated", "2", LATCH),
-        ("developer", "0", 0),
-        ("log_filter", "", 0),
-        ("developer_script", "0", 0),
+    let (int_any, int_pos, f_pos) = (
+        Kind::Int(i32::MIN, i32::MAX),
+        Kind::Int(0, i32::MAX),
+        Kind::Float(0.0, f32::MAX),
+    );
+    let protocol = net::oob::PROTOCOL as i32;
+    let rows: Vec<(&'static str, Kind, &str, u32)> = vec![
+        // An enum in stock (listen, LAN, internet), kept as its index.
+        ("dedicated", Kind::Int(0, 2), "2", LATCH),
+        ("developer", Kind::Int(0, 2), "0", 0),
+        ("log_filter", Kind::String, "", 0),
+        ("developer_script", Kind::Bool, "0", 0),
+        // "Turn off script debugging info" (KisakCOD `game_mp/g_main_mp.cpp:624`): silences `print`/`println`.
+        ("g_no_script_spam", Kind::Bool, "0", 0),
         // The stock server runs 20; this one deliberately keeps 30 (README: the game runs at 30 Hz).
-        ("sv_fps", "30", 0),
-        ("sv_maxclients", "32", ARCHIVE | SERVERINFO | LATCH),
-        ("ui_maxclients", "32", ARCHIVE | SERVERINFO | LATCH),
-        ("g_gametype", "war", SERVERINFO | LATCH),
-        ("mapname", "", ROM | SERVERINFO),
-        ("sv_mapname", "", ROM | SERVERINFO),
-        ("sv_hostname", "CoD4Host", ARCHIVE | SERVERINFO),
-        ("net_port", "28960", LATCH),
+        ("sv_fps", Kind::Int(10, 1000), "30", 0),
+        (
+            "sv_maxclients",
+            Kind::Int(1, 64),
+            "32",
+            ARCHIVE | SERVERINFO | LATCH,
+        ),
+        (
+            "ui_maxclients",
+            Kind::Int(1, 64),
+            "32",
+            ARCHIVE | SERVERINFO | LATCH,
+        ),
+        ("g_gametype", Kind::String, "war", SERVERINFO | LATCH),
+        ("mapname", Kind::String, "", ROM | SERVERINFO),
+        ("sv_mapname", Kind::String, "", ROM | SERVERINFO),
+        (
+            "sv_hostname",
+            Kind::String,
+            "CoD4Host",
+            ARCHIVE | SERVERINFO,
+        ),
+        ("net_port", Kind::Int(0, 65535), "28960", LATCH),
         // Opt-in: a dedicated server with `sv_public 1` sends heartbeats to the masters `sv_master1`..`sv_master5`
         // (`host[:port]`, all empty by default) so clients can find it on the Internet list.
-        ("sv_public", "0", 0),
-        ("sv_master1", "", 0),
-        ("sv_master2", "", 0),
-        ("sv_master3", "", 0),
-        ("sv_master4", "", 0),
-        ("sv_master5", "", 0),
+        ("sv_public", Kind::Bool, "0", 0),
+        ("sv_master1", Kind::String, "", 0),
+        ("sv_master2", Kind::String, "", 0),
+        ("sv_master3", Kind::String, "", 0),
+        ("sv_master4", Kind::String, "", 0),
+        ("sv_master5", Kind::String, "", 0),
         // WebTransport for browser clients, off when `net_wt` is empty: `[host:]port`, the
         // certificate and key PEM files (empty: a 13-day self-signed one), and the JSON file the
         // page reads for the URL and certificate hash. Command line: `--webtransport`, ...
-        ("net_wt", "", LATCH),
-        ("net_wt_cert", "", LATCH),
-        ("net_wt_key", "", LATCH),
-        ("net_wt_info", "", LATCH),
-        ("g_password", "", 0),
-        ("g_speed", "190", 0),
+        ("net_wt", Kind::String, "", LATCH),
+        ("net_wt_cert", Kind::String, "", LATCH),
+        ("net_wt_key", Kind::String, "", LATCH),
+        ("net_wt_info", Kind::String, "", LATCH),
+        ("g_password", Kind::String, "", 0),
+        ("g_speed", int_any, "190", 0),
         // Milliseconds past a mantle that its landing spot stays blocked to other players.
-        ("g_mantleBlockTimeBuffer", "500", 0),
+        (
+            "g_mantleBlockTimeBuffer",
+            Kind::Int(0, 60_000),
+            "500",
+            CHEAT,
+        ),
         // "Turn on antilag checks for weapon hits" (KisakCOD `game_mp/g_main_mp.cpp:614`): shots and knife swings are
         // judged where the shooter saw the others (`lagcomp`).
-        ("g_antilag", "1", ARCHIVE | SERVERINFO),
-        ("bot_idle", "0", 0),
+        ("g_antilag", Kind::Bool, "1", ARCHIVE | SERVERINFO),
+        ("bot_idle", Kind::Bool, "0", 0),
         // Bots on every map; the listen server's player sets it, and a `bots` command sets it too.
-        ("bot_count", "0", 0),
-        ("g_allowvote", "1", 0),
-        ("g_deadChat", "0", 0),
-        ("sv_floodProtect", "1", 0),
-        ("g_useholdtime", "0", 0),
-        ("g_maxDroppedWeapons", "16", 0),
-        ("g_dropForwardSpeed", "10", ARCHIVE),
-        ("g_dropUpSpeedBase", "10", ARCHIVE),
-        ("g_dropUpSpeedRand", "5", ARCHIVE),
-        ("g_dropHorzSpeedRand", "100", ARCHIVE),
-        ("pickupPrints", "0", CHEAT),
-        ("player_throwbackInnerRadius", "90", CHEAT),
-        ("player_throwbackOuterRadius", "160", CHEAT),
-        ("player_MGUseRadius", "128", CHEAT),
-        ("bg_maxGrenadeIndicatorSpeed", "20", CHEAT),
-        ("perk_grenadeDeath", "frag_grenade_short_mp", 0),
-        ("g_useholdspawndelay", "500", 0),
-        ("g_gravity", "800", 0),
-        ("g_knockback", "1000", 0),
-        ("g_minGrenadeDamageSpeed", "400", CHEAT),
-        ("g_inactivity", "0", 0),
-        ("g_synchronousClients", "0", SYSTEMINFO),
-        // The original's default is on until the first `map` turns it off (`devmap` on).
-        ("sv_cheats", "1", SYSTEMINFO | INIT),
-        ("sv_serverid", "0", SYSTEMINFO | ROM),
+        ("bot_count", Kind::Int(0, 64), "0", 0),
+        ("g_allowvote", Kind::Bool, "1", ARCHIVE),
+        ("g_deadChat", Kind::Bool, "0", ARCHIVE),
+        // KisakCOD registers a Bool 1; the 1.7 binary an Int 4 (0..INT_MAX). Any value but 0 turns it on here.
+        ("sv_floodProtect", int_pos, "4", ARCHIVE | SERVERINFO),
+        ("g_useholdtime", int_pos, "0", 0),
+        ("g_maxDroppedWeapons", Kind::Int(2, 32), "16", 0),
+        (
+            "g_dropForwardSpeed",
+            Kind::Float(0.0, 1000.0),
+            "10",
+            ARCHIVE,
+        ),
+        ("g_dropUpSpeedBase", Kind::Float(0.0, 1000.0), "10", ARCHIVE),
+        ("g_dropUpSpeedRand", Kind::Float(0.0, 1000.0), "5", ARCHIVE),
+        (
+            "g_dropHorzSpeedRand",
+            Kind::Float(0.0, 1000.0),
+            "100",
+            ARCHIVE,
+        ),
+        ("pickupPrints", Kind::Bool, "0", CHEAT),
+        ("player_throwbackInnerRadius", f_pos, "90", CHEAT),
+        ("player_throwbackOuterRadius", f_pos, "160", CHEAT),
+        ("player_MGUseRadius", f_pos, "128", CHEAT),
+        (
+            "bg_maxGrenadeIndicatorSpeed",
+            Kind::Float(0.0, 1000.0),
+            "20",
+            CHEAT,
+        ),
+        (
+            "perk_grenadeDeath",
+            Kind::String,
+            "frag_grenade_short_mp",
+            CHEAT,
+        ),
+        (
+            "g_useholdspawndelay",
+            Kind::Int(0, 1000),
+            "500",
+            ARCHIVE | CHEAT,
+        ),
+        ("g_gravity", Kind::Float(1.0, f32::MAX), "800", 0),
+        ("g_knockback", Kind::Float(-f32::MAX, f32::MAX), "1000", 0),
+        ("g_minGrenadeDamageSpeed", f_pos, "400", CHEAT),
+        ("g_inactivity", int_pos, "0", 0),
+        ("g_synchronousClients", Kind::Bool, "0", SYSTEMINFO),
+        // The original's default is on until the first `map` turns it off (`devmap` on). Stock has no flags; here
+        // the map commands own it (init protected) and the clients take it from the systeminfo.
+        ("sv_cheats", Kind::Bool, "1", SYSTEMINFO | INIT),
+        ("sv_serverid", int_any, "0", SYSTEMINFO | ROM),
         // How much an abstention counts against a vote that runs out of time.
-        ("g_voteAbstainWeight", "0.5", ARCHIVE),
-        ("g_logSync", "0", ARCHIVE),
-        ("g_oldVoting", "1", ARCHIVE),
-        ("fs_game", "", SYSTEMINFO | INIT),
-        ("g_playerCollisionEjectSpeed", "25", ARCHIVE),
+        ("g_voteAbstainWeight", Kind::Float(0.0, 1.0), "0.5", ARCHIVE),
+        ("g_logSync", Kind::Bool, "0", ARCHIVE),
+        ("g_oldVoting", Kind::Bool, "1", ARCHIVE),
+        ("fs_game", Kind::String, "", SERVERINFO | SYSTEMINFO | INIT),
+        (
+            "g_playerCollisionEjectSpeed",
+            Kind::Int(0, 32_000),
+            "25",
+            ARCHIVE,
+        ),
         // Stock registrations a config or script may read (issue #369; `game_mp/g_main_mp.cpp`,
         // `server_mp/sv_init_mp.cpp`): red crosshairs over enemies, the ban list, the friendly fire and name
         // distances, the published IWD lists, the client command log switch, packet padding and the animation dump.
-        ("g_redCrosshairs", "1", LATCH | ARCHIVE),
-        ("g_banIPs", "", ARCHIVE),
-        ("g_friendlyfireDist", "256", CHEAT),
-        ("g_friendlyNameDist", "15000", CHEAT),
-        ("sv_iwds", "", SYSTEMINFO | ROM),
-        ("sv_iwdNames", "", SYSTEMINFO | ROM),
-        ("sv_showCommands", "0", 0),
-        ("sv_padPackets", "0", 0),
-        ("g_dumpAnims", "-1", CHEAT),
-        ("sv_keywords", "", SERVERINFO),
-        ("protocol", "", ROM | SERVERINFO),
-        ("sv_privateClients", "0", SERVERINFO),
-        ("sv_pure", "0", SERVERINFO | SYSTEMINFO),
-        ("sv_voice", "0", ARCHIVE | SERVERINFO | SYSTEMINFO),
-        ("voice_global", "0", ARCHIVE),
-        ("voice_deadChat", "0", ARCHIVE),
-        ("perk_parabolicRadius", "400", CHEAT),
-        ("perk_parabolicAngle", "180", CHEAT),
-        ("sv_allowDownload", "0", ARCHIVE | SERVERINFO),
+        ("g_redCrosshairs", Kind::Bool, "1", LATCH | ARCHIVE),
+        ("g_banIPs", Kind::String, "", ARCHIVE),
+        (
+            "g_friendlyfireDist",
+            Kind::Float(0.0, 15000.0),
+            "256",
+            CHEAT,
+        ),
+        (
+            "g_friendlyNameDist",
+            Kind::Float(0.0, 15000.0),
+            "15000",
+            CHEAT,
+        ),
+        ("sv_iwds", Kind::String, "", SYSTEMINFO | ROM),
+        ("sv_iwdNames", Kind::String, "", SYSTEMINFO | ROM),
+        ("sv_showCommands", Kind::Bool, "0", 0),
+        ("sv_padPackets", int_pos, "0", 0),
+        ("g_dumpAnims", Kind::Int(-1, 1023), "-1", CHEAT),
+        ("sv_keywords", Kind::String, "", SERVERINFO),
+        (
+            "protocol",
+            Kind::Int(protocol, protocol),
+            "",
+            ROM | SERVERINFO,
+        ),
+        // `Com_Init`: the game version (`shortversion`, published in the server info) and this build's name.
+        (
+            "shortversion",
+            Kind::String,
+            net::SHORT_VERSION,
+            ROM | SERVERINFO,
+        ),
+        ("version", Kind::String, "", ROM),
+        ("sv_privateClients", Kind::Int(0, 64), "0", SERVERINFO),
+        ("sv_pure", Kind::Bool, "0", SERVERINFO | SYSTEMINFO),
+        (
+            "sv_voice",
+            Kind::Bool,
+            "0",
+            ARCHIVE | SERVERINFO | SYSTEMINFO,
+        ),
+        ("voice_global", Kind::Bool, "0", ARCHIVE),
+        ("voice_deadChat", Kind::Bool, "0", ARCHIVE),
+        ("perk_parabolicRadius", f_pos, "400", CHEAT),
+        ("perk_parabolicAngle", Kind::Float(0.0, 180.0), "180", CHEAT),
+        ("sv_allowDownload", Kind::Bool, "1", ARCHIVE),
         // Fast download: clients are sent to `sv_wwwBaseURL` for the files `sv_allowDownload` lets them have.
         // Clients here always download before they connect, so `sv_wwwDlDisconnected` (stock: should a client leave
         // the server while it downloads) has nothing to change; it is kept for configs that set it.
-        ("sv_wwwDownload", "0", ARCHIVE),
-        ("sv_wwwBaseURL", "", ARCHIVE),
-        ("sv_wwwDlDisconnected", "0", ARCHIVE),
-        ("sv_punkbuster", "0", ARCHIVE | SERVERINFO),
-        ("sv_allowAnonymous", "0", SERVERINFO),
-        ("sv_disableClientConsole", "0", SERVERINFO),
-        ("sv_minPing", "0", ARCHIVE | SERVERINFO),
-        ("sv_maxPing", "0", ARCHIVE | SERVERINFO),
+        ("sv_wwwDownload", Kind::Bool, "0", ARCHIVE),
+        ("sv_wwwBaseURL", Kind::String, "", ARCHIVE),
+        ("sv_wwwDlDisconnected", Kind::Bool, "0", ARCHIVE),
+        // Stock defaults to 1; PunkBuster is not built here, so the server info does not claim it.
+        (
+            "sv_punkbuster",
+            Kind::Bool,
+            "0",
+            ARCHIVE | SERVERINFO | INIT,
+        ),
+        ("sv_allowAnonymous", Kind::Bool, "0", SERVERINFO),
+        ("sv_disableClientConsole", Kind::Bool, "0", SERVERINFO),
+        ("sv_minPing", Kind::Int(0, 999), "0", ARCHIVE | SERVERINFO),
+        ("sv_maxPing", Kind::Int(0, 999), "0", ARCHIVE | SERVERINFO),
         // Seconds of silence after which a client is dropped (`sv_timeout`), and for one that has not sent a packet
         // since it connected (`sv_connectTimeout`).
-        ("sv_timeout", "240", 0),
-        ("sv_connectTimeout", "45", 0),
+        ("sv_timeout", Kind::Int(0, 1800), "240", 0),
+        ("sv_connectTimeout", Kind::Int(0, 1800), "45", 0),
         // Seconds a connected client must have been in before the same address and qport may connect again
         // (`sv_reconnectlimit`).
-        ("sv_reconnectlimit", "3", 0),
+        ("sv_reconnectlimit", Kind::Int(0, 1800), "3", ARCHIVE),
         // A `connect` giving this password may take the first `sv_privateClients` slots, and skips `g_password`.
-        ("sv_privatePassword", "", 0),
+        ("sv_privatePassword", Kind::String, "", 0),
         // Clients one address outside the local network may have at once (0: no limit).
-        ("sv_maxClientsPerIP", "0", 0),
+        ("sv_maxClientsPerIP", Kind::Int(0, 64), "0", 0),
         // Most bytes a second one client is sent (0: what the client asks for). The original defaults to 5000, which
         // our snapshots (bigger than its delta-compressed ones) would stretch to a few a second; a limit is opt-in.
-        ("sv_maxRate", "0", ARCHIVE | SERVERINFO),
+        (
+            "sv_maxRate",
+            Kind::Int(0, 25_000),
+            "0",
+            ARCHIVE | SERVERINFO,
+        ),
         // Remote console: empty switches `rcon` off.
-        ("rcon_password", "", 0),
-        // Seconds `kick` and `tempBanClient` keep a player out (0-3600).
-        ("sv_kickBanTime", "300", ARCHIVE),
+        ("rcon_password", Kind::String, "", 0),
+        // Seconds `kick` and `tempBanClient` keep a player out.
+        ("sv_kickBanTime", Kind::Float(0.0, 3600.0), "300", 0),
         // Where `banUser` / `banClient` keep the permanent bans.
-        ("sv_banFile", "ban.txt", 0),
-        ("sv_mapRotation", "", 0),
-        ("sv_mapRotationCurrent", "", 0),
-        ("nextmap", "map_restart", 0),
-        ("gamename", "Call of Duty 4", SERVERINFO | ROM),
-        // The log file name (empty: no log); `cod4e-server` asks for `games_mp.log`.
-        ("g_log", "", ARCHIVE),
-        ("loc_language", "0", ARCHIVE),
-    ] {
-        c.register(n, d, f);
+        ("sv_banFile", Kind::String, "ban.txt", 0),
+        ("sv_mapRotation", Kind::String, "", 0),
+        ("sv_mapRotationCurrent", Kind::String, "", 0),
+        // Stock registers it empty; here `vstr nextmap` restarts the map until a rotation sets it.
+        ("nextmap", Kind::String, "map_restart", 0),
+        ("gamename", Kind::String, "Call of Duty 4", SERVERINFO | ROM),
+        // The log file name (empty: no log; stock `games_mp.log`); `cod4e-server` asks for `games_mp.log`.
+        ("g_log", Kind::String, "", ARCHIVE),
+        ("loc_language", Kind::Int(0, 14), "0", ARCHIVE | LATCH),
+        // The message of the day (`g_motd`, KisakCOD `game_mp/g_main_mp.cpp:454`), which the stock level spawn puts
+        // in `CS_MOTD` (`game_mp/g_spawn_mp.cpp:646`); this protocol has no such configstring, so a set one is warned
+        // about at each level start (#523).
+        ("g_motd", Kind::String, "", 0),
+        // "Enable extrapolation between client states" (`game_mp/g_main_mp.cpp:613`, read at
+        // `game_mp/g_active_mp.cpp:716,1227`): the native snapshots carry no player trajectory to extrapolate.
+        ("g_smoothClients", Kind::Bool, "1", 0),
+        // Set only by `SV_CheckPaused` (`qcommon/common.cpp:1584`, `server_mp/sv_main_mp.cpp:920-940`), for a listen
+        // server whose one client paused; nothing pauses a multiplayer game here, so it stays 0.
+        ("sv_paused", Kind::Int(0, 2), "0", ROM),
+        // "Allow testclients to press attack button" (`server_mp/sv_init_mp.cpp:784`, read by `SV_BotUserMove` at
+        // `server_mp/sv_main_mp.cpp:1051`): off, the bots never fire.
+        ("sv_botsPressAttackBtn", Kind::Bool, "1", 0),
+    ];
+    let mut all: Vec<_> = rows
+        .into_iter()
+        .map(|(n, k, d, f)| (n, k, d.to_owned(), f))
+        .collect();
+    for &(n, d, hi) in crate::missile::MISSILE_CVARS {
+        all.push((n, Kind::Float(0.0, hi), d.to_owned(), CHEAT));
+    }
+    // The movement dvars (`jump_height`, `friction`, ...): cheat protected, replicated to the clients. Stock also
+    // publishes the fall damage heights in the systeminfo, makes the two move thresholds read only and leaves the
+    // sprint stick minimum open to all (`bgame/bg_misc.cpp:488-496,817-864`).
+    for (n, d, domain) in sim::pm::Params::dvars() {
+        let kind = match domain {
+            sim::pm::Domain::Bool => Kind::Bool,
+            sim::pm::Domain::Int(lo, hi) => Kind::Int(lo, hi),
+            sim::pm::Domain::Float(lo, hi) => Kind::Float(lo, hi),
+            sim::pm::Domain::Vec2(lo, hi) => Kind::Vec2(lo, hi),
+        };
+        let flags = match n {
+            "bg_fallDamageMinHeight" | "bg_fallDamageMaxHeight" => CHEAT | SYSTEMINFO,
+            "player_moveThreshhold" | "player_footstepsThreshhold" => CHEAT | ROM,
+            "player_sprintForwardMinimum" => 0,
+            _ => CHEAT,
+        };
+        all.push((n, kind, d, flags));
+    }
+    all
+}
+
+fn register_core_dvars(c: &mut Cvars) {
+    for (n, k, d, f) in core_dvars() {
+        c.register_kind(n, k, &d, f);
     }
     c.force("protocol", &net::oob::PROTOCOL.to_string());
-    // `Dvar_Register*` domains.
-    for (n, lo, hi) in [
-        ("sv_fps", 10, 1000),
-        ("sv_maxclients", 1, 64),
-        ("ui_maxclients", 1, 64),
-        ("sv_privateClients", 0, 64),
-        ("sv_maxRate", 0, 25_000),
-        ("sv_minPing", 0, 999),
-        ("sv_maxPing", 0, 999),
-        ("sv_timeout", 1, 1800),
-        ("sv_connectTimeout", 1, 3600),
-        ("sv_reconnectlimit", 0, 12),
-        ("sv_maxClientsPerIP", 0, 64),
-        ("g_maxDroppedWeapons", 2, 32),
-        ("g_inactivity", 0, i32::MAX),
-        ("g_playerCollisionEjectSpeed", 0, 32_000),
-        ("g_redCrosshairs", 0, 1),
-        ("sv_showCommands", 0, 1),
-        ("sv_padPackets", 0, i32::MAX),
-        ("g_dumpAnims", -1, 1023),
-    ] {
-        c.set_limit(n, Limit::Int(lo, hi));
+    c.force("version", &net::version());
+}
+
+/// Most bots a `bots` command or `bot_count` asks for (`MAX_CLIENTS`).
+const MAX_BOTS: usize = 64;
+
+/// The count of a `bots` command or of `bot_count`: a whole number from 0 to [`MAX_BOTS`], else why not.
+fn bot_count(s: &str) -> Result<usize, String> {
+    let n: i64 = s
+        .trim()
+        .parse()
+        .map_err(|_| format!("bots: '{s}' is not a number (usage: bots <0-{MAX_BOTS}>)"))?;
+    usize::try_from(n)
+        .ok()
+        .filter(|n| *n <= MAX_BOTS)
+        .ok_or_else(|| format!("bots: {n} is out of range (0-{MAX_BOTS})"))
+}
+
+/// The stock dvars registered here whose effect this server cannot give, warned about once when set (each level
+/// start reads them): `g_motd` has no configstring to reach the clients in, and `g_banIPs` is filtered by nothing
+/// in the stock multiplayer game either (KisakCOD keeps its `ipFilters` only for `addip`, `removeip` and `listip`,
+/// `game/g_svcmds.cpp:17-240`), which this console does not have.
+fn warn_unhonoured_dvars(c: &Cvars) {
+    if !c.string("g_motd").is_empty() {
+        logging::dedup!(
+            WARN,
+            "g_motd",
+            dvar = "g_motd",
+            issue = 523,
+            "message of the day not sent: this protocol has no motd configstring"
+        );
     }
-    c.set_limit("g_voteAbstainWeight", Limit::Float(0.0, 1.0));
-    c.set_limit("g_gravity", Limit::Float(1.0, f32::MAX));
-    c.set_limit("sv_kickBanTime", Limit::Float(0.0, 3600.0));
-    c.set_limit("g_friendlyfireDist", Limit::Float(0.0, 15000.0));
-    c.set_limit("g_friendlyNameDist", Limit::Float(0.0, 15000.0));
-    for (n, d) in crate::missile::MISSILE_CVARS {
-        c.register(n, d, CHEAT);
+    if !c.string("g_banIPs").trim().is_empty() {
+        logging::dedup!(
+            WARN,
+            "g_banIPs",
+            dvar = "g_banIPs",
+            "IP list not enforced, as in the stock game; addip/removeip/listip are not implemented (banUser/banClient ban)"
+        );
     }
-    // The movement dvars (`jump_height`, `friction`, ...): cheat protected, replicated to the clients.
-    for (n, d) in sim::pm::Params::dvars() {
-        c.register(n, &d, CHEAT);
+    if c.bool("g_smoothClients") {
+        // With it on, the stock game builds a player's entity state with `G_PlayerStateToEntityStateExtrapolate`
+        // (KisakCOD `game_mp/g_active_mp.cpp:716,1227`), so other clients extrapolate it between snapshots.
+        logging::dedup!(
+            WARN,
+            "g_smoothClients",
+            dvar = "g_smoothClients",
+            issue = 514,
+            "player entity states are not extrapolated between snapshots"
+        );
     }
 }
 
@@ -617,7 +841,8 @@ fn io_err(e: impl std::fmt::Display) -> String {
 
 impl Server {
     /// Boots a dedicated server on the install at `root`. `cmdline` is the program's
-    /// arguments after the executable name (`+set a b +exec server.cfg +map mp_crash`).
+    /// arguments after the executable name (`+set a b +exec server.cfg +map mp_crash`); a listen server's starts
+    /// with [`listen_cmdline`].
     pub fn boot(root: &Path, cmdline: &[String], echo: bool) -> Result<Self, String> {
         Self::boot_in(root, cmdline, echo, PathBuf::from("."))
     }
@@ -652,12 +877,14 @@ impl Server {
         let fs_game = cvars.string("fs_game").to_owned();
         let install = Install::open_game(root, &fs_game)
             .map_err(|e| format!("{}: {}", root.display(), io_err(e)))?;
+        let foreign_iwds = foreign_iwds(&install);
         let game = Game::new(cvars, Content::default());
         let mut s = Server {
             game,
             install,
             run: None,
             cbuf: CommandBuffer::new(),
+            devline: None,
             channels: logging::channels::Channels::default(),
             startup,
             cfg_from_zone: false,
@@ -686,6 +913,7 @@ impl Server {
             log_dir,
             masters_allowed: false,
             heartbeats: Default::default(),
+            foreign_iwds,
         };
         s.say("CoD4 MP headless server (cod4e)\n");
         s.say(&format!(
@@ -1071,7 +1299,11 @@ impl Server {
             .count()
     }
 
-    /// `SVC_Info`: the answer to `getinfo`. A key whose value is the default is left out, as at the original.
+    /// `SVC_Info`: the answer to `getinfo`, in the original's key order (`challenge`, which the original puts first,
+    /// is added by `net::connect::serve`). The reference is the CoD4 MP 1.7 `iw3mp.exe` (`SVC_Info` at
+    /// `0x531c..0x532163`); KisakCOD's 1.8 (`server_mp/sv_main_mp.cpp:488-634`) sends the same keys but `hc` and `od`.
+    /// A key whose value is empty is left out, as `Info_SetValueForKey` does, and so is one the original only sends
+    /// when it is set.
     pub fn server_info(&self) -> Vec<(String, String)> {
         let c = &self.game.cvars;
         let max = usize::try_from(c.int("sv_maxclients")).unwrap_or(0);
@@ -1081,16 +1313,15 @@ impl Server {
         let private_used = self.used_slots(0..private);
         let clients = private_used + self.used_slots(private..max);
         let max_clients = max - (private - private_used);
-        let mut kv = vec![
-            ("protocol".to_owned(), net::oob::PROTOCOL.to_string()),
-            ("hostname".into(), c.string("sv_hostname").to_owned()),
-            ("mapname".into(), self.map_name().unwrap_or("").to_owned()),
-        ];
-        let mut put = |k: &str, v: String| kv.push((k.to_owned(), v));
-        // A dedicated server that is not (or no longer) public says so, which takes it off a master's list.
-        if self.masters_allowed && c.int("sv_public") == 0 {
-            put("public", "0".into());
-        }
+        let mut kv = Vec::new();
+        let mut put = |k: &str, v: String| {
+            if !v.is_empty() {
+                kv.push((k.to_owned(), v));
+            }
+        };
+        put("protocol", net::oob::PROTOCOL.to_string());
+        put("hostname", c.string("sv_hostname").to_owned());
+        put("mapname", self.map_name().unwrap_or("").to_owned());
         if clients > 0 {
             put("clients", clients.to_string());
         }
@@ -1098,6 +1329,10 @@ impl Server {
             put("sv_maxclients", max_clients.to_string());
         }
         put("gametype", c.string("g_gametype").to_owned());
+        // The original also says `pure` when `fs_numServerIwds` is non-zero, but that count is the client side's: the
+        // IWD list of the pure server the same process's client is connected to (`FS_PureServerSetLoadedIwds`, from
+        // the systeminfo `sv_iwds`, which an `sv_pure 0` server leaves empty). A dedicated server never has one and a
+        // listen server's own client is told its `sv_pure`, so it comes to `sv_pure`.
         if c.bool("sv_pure") {
             put("pure", "1".into());
         }
@@ -1106,13 +1341,7 @@ impl Server {
                 put(key, c.int(cvar).to_string());
             }
         }
-        let game_dir = c.string("fs_game");
-        if !game_dir.is_empty() {
-            put("game", game_dir.to_owned());
-        }
-        // `SV_GetChallenge`/`SV_Status`: stock's server info carries `sv_keywords`, prefixed `demo ` under
-        // `fs_restrict` so a demo server is distinguishable.
-        put("sv_keywords", server_keywords(c));
+        put("game", c.string("fs_game").to_owned());
         if c.bool("sv_allowAnonymous") {
             put("sv_allowAnonymous", "1".into());
         }
@@ -1122,17 +1351,35 @@ impl Server {
         if !join_password(c).is_empty() {
             put("pswrd", "1".into());
         }
-        for (key, cvar) in [("ff", "scr_team_fftype"), ("kc", "scr_game_allowkillcam")] {
+        // `hc` and `od` (1.7 only, `0x531f15-0x531fa7`): `scr_hardcore` and `scr_oldschool`, which the scripts set.
+        for (key, cvar) in [
+            ("ff", "scr_team_fftype"),
+            ("kc", "scr_game_allowkillcam"),
+            ("hc", "scr_hardcore"),
+            ("od", "scr_oldschool"),
+        ] {
             if c.int(cvar) != 0 {
                 put(key, c.int(cvar).to_string());
             }
         }
-        // A dedicated server (the only kind here) is hardware type 2.
-        put("hw", "2".into());
-        put("mod", u8::from(!game_dir.is_empty()).to_string());
+        // `com_dedicated`: a dedicated server is hardware 2 (the original's Windows dedicated icon), a listen server
+        // 6 (Windows listen).
+        put("hw", if c.int("dedicated") != 0 { "2" } else { "6" }.into());
+        put("mod", u8::from(self.modded()).to_string());
         put("voice", u8::from(c.bool("sv_voice")).to_string());
         put("pb", u8::from(c.bool("sv_punkbuster")).to_string());
+        // Not the original's: our master's way to learn that a dedicated server is no (longer) public (README).
+        if self.masters_allowed && c.int("sv_public") == 0 {
+            put("public", "0".into());
+        }
         kv
+    }
+
+    /// `mod` in `getinfo` and `getstatus` (KisakCOD `server_mp/sv_main_mp.cpp:601-627` and `:391-415`): set unless
+    /// the server is pure, runs no `fs_game` and its IWDs are all stock ones of `main`.
+    fn modded(&self) -> bool {
+        let c = &self.game.cvars;
+        !c.bool("sv_pure") || !c.string("fs_game").is_empty() || self.foreign_iwds
     }
 
     /// `SVC_Status`: the answer to `getstatus`: the server info variables, the password and mod flags, and the
@@ -1150,7 +1397,7 @@ impl Server {
                 None => info.push((k.to_owned(), v)),
             };
         set("pswrd", u8::from(!join_password(c).is_empty()).to_string());
-        set("mod", u8::from(!c.string("fs_game").is_empty()).to_string());
+        set("mod", u8::from(self.modded()).to_string());
         if c.bool("fs_restrict") {
             let keywords = server_keywords(c);
             set("sv_keywords", keywords);
@@ -1525,9 +1772,12 @@ impl Server {
 
     /// `SV_UpdateUserinfo_f`: a person's userinfo string (`\\name\\X\\rate\\R\\snaps\\S`) arrived. The name goes through
     /// `ClientCleanName` and a new one is published to the others (they see "renamed to"); the rate and snapshot rate
-    /// set how often snapshots are sent.
+    /// set how often snapshots are sent. In `setclientnamemode("manual_change")` a connected person's new name only
+    /// waits for `updateclientnames` (`ClientUserinfoChanged`, KisakCOD `game_mp/g_client_mp.cpp:170-181`); the
+    /// server's own copy follows the userinfo whatever the mode (`SV_UserinfoChanged`).
     fn userinfo_changed(&mut self, net: &mut NetSv, slot: u16, info: &str) {
         net.set_userinfo(slot, info);
+        let manual = self.game.level.manual_name_change;
         let Some(c) = self.game.client_mut(slot) else {
             return;
         };
@@ -1536,10 +1786,11 @@ impl Server {
             return;
         }
         let name = crate::client::clean_client_name(name);
-        if name != c.name {
+        net.rename(slot, &name);
+        if !(manual && c.connected()) {
             c.name.clone_from(&name);
-            net.rename(slot, &name);
         }
+        c.new_name = name;
     }
 
     /// Prints a console line: to the log and, when enabled, stdout.
@@ -1602,8 +1853,17 @@ impl Server {
                     "ping": 0,
                     "health": c.ps.health,
                     "origin": c.ps.origin,
+                    "viewangles": c.ps.viewangles,
                     "weapon": c.ps.weapon,
+                    "weapon_name": self.game.weapons.name(c.ps.weapon as u16),
                     "weapons": weapons,
+                    // The weapon state machine, so a stage can say where an offhand throw stopped.
+                    "weapon_state": c.ps.weapon_state,
+                    "weapon_flags": c.ps.weapon_flags,
+                    "offhand_index": c.ps.offhand_index,
+                    "grenade_time_left": c.ps.grenade_time_left,
+                    "pm_flags": c.ps.pm_flags,
+                    "buttons": c.buttons,
                     // Shots through `FireWeapon`; compass pings are derived client-side from snapshot events.
                     "shots": c.shots,
                     "alive": c.ps.pm_type < sim::pm::PmType::Dead,
@@ -1866,11 +2126,15 @@ impl Server {
             }
             // Test hook: `devtele <client|human|axis|allies> <x> <y> <z>` puts the player there, standing still;
             // `devtele <client|human|axis|allies> <name>` puts it on the floor in the first live trigger whose
-            // targetname starts with `name` and that is on for the player's team. `human` is the first
-            // client that is not a bot, `axis` and `allies` the first bot on that team (a bot's team is a random pick).
+            // targetname starts with `name` and that is on for the player's team; `devtele <…> near <client> <dist>`
+            // puts it about `dist` units from that client where the two stand on floor and see each other eye to eye
+            // (`Game::teleport_near`). `human` is the first client that is not a bot, `axis` and `allies` the first bot
+            // on that team (a bot's team is a random pick).
             "devtele" => {
                 let (Some(who), Some(first)) = (arg(1), arg(2)) else {
-                    return Err("usage: devtele <client|human|axis|allies> <x y z | name>".into());
+                    return Err(
+                        "usage: devtele <client|human|axis|allies> <x y z | name | near client dist>".into(),
+                    );
                 };
                 let team_bot = |team| {
                     self.game
@@ -1891,6 +2155,13 @@ impl Server {
                     _ => cvar::parse_int(who) as u16,
                 };
                 match (arg(3), arg(4)) {
+                    (Some(target), Some(dist)) if first.eq_ignore_ascii_case("near") => {
+                        self.game.teleport_near(
+                            n,
+                            cvar::parse_int(target) as u16,
+                            cvar::parse_float(dist),
+                        )?;
+                    }
                     (Some(y), Some(z)) => {
                         self.game.teleport(n, [first, y, z].map(cvar::parse_float));
                     }
@@ -1916,7 +2187,7 @@ impl Server {
                 };
                 let index = self.game.weapons.index(weapon);
                 let ps = &self.game.client(n).ok_or("devgrenade: no such client")?.ps;
-                let start = crate::fire::view_origin(ps);
+                let start = crate::fire::view_origin(ps, &self.game.pm_params.bob);
                 let (fwd, _, _) = sim::pm::math::angle_vectors(&ps.viewangles);
                 let speed = arg(3).map_or(500.0, cvar::parse_float);
                 let toss = fwd.map(|v| v * speed);
@@ -1935,9 +2206,70 @@ impl Server {
                     fuse,
                 )?;
             }
+            // Test hook: `devline <client|human> [frames]` runs a script compiled for developer that calls the stock
+            // `line` and `print3d` builtins: a yellow line across the player's view 100 units ahead and the string
+            // `devline` over it, kept `frames` server frames (default 400), so a listen server's own player draws them
+            // (`RB_DrawDebugLines`/`RB_DrawDebugStrings`, KisakCOD `gfx_d3d/rb_debug.cpp:158-226`). Not a stock command;
+            // needs `developer 1`. The script's VM lives as long as the server: dropping a VM releases every object
+            // on the thread that it does not reach (`gsc::value::release_objects`), the level's included.
+            "devline" => {
+                if !self.game.cvars.bool("developer") {
+                    return Err("devline needs developer 1".into());
+                }
+                let who = arg(1).ok_or("usage: devline <client|human> [frames]")?;
+                let n = if who == "human" {
+                    self.game
+                        .connected_clients()
+                        .find(|(_, c)| !c.bot)
+                        .map(|(n, _)| n)
+                        .ok_or("devline: no human is connected")?
+                } else {
+                    cvar::parse_int(who) as u16
+                };
+                let frames = arg(2).map_or(400, cvar::parse_int);
+                let ps = &self.game.client(n).ok_or("devline: no such client")?.ps;
+                let eye = crate::fire::view_origin(ps, &self.game.pm_params.bob);
+                let (fwd, right, up) = sim::pm::math::angle_vectors(&ps.viewangles);
+                let at = |f: f32, r: f32, u: f32| {
+                    Value::Vector(std::array::from_fn(|i| {
+                        eye[i] + fwd[i] * f + right[i] * r + up[i] * u
+                    }))
+                };
+                let args = [
+                    at(100.0, -30.0, 0.0),
+                    at(100.0, 30.0, 0.0),
+                    at(100.0, 0.0, 8.0),
+                    Value::Int(frames),
+                ];
+                if self.devline.is_none() {
+                    let prog = compile(
+                        &[("devline.gsc", DEVLINE_GSC)],
+                        &Builtins::stock_mp(),
+                        gsc::Options { developer: true },
+                    )
+                    .map_err(|e| format!("devline: {e:?}"))?;
+                    let dispatch = Dispatch::new(&prog);
+                    let main = prog
+                        .find("devline", "main")
+                        .ok_or("devline: the script has no main")?;
+                    let vm = Vm::new(prog).map_err(|e| format!("devline: {e:?}"))?;
+                    self.devline = Some(DevLine { vm, dispatch, main });
+                }
+                let d = self.devline.as_mut().expect("compiled above");
+                let mut host = ScriptHost {
+                    game: &mut self.game,
+                    dispatch: &d.dispatch,
+                };
+                match d.vm.call(&mut host, d.main, None, &args) {
+                    Ok(CallOutcome::Finished(_)) => {}
+                    Ok(CallOutcome::Pending) => return Err("devline: the script waited".into()),
+                    Err(e) => return Err(format!("devline: {}", e.message)),
+                }
+            }
             // Test hook: `devbotfire <client|axis|allies> <weapon|frag> <ms>` makes a bot stand and, through its
             // usercmds and the shared weapon state machine, hold attack with `weapon` (given with its ammunition and
-            // switched to) or hold the frag key (after a `frag_grenade_mp` is given), for `ms`.
+            // switched to) for `ms` from when it is raised, or hold the frag key (after a `frag_grenade_mp` is given)
+            // for `ms`.
             "devbotfire" => {
                 self.say("WARNING: devbotfire development-only bot input override requested\n");
                 if !self.game.cvars.bool("developer") {
@@ -1958,21 +2290,21 @@ impl Server {
                     "allies" => team_bot(Team::Allies)?,
                     _ => cvar::parse_int(who) as u16,
                 };
-                let until = self.game.level.time + cvar::parse_int(ms).max(0);
+                let ms = cvar::parse_int(ms);
                 let g = &mut self.game;
                 let c = g
                     .clients
                     .get_mut(usize::from(n))
                     .filter(|c| c.bot)
                     .ok_or("devbotfire: no such bot")?;
-                let buttons = if weapon.eq_ignore_ascii_case("frag") {
+                let (buttons, weapon) = if weapon.eq_ignore_ascii_case("frag") {
                     let index = g.weapons.index("frag_grenade_mp");
                     if index != 0 {
                         // A bot that already threw its frags in the fighting has the weapon but none left.
                         c.inv.give(&g.weapons, &mut c.ps, index, 0);
                         c.inv.give_max_ammo(&g.weapons, &mut c.ps, index);
                     }
-                    sim::pm::button::FRAG
+                    (sim::pm::button::FRAG, 0)
                 } else {
                     let index = g.weapons.index(weapon);
                     if index == 0 {
@@ -1980,9 +2312,10 @@ impl Server {
                     }
                     c.inv.give(&g.weapons, &mut c.ps, index, 0);
                     c.inv.select(index);
-                    sim::pm::button::ATTACK
+                    (sim::pm::button::ATTACK, index)
                 };
-                c.dev_buttons = Some((buttons, until));
+                let brain = c.bot_brain.as_mut().ok_or("devbotfire: no such bot")?;
+                brain.dev_fire = Some(crate::bot::DevFire::new(buttons, weapon, ms));
             }
             // Test hook: `devhardpoint <client|human|bot> <weapon>` gives the player a killstreak reward as the
             // scripts would (`radar_mp`, `airstrike_mp`, `helicopter_mp`).
@@ -2292,23 +2625,174 @@ impl Server {
                 let lines = self.channels.command(&lname, &args).unwrap_or_default();
                 self.say(&format!("{}\n", lines.join("\n")));
             }
-            _ if MISSING.contains(&lname.as_str()) => {
+            // `SV_SetPerk_f` (KisakCOD sv_ccmds_mp.cpp:1065): the named player gets the named perk's bit.
+            "setperk" => {
+                let Some(who) = arg(1) else {
+                    self.say("No player specified.\n");
+                    return Ok(());
+                };
+                let Some(n) = self.find_player(who) else {
+                    self.say(&format!("Player {who} is not on the server\n"));
+                    return Ok(());
+                };
+                let perk = arg(2).unwrap_or("");
+                match crate::script::PERK_NAMES
+                    .iter()
+                    .position(|p| p.eq_ignore_ascii_case(perk))
+                {
+                    Some(i) => {
+                        if let Some(c) = self.game.client_mut(n) {
+                            c.ps.perks |= 1u32 << i;
+                        }
+                    }
+                    // Stock prints this with `Com_DPrintf`, so only a developer run sees it.
+                    None => self.say(&format!("Unknown perk: {perk}\n")),
+                }
+            }
+            // `Dvar_RegisterBool_f`, `Dvar_RegisterInt_f` and `Dvar_RegisterFloat_f`
+            // (KisakCOD dvar_cmds.cpp:540-660): a dvar that does not exist, or a string one a command made, is
+            // registered as a command-made (`DVAR_EXTERNAL`) dvar of the type; an engine dvar of another type is
+            // refused with a message, and one of the same type (an enum counts as an integer) is left alone.
+            "dvar_bool" | "dvar_int" | "dvar_float" => {
+                let (Some(name), Some(default)) = (arg(1), arg(2)) else {
+                    let range = if lname == "dvar_bool" {
+                        ""
+                    } else {
+                        " <min> <max>"
+                    };
+                    return Err(format!("USAGE: {lname} <name> <default>{range}"));
+                };
+                let name = name.to_owned();
+                let default = default.to_owned();
+                let (kind, what) = match lname.as_str() {
+                    "dvar_bool" => (cvar::Kind::Bool, "a boolean"),
+                    _ => {
+                        let (Some(min), Some(max)) = (arg(3), arg(4)) else {
+                            return Err(format!("USAGE: {lname} <name> <default> <min> <max>"));
+                        };
+                        if lname == "dvar_int" {
+                            let (min, max) = (cvar::parse_int(min), cvar::parse_int(max));
+                            if min > max {
+                                self.say(&format!(
+                                    "dvar {name}: min {min} should not be greater than max {max}\n"
+                                ));
+                                return Ok(());
+                            }
+                            (cvar::Kind::Int(min, max), "an integer")
+                        } else {
+                            let (min, max) = (cvar::parse_float(min), cvar::parse_float(max));
+                            if min > max {
+                                self.say(&format!(
+                                    "dvar {name}: min {min} should not be greater than max {max}\n"
+                                ));
+                                return Ok(());
+                            }
+                            // Stock's float refusal says "integer" too (dvar_cmds.cpp:651).
+                            (cvar::Kind::Float(min, max), "an integer")
+                        }
+                    }
+                };
+                let existing = self.game.cvars.get(&name).map(|c| {
+                    let command_made = !c.registered
+                        || (c.flags & cvar::EXTERNAL != 0 && matches!(c.kind, cvar::Kind::String));
+                    (
+                        command_made,
+                        std::mem::discriminant(&c.kind),
+                        c.name.clone(),
+                    )
+                });
+                match existing {
+                    None | Some((true, ..)) => {
+                        self.game
+                            .cvars
+                            .register_kind(&name, kind, &default, cvar::EXTERNAL);
+                    }
+                    Some((false, d, _)) if d == std::mem::discriminant(&kind) => {}
+                    Some((false, _, stored)) => {
+                        self.say(&format!("dvar '{stored}' is not {what} dvar\n"));
+                    }
+                }
+            }
+            // `Com_WriteConfig_f` and `Com_WriteDefaults_f` (KisakCOD common.cpp:1628): the archived dvars'
+            // values, or every engine dvar's reset value. The name is cut to 63 bytes (`I_strncpyz` into 64) and
+            // lands under the log folder (`fs_homepath`'s game directory here), as `FS_BuildOSPath` always puts it
+            // under the game directory; `FS_CreatePath` refuses a name with `..` or `::` (com_files.cpp:459), and a
+            // drive (`:`) is refused with it.
+            "writeconfig" | "writedefaults" => {
+                let Some(name) = arg(1) else {
+                    return Err(format!("Usage: {lname} <filename>"));
+                };
+                let mut end = name.len().min(63);
+                while !name.is_char_boundary(end) {
+                    end -= 1;
+                }
+                let mut file = name[..end].to_owned();
+                if !file.rsplit(['/', '\\']).next().unwrap_or("").contains('.') {
+                    file.push_str(&".cfg"[..4.min(63 - file.len())]);
+                }
+                self.say(&format!("Writing {file}.\n"));
+                if file.contains("..") || file.contains(':') {
+                    self.say(&format!(
+                        "WARNING: refusing to create relative path \"{file}\"\n"
+                    ));
+                    return Ok(());
+                }
+                let path = self.log_dir.join(file.trim_start_matches(['/', '\\']));
+                let mut text = String::from("// generated by Call of Duty, do not modify\n");
+                for c in self.game.cvars.iter() {
+                    if lname == "writeconfig" {
+                        if c.flags & cvar::ARCHIVE != 0 {
+                            text += &format!("seta {} \"{}\"\n", c.name, c.value);
+                        }
+                    } else if c.registered
+                        && c.flags & (cvar::ROM | cvar::CHEAT | cvar::EXTERNAL) == 0
+                    {
+                        text += &format!("set {} \"{}\"\n", c.name, c.default);
+                    }
+                }
+                if let Some(dir) = path.parent()
+                    && let Err(e) = std::fs::create_dir_all(dir)
+                {
+                    tracing::warn!(error = %e, file = file.as_str(), "cannot create the config's folder");
+                }
+                if let Err(e) = std::fs::write(&path, text) {
+                    tracing::warn!(error = %e, file = file.as_str(), "cannot write the config");
+                    self.say(&format!("Couldn't write {file}.\n"));
+                }
+            }
+            // `Com_Meminfo_f`: the process's memory (there is no zone allocator to break it down).
+            "meminfo" => {
+                if let Some(line) = rss_line() {
+                    self.say(&line);
+                }
+            }
+            _ if missing_issue(&lname).is_some() => {
                 logging::dedup!(
                     WARN,
                     lname.as_str(),
                     command = lname.as_str(),
-                    issue = 479,
+                    issue = missing_issue(&lname).unwrap_or(535),
                     "stock command not implemented"
                 );
             }
             "bots" => {
-                let n = arg(1)
-                    .map(cvar::parse_int)
-                    .ok_or("usage: bots <count>")?
-                    .clamp(0, 64) as usize;
+                let n = bot_count(arg(1).ok_or("usage: bots <count>")?)?;
                 // The variable is the one count: the map starts that follow read it.
                 self.game.cvars.set("bot_count", &n.to_string());
                 self.set_bots(n)?;
+            }
+            // Test hook: `devobjective <index> <state> [x y z [icon]]` sets an objective as the scripts'
+            // `objective_add` does, shown to every team.
+            "devobjective" => {
+                let (Some(i), Some(state)) = (arg(1), arg(2)) else {
+                    return Err("usage: devobjective <index> <state> [x y z [icon]]".into());
+                };
+                let i = usize::try_from(cvar::parse_int(i)).map_err(|e| e.to_string())?;
+                let origin = match (arg(3), arg(4), arg(5)) {
+                    (Some(x), Some(y), Some(z)) => Some([x, y, z].map(cvar::parse_float)),
+                    _ => None,
+                };
+                crate::script::uicmd::add_objective(&mut self.game, i, state, origin, arg(6))?;
             }
             // Test hook: `devkill <victim> <attacker> [damage] [mod] [weapon]` has the attacker's weapon hit the victim
             // for that much (a 1000 damage ak47 rifle bullet by default), through `G_Damage` and the scripts' damage
@@ -2674,6 +3158,8 @@ impl Server {
                 .load_map(&self.install, map)
                 .map_err(|e| format!("ERROR: {e}"))?;
         }
+        // `SV_SpawnServer` publishes `sv_referencedIwdNames` for the level: a custom map's IWDs are on it.
+        self.foreign_iwds = foreign_iwds(&self.install);
         self.game.cvars.force("mapname", map);
         self.game.cvars.force("sv_mapname", map);
         let fps = self.game.cvars.int("sv_fps").clamp(10, 1000);
@@ -2715,7 +3201,14 @@ impl Server {
                 net.notify(peer.link.addr, why);
             }
         }
-        let wanted = self.game.cvars.int("bot_count").clamp(0, 64) as usize;
+        warn_unhonoured_dvars(&self.game.cvars);
+        let wanted = match bot_count(self.game.cvars.string("bot_count")) {
+            Ok(n) => n,
+            Err(why) => {
+                tracing::warn!(dvar = "bot_count", why, "no bots added");
+                0
+            }
+        };
         if wanted > 0 {
             self.set_bots(wanted)?;
         }
@@ -2951,6 +3444,8 @@ impl Server {
         self.game.level.frametime = self.frame_ms;
         self.game.level.time = self.svs_time;
         self.game.publish_info(false);
+        // `FlushDebugLines`/`FlushDebugStrings`: last frame's `line`/`print3d` drawings age before this frame adds more.
+        self.game.debug_draw.flush();
         // `G_SetClientSound` sets a player's loop afresh every frame: a script's `playloopsound` on one does not stay.
         for e in self.game.ents.iter_mut().flatten() {
             if e.kind == crate::game::EntKind::Client {
@@ -2976,6 +3471,7 @@ impl Server {
             };
             // `ClientThink` receives inputs; `G_RunClient` runs the latest at level time when synchronous.
             let synchronous = host.game.cvars.bool("g_synchronousClients");
+            let bots_attack = host.game.cvars.bool("sv_botsPressAttackBtn");
             // `SV_BotFrame` then each client's `ClientThink`: usercmds reach the game before
             // the frame's script threads run.
             for n in 0..host.game.clients.len() as u16 {
@@ -3014,7 +3510,10 @@ impl Server {
                     client += t.elapsed();
                     continue;
                 };
-                let cmd = b.usercmd(host.game, &mut self.bot_shared, n, self.svs_time);
+                let mut cmd = b.usercmd(host.game, &mut self.bot_shared, n, self.svs_time);
+                if !bots_attack {
+                    cmd.buttons &= !sim::pm::button::ATTACK;
+                }
                 host.game.clients[usize::from(n)].bot_brain = Some(b);
                 bot += t.elapsed();
                 let t = Instant::now();
@@ -3123,6 +3622,8 @@ impl Server {
             self.game.level.map_restart_requested = false;
             self.cbuf.add_text("fast_restart");
         }
+        // `CL_UpdateDebugServerData`: what a listen server's own client draws until the next frame.
+        self.game.debug_draw.publish();
         let total = t0.elapsed();
         let s = TickSample {
             total_ms: total.as_secs_f64() * 1000.0,
@@ -3611,12 +4112,16 @@ fn hears_voice(rules: &VoiceRules, talker: &Client, listener: &Client) -> bool {
 }
 
 #[cfg(test)]
+#[path = "stock_dvars.rs"]
+mod stock_dvars;
+
+#[cfg(test)]
 mod tests {
     use super::may_speak;
     use super::{
         PERK_PARABOLIC, RotationPlan, VoiceRules, flood_drops, frame_cmds, hears_voice,
         menu_response_args, ping_field, plain_text, plan_rotation, register_core_dvars,
-        script_options, server_keywords,
+        script_options, server_keywords, stock_iwd,
     };
     use crate::client::{Client, Conn, Session, Team};
     use crate::cvar::Cvars;
@@ -3630,6 +4135,23 @@ mod tests {
         assert_eq!(server_keywords(&c), "hardcore harbor");
         c.set("fs_restrict", "1");
         assert_eq!(server_keywords(&c), "demo hardcore harbor");
+    }
+
+    #[test]
+    fn only_mains_iw_00_to_iw_24_are_stock_iwds() {
+        for stock in ["main/iw_00.iwd", "main/iw_13.iwd", "main/iw_24.iwd"] {
+            assert!(stock_iwd(stock), "{stock}");
+        }
+        for other in [
+            "main/iw_25.iwd",
+            "main/iw_1.iwd",
+            "main/iw_custom.iwd",
+            "main/xbase_00.iwd",
+            "mods/m/iw_00.iwd",
+            "main/iw_00.zip",
+        ] {
+            assert!(!stock_iwd(other), "{other}");
+        }
     }
 
     #[test]
@@ -3925,5 +4447,42 @@ mod tests {
         let levels: Vec<_> = events.iter().map(|e| e.level).collect();
         assert_eq!(levels, [tracing::Level::WARN, tracing::Level::ERROR]);
         assert_eq!(events[0].field("at"), Some("maps/mp/x::y line 3"));
+    }
+
+    #[test]
+    fn a_bot_count_that_is_not_a_number_or_out_of_range_says_why() {
+        assert_eq!(super::bot_count("3"), Ok(3));
+        assert_eq!(super::bot_count("0"), Ok(0));
+        assert_eq!(super::bot_count("64"), Ok(64));
+        let e = super::bot_count("abc").unwrap_err();
+        assert!(e.contains("'abc' is not a number"), "{e}");
+        let e = super::bot_count("65").unwrap_err();
+        assert!(e.contains("65 is out of range"), "{e}");
+        let e = super::bot_count("-1").unwrap_err();
+        assert!(e.contains("-1 is out of range"), "{e}");
+    }
+
+    #[test]
+    fn the_s11_dvars_have_their_stock_defaults_and_a_set_motd_or_ban_list_warns() {
+        let mut c = crate::cvar::Cvars::new();
+        register_core_dvars(&mut c);
+        assert_eq!(c.string("g_motd"), "");
+        assert!(c.bool("g_smoothClients") && c.bool("sv_botsPressAttackBtn"));
+        assert_eq!(c.int("sv_paused"), 0);
+        // The stock default turns on the extrapolation this server lacks (#514), said once per process (an earlier
+        // test's level start may have said it already); nothing else warns.
+        let (_, events) = logging::capture(|| super::warn_unhonoured_dvars(&c));
+        let dvars: Vec<_> = events.iter().filter_map(|e| e.field("dvar")).collect();
+        assert!(dvars.iter().all(|d| *d == "g_smoothClients"), "{dvars:?}");
+        c.set("g_motd", "logtest motd");
+        c.set("g_banIPs", "10.0.0.1 ");
+        let (_, events) = logging::capture(|| super::warn_unhonoured_dvars(&c));
+        let dvars: Vec<_> = events
+            .iter()
+            .filter(|e| e.level == tracing::Level::WARN)
+            .filter_map(|e| e.field("dvar"))
+            .filter(|d| *d != "g_smoothClients")
+            .collect();
+        assert_eq!(dvars, ["g_motd", "g_banIPs"]);
     }
 }

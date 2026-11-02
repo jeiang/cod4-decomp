@@ -586,6 +586,10 @@ pub struct ItemReport {
     pub text: String,
     /// Whether the item shows and takes the pointer now.
     pub visible: bool,
+    /// Whether the item is only decoration (a label the pointer and keys pass over: what a locked choice shows).
+    pub decoration: bool,
+    /// The setting a dvar-bound control shows now (`Yes`, a list's label, a bind's keys); `None` for other items.
+    pub value: Option<String>,
     /// `[x, y, w, h]` in window pixels: the rectangle a click is tested against.
     pub rect: [f32; 4],
 }
@@ -630,6 +634,8 @@ pub struct Ui {
     border_low_scale: f32,
     /// The `soundLoop` aliases of the menus painted this frame.
     sound_loops: Vec<String>,
+    /// The build number the last frame drew over the menus (`UI_DrawBuildNumber`), `None` when it drew none.
+    pub build_drawn: Option<String>,
 }
 
 impl Ui {
@@ -679,6 +685,7 @@ impl Ui {
             overstrike: true,
             border_low_scale: 0.6,
             sound_loops: Vec::new(),
+            build_drawn: None,
         }
     }
 
@@ -801,20 +808,23 @@ impl Ui {
         };
         match name.to_ascii_lowercase().as_str() {
             "open" => self.open_by_name(host, &arg(0)),
+            // Closing a menu that is not loaded does nothing and says nothing, as `Menus_CloseByName` (KisakCOD
+            // ui/ui_shared.cpp) finds none: the stock options pages close every sibling page on open, some of which
+            // no MP zone has (#372).
             "close" => {
                 let a = arg(0);
                 if a == "self" {
                     if let Some(m) = menu {
                         self.close(host, m);
                     }
-                } else if let Some(m) = self.script_menu(&a) {
+                } else if let Some(m) = self.menu_index(&a) {
                     self.close(host, m);
                 }
             }
             "closemenu" => self.close_by_name(host, &arg(0)),
             "ingameopen" if host.in_game() => self.open_by_name(host, &arg(0)),
             "ingameclose" if host.in_game() => {
-                if let Some(m) = self.script_menu(&arg(0)) {
+                if let Some(m) = self.menu_index(&arg(0)) {
                     self.close(host, m);
                 }
             }
@@ -1642,6 +1652,8 @@ impl Ui {
                     name,
                     text,
                     visible,
+                    decoration: d.window.static_flags & statf::DECORATION != 0,
+                    value: self.item_value(&*host, m, i, d),
                     rect: [p.x, p.y, p.w, p.h],
                 }
             })
@@ -2485,7 +2497,8 @@ impl Ui {
         let &m = self.stack.last()?;
         let def = self.menus[m].def.clone();
         for (i, d) in def.items.iter().enumerate() {
-            // `#245` names an item by its owner-draw id, for those that have no name or text of their own.
+            // `#245` names an item by its owner-draw id, `$monkeytoy` by the dvar it edits: for those that have no
+            // name or text of their own.
             let named = d
                 .window
                 .name
@@ -2494,7 +2507,12 @@ impl Ui {
                 || want
                     .strip_prefix('#')
                     .and_then(|id| id.parse::<i32>().ok())
-                    .is_some_and(|id| id == d.window.owner_draw);
+                    .is_some_and(|id| id == d.window.owner_draw)
+                || want.strip_prefix('$').is_some_and(|v| {
+                    d.dvar
+                        .as_deref()
+                        .is_some_and(|dv| dv.eq_ignore_ascii_case(v))
+                });
             let texted = !named && {
                 let t = self.item_text(&*host, m, i, d);
                 !t.is_empty() && t.eq_ignore_ascii_case(want)
@@ -2509,6 +2527,50 @@ impl Ui {
     /// Whether the top menu shows an item named or labelled `want`.
     pub fn has_item(&mut self, host: &mut dyn Host, want: &str) -> bool {
         self.find_item(host, want).is_some()
+    }
+
+    /// How the top menu shows the text `want` (localized, case-insensitive): `Some(true)` when an item that is not
+    /// decoration shows it and takes the pointer, `Some(false)` when only decoration or a disabled item shows it (a
+    /// locked choice), `None` when no visible item does.
+    pub fn item_state(&mut self, host: &mut dyn Host, want: &str) -> Option<bool> {
+        let &m = self.stack.last()?;
+        let def = self.menus[m].def.clone();
+        let mut shown = None;
+        for (i, d) in def.items.iter().enumerate() {
+            let t = self.item_text(&*host, m, i, d);
+            if t.is_empty() || !t.eq_ignore_ascii_case(want) || !self.item_visible(host, m, i) {
+                continue;
+            }
+            if d.window.static_flags & statf::DECORATION == 0 && self.item_live(host, m, i) {
+                return Some(true);
+            }
+            shown = Some(false);
+        }
+        shown
+    }
+
+    /// The dvars of the visible yes/no, list and enumeration controls of the open menu `menu` that show no setting:
+    /// a list whose dvar holds none of its values, or an enumeration with no strings.
+    pub fn unset_values(&mut self, host: &mut dyn Host, menu: &str) -> Vec<String> {
+        let Some(m) = self.menu_index(menu).filter(|m| self.stack.contains(m)) else {
+            return vec![format!("{menu} is not open")];
+        };
+        let def = self.menus[m].def.clone();
+        let mut unset = Vec::new();
+        for (i, d) in def.items.iter().enumerate() {
+            if !matches!(d.ty, ity::YESNO | ity::MULTI | ity::DVARENUM)
+                || !self.item_visible(host, m, i)
+            {
+                continue;
+            }
+            if self
+                .item_value(&*host, m, i, d)
+                .is_none_or(|v| v.trim().is_empty())
+            {
+                unset.push(d.dvar.as_deref().unwrap_or("").to_owned());
+            }
+        }
+        unset
     }
 
     /// Activates the visible item of the top menu whose name or text is `want`: what a click on it does. `true` if
@@ -3993,6 +4055,7 @@ mod tests {
         let mut ui = bare_ui();
         let mut host = Dummy::default();
         let (_, events) = logging::capture(|| {
+            ui.run_script(&mut host, None, None, "showmenu no_such_menu_for_show_test");
             ui.run_script(&mut host, None, None, "close no_such_menu_for_close_test");
             ui.run_script(&mut host, None, None, "frobnicate_test_command 1");
         });
@@ -4002,6 +4065,12 @@ mod tests {
             .collect();
         assert!(
             warns
+                .iter()
+                .any(|e| e.field("menu") == Some("no_such_menu_for_show_test"))
+        );
+        // Closing a menu that is not loaded is silent, as `Menus_CloseByName`.
+        assert!(
+            !warns
                 .iter()
                 .any(|e| e.field("menu") == Some("no_such_menu_for_close_test"))
         );

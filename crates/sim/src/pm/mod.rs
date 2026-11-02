@@ -57,7 +57,7 @@ pub use mantle::{
     MANTLE_ANIM_COUNT, MANTLE_ANIM_NAMES, MantleAnim, MantleAnims, MantleTransition, TRANSITIONS,
     weapon_inactive,
 };
-pub use params::{Params, WeaponMove};
+pub use params::{Domain, Params, WeaponMove};
 pub use pm_weapon::viewmodel_weapon;
 pub use sprint::{max_sprint_ms, sprint_left_ms};
 pub use state::*;

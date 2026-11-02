@@ -186,6 +186,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::net_master::run),
     },
     StageDef {
+        name: "net-info",
+        description: "the getinfo answer of a pure, an impure, a listen, a modded, an extra-IWD, a custom-map and a hardcore server asked over UDP: challenge first, only the original's keys in its order, and its hw, pure, mod and hc values; then getstatus carries fs_game and sv_floodProtect, and rcon sets follow the stock dvar types and cheat protection",
+        needs_install: false,
+        timeout: Duration::from_secs(10 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::net_info::run),
+    },
+    StageDef {
         name: "net-items",
         description: "two real UDP clients: one's rifle is dropped, both are shown the weapon in their snapshots, the other is hinted and takes it holding +activate and its inventory changes",
         needs_install: false,
@@ -232,6 +240,14 @@ pub static STAGES: &[StageDef] = &[
         timeout: Duration::from_secs(10 * MINUTES),
         default: true,
         kind: Kind::Builtin(crate::stages::net_ui::run),
+    },
+    StageDef {
+        name: "script-builtins",
+        description: "a check script runs on a live stock level and the developer-only builtins (print channels, asserts, line/print3d) and the late-precache errors must give the stock results; a listen client must draw the line/print3d its server's script ran (hud.stats.debug_lines/debug_strings)",
+        needs_install: false,
+        timeout: Duration::from_secs(10 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::script_builtins::run),
     },
     StageDef {
         name: "net-killcam",
@@ -424,6 +440,14 @@ pub static STAGES: &[StageDef] = &[
         timeout: Duration::from_secs(8 * MINUTES),
         default: true,
         kind: Kind::Builtin(crate::stages::client_clear::run),
+    },
+    StageDef {
+        name: "client-smoke",
+        description: "a real off-hand smoke throw bursts once for its first observer; a late-joining client draws the same cloud at its original age without replaying the burst or sound",
+        needs_install: false,
+        timeout: Duration::from_secs(8 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_smoke::run),
     },
     StageDef {
         name: "client-foliage",

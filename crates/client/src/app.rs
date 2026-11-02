@@ -1055,6 +1055,11 @@ impl Viewer {
             &self.cli.startup,
         );
         input.cvars.set("fs_game", &self.cli.game, false);
+        // The map this start loaded and joins (`--map`, or the one the server named to a browser join): the menus'
+        // map title and minimap look it up by `mapname`, as a later load sets it in `finish_load` (#372).
+        if self.cli.netplay() {
+            input.cvars.set("mapname", &self.cli.map, false);
+        }
         let demo_dir = input
             .config_dir()
             .unwrap_or_else(|| self.cli.install.clone())
@@ -1072,7 +1077,10 @@ impl Viewer {
         };
         if let (Some(sh), Some(n)) = (shell.as_mut(), net.as_mut()) {
             sh.ui.assets.add_weapon_icons(&n.weapon_defs());
-            n.set_tracer_material(sh.ui.assets.material("gfx_tracer").cloned());
+            n.set_beam_materials(
+                sh.ui.assets.material("gfx_tracer").cloned(),
+                sh.ui.assets.material("gfx_laser").cloned(),
+            );
         }
         let (profiles, stats) = match self
             .cli
@@ -1109,7 +1117,8 @@ impl Viewer {
         }
         if let Some(n) = net.as_mut() {
             n.set_profile(&stats);
-            // A direct join began before the config was read: its userinfo takes the `name` the configs set now.
+            // A direct join began before the config was read: its sound fade and userinfo take the configured values.
+            n.map_init(crate::sound::level_fade_of(&input.cvars));
             let (rate, snaps) = netplay_rates(&input);
             n.set_userinfo(&player_name(&self.cli, &input), rate, snaps);
         }
@@ -1724,6 +1733,7 @@ impl Viewer {
             let t_net = Instant::now();
             net.set_volume(crate::sound::volume_of(&st.input.cvars));
             net.set_sound_mix(crate::sound::mix_of(&st.input.cvars));
+            net.set_level_fade_time(crate::sound::level_fade_of(&st.input.cvars));
             net.set_client_side_effects(crate::ambient::enabled_by(&st.input.cvars));
             net.set_voice(st.input.cvar("cl_voice").is_none_or(|v| v.trim() != "0"));
             net.set_demo_paused(
@@ -1876,6 +1886,7 @@ impl Viewer {
                         }
                     }
                 }
+                sh.st.server_addr = net.server_addr().to_owned();
                 sh.tick(&mut st.input);
                 let scores = f.held_other.iter().any(|c| c == "scores") || sh.st.scores_forced;
                 if scores != sh.st.game.scoreboard {
@@ -1929,21 +1940,11 @@ impl Viewer {
                     }
                     // `R_SetFilmInfo`: the vision set's film block, then (with cheats on) the `r_desaturation`,
                     // `r_contrast` and `r_brightness` tweaks on top of it (desaturation is applied twice, as stock
-                    // does). The base is the look's each frame, so the tweaks never accumulate.
+                    // does). The base is the look's each frame (the vision channel shown), so the tweaks never
+                    // accumulate.
                     let cheats = st.input.cvars.bool("sv_cheats");
-                    let base = nf
-                        .look
-                        .vision
-                        .map(|(_, f)| f)
-                        .or(st.film_base)
-                        .unwrap_or(r.post.film);
+                    let (glow_base, base) = nf.look.vision;
                     st.film_base = Some(base);
-                    let glow_base = nf
-                        .look
-                        .vision
-                        .map(|(g, _)| g)
-                        .or(st.glow_base)
-                        .unwrap_or(r.post.glow);
                     st.glow_base = Some(glow_base);
                     r.post.glow = crate::gfx::glow(&st.input.cvars, glow_base);
                     r.post.film = crate::gfx::film(&st.input.cvars, base);
@@ -2846,6 +2847,51 @@ fn script_step(st: &mut State) -> bool {
                 format!("{key} wrong: {wrong:?}; open: {open}"),
             );
         }
+        // `live=Voice Chat+Multiplayer Options` fails unless an item of the top menu that is not decoration shows
+        // each text and takes the pointer; `locked=Create a Class` unless each shows only as decoration or disabled.
+        "live" | "locked" => {
+            let Some(sh) = st.shell.as_mut() else {
+                return true;
+            };
+            let wrong: Vec<String> = arg
+                .split('+')
+                .filter_map(|w| {
+                    let s = sh.item_state(&mut st.input, w);
+                    (s != Some(key == "live")).then(|| format!("{w}: {s:?}"))
+                })
+                .collect();
+            let open = sh.ui.open_menus().join(",");
+            done(
+                wrong.is_empty(),
+                sc,
+                format!("{key} wrong: {wrong:?}; open: {open}"),
+            );
+        }
+        // `values=options_game` fails while a visible yes/no, list or enumeration control of that open menu shows no
+        // setting (its dvar unset, or holding none of the list's values).
+        "values" => {
+            let Some(sh) = st.shell.as_mut() else {
+                return true;
+            };
+            let unset = sh.unset_values(&mut st.input, arg);
+            done(
+                unset.is_empty(),
+                sc,
+                format!("{arg}: controls with no setting: {unset:?}"),
+            );
+        }
+        // `build=1.7.568` fails unless the last frame drew that build number over the menus; `build=` that it drew none.
+        "build" => {
+            let Some(sh) = st.shell.as_ref() else {
+                return true;
+            };
+            let drawn = sh.ui.build_drawn.clone();
+            done(
+                drawn.as_deref().unwrap_or("") == arg,
+                sc,
+                format!("build number drawn: {drawn:?}"),
+            );
+        }
         "open" | "close" => {
             let Some(sh) = st.shell.as_mut() else {
                 return true;
@@ -3450,6 +3496,12 @@ fn script_step(st: &mut State) -> bool {
                     u8::from(r.settings.dof && r.post.dof.is_some_and(|d| d.active())).to_string()
                 }),
                 "blur_radius" => st.renderer.as_ref().map(|r| r.post.blur_radius.to_string()),
+                // The window aspect the last `r_blur` filter was shaped for (`RB_VirtualToSceneRadius`), 2 decimals.
+                "blur_shape" => st
+                    .renderer
+                    .as_ref()
+                    .and_then(|r| r.blur_shape())
+                    .map(|s| format!("{s:.2}")),
                 "glow" => st
                     .renderer
                     .as_ref()
@@ -3741,7 +3793,8 @@ fn script_step(st: &mut State) -> bool {
             done(st.net.is_some(), sc, "fx demo".into());
         }
         // What the cgame dvars came to last frame (`cgis=gun 0`, `cgis=hud2d 0`, `cgis=fps 1`,
-        // `cgis=fullbright 1`, `cgis=shock 1` for the shellshock blend, `cgis=subtitle 1` for a subtitle up) or
+        // `cgis=fullbright 1`, `cgis=shock 1` for the shellshock blend, `cgis=subtitle 1` for a subtitle up,
+        // `cgis=debug_lines 1`/`cgis=debug_strings 1` for the listen server's `line`/`print3d` drawings on screen) or
         // how often an effect kind played (`cgis=fx:shell_eject 0`, `cgis=fx:bullet_impact_noblood 1`): what was
         // drawn or played, not the dvar's value.
         "cgis" => {
@@ -3778,9 +3831,15 @@ fn script_step(st: &mut State) -> bool {
                             film.brightness, film.contrast, film.desaturation
                         )
                     }),
-                    "crosshair_alpha" => sh
-                        .and_then(|s| s.st.live.reticle.as_ref())
-                        .map(|r| format!("{:.2}", crate::crosshair::layout(r).0)),
+                    // In a match: the drawn opacity, or `hidden` when the stock gates left no reticle.
+                    "crosshair_alpha" => sh.filter(|_| st.net.is_some()).map(|s| {
+                        crate::crosshair::shown(
+                            s.st.live
+                                .reticle
+                                .as_ref()
+                                .map(|r| crate::crosshair::layout(r).0),
+                        )
+                    }),
                     "window_position" => {
                         // Wayland deliberately offers no global position; there assert the request that reaches
                         // display::apply. Platforms exposing outer_position must report the actual placement.
@@ -3796,9 +3855,28 @@ fn script_step(st: &mut State) -> bool {
                             });
                         p.map(|(x, y)| format!("{x} {y}"))
                     }
+                    // `in <ms>` when the level's sound faded in (`SND_MapInit`): the quietest channel under half
+                    // volume in the first mixed chunk and back at full after 300 ms; otherwise the two volumes.
+                    "levelfade" => {
+                        st.net
+                            .as_ref()
+                            .and_then(|n| n.level_fade())
+                            .map(|(ms, start, after)| match after {
+                                Some(after) if start < 0.5 && after >= 0.99 => format!("in {ms}"),
+                                _ => format!("{ms}ms start {start:.2} after_300ms {after:?}"),
+                            })
+                    }
+                    // `1` when the eye bobbed more than a tenth of a unit since `bobmark` (`bg_bobMax`,
+                    // `bg_bobAmplitude*`), `0` when it did not.
+                    "eyebob" => st
+                        .net
+                        .as_ref()
+                        .map(|n| u8::from(n.eye_bob() > 0.1).to_string()),
                     "subtitle" => sh.map(|s| {
                         u8::from(s.st.feed.active(crate::hud::SUBTITLE, s.st.live.time)).to_string()
                     }),
+                    "debug_lines" => sh.map(|s| s.st.hud_stats.debug_lines.to_string()),
+                    "debug_strings" => sh.map(|s| s.st.hud_stats.debug_strings.to_string()),
                     _ => name.strip_prefix("fx:").and_then(|kind| {
                         st.net.as_ref().map(|n| {
                             let played = n.fx_played(kind);
@@ -3838,6 +3916,13 @@ fn script_step(st: &mut State) -> bool {
                 st.fx_mark = n.fx_counts();
             }
             done(st.net.is_some(), sc, "fx marked".into());
+        }
+        // `bobmark` starts the eye bob probe over; `cgis=eyebob <0|1>` afterwards says whether the eye bobbed.
+        "bobmark" => {
+            if let Some(n) = st.net.as_mut() {
+                n.bob_mark();
+            }
+            done(st.net.is_some(), sc, "bob marked".into());
         }
         // A bullet of the weapon in hand strikes a player 64 units ahead on the next frame (`hitflesh`): the flesh
         // impact effect, or the no-blood one with `cg_blood` off.
@@ -4352,6 +4437,108 @@ fn console_action(st: &mut State, line: &str) {
                     net.center_view();
                 }
             }
+            // `CL_Clientinfo_f` (KisakCOD cl_main_mp.cpp:843): the connection state, the server and the userinfo.
+            "clientinfo" => {
+                say(st, "--------- Client Information ---------");
+                let state = match st.net.as_ref() {
+                    Some(n) if n.in_match() => 9,
+                    Some(_) => 3,
+                    None => 0,
+                };
+                say(st, &format!("state: {state}"));
+                let server = st.net.as_ref().map_or("", NetPlay::server_addr).to_owned();
+                say(st, &format!("Server: {server}"));
+                say(st, "User info settings:");
+                for key in ["name", "rate", "snaps"] {
+                    if let Some(v) = st.input.cvar(key) {
+                        say(st, &format!("{key:<20}{v}"));
+                    }
+                }
+                say(st, "--------------------------------------");
+            }
+            // `CL_Configstrings_f` (KisakCOD cl_main_mp.cpp:821).
+            "configstrings" => {
+                let rows = st
+                    .net
+                    .as_ref()
+                    .filter(|n| n.in_match())
+                    .map(NetPlay::configstrings);
+                match rows {
+                    Some(rows) => {
+                        for (i, s) in rows {
+                            say(st, &format!("{i:>4}: {s}"));
+                        }
+                    }
+                    None => say(st, "Not connected to a server."),
+                }
+            }
+            // `Sys_ShowIP` (KisakCOD win_net.cpp:514).
+            "showip" => say(st, &format!("IP: {}", local_ip())),
+            // `Com_Meminfo_f`: the process's resident memory (this engine has no zone allocator to break it down).
+            "meminfo" => say(st, &format!("memory: rss {} MiB", rss() >> 20)),
+            // `CG_VoiceChat_f` and `CG_TeamVoiceChat_f` (KisakCOD cg_consolecmds_mp.cpp:279, 305): only a player
+            // (or anyone in the intermission) may voice chat; a spectator is told so.
+            "voicechat" | "voiceteamchat" => {
+                let allowed = st.net.as_ref().and_then(NetPlay::voice_chat_allowed);
+                if cmd.len() == 2
+                    && let Some(allowed) = allowed
+                {
+                    if allowed {
+                        let chat = if verb == "voicechat" {
+                            "vsay"
+                        } else {
+                            "vsay_team"
+                        };
+                        if let Some(net) = st.net.as_mut() {
+                            net.send_command(&format!("{chat} {}", cmd[1]));
+                        }
+                    } else {
+                        let msg = st
+                            .shell
+                            .as_ref()
+                            .and_then(|s| s.ui.assets.translate_ref("CGAME_NOSPECTATORVOICECHAT"))
+                            .map_or_else(|| "CGAME_NOSPECTATORVOICECHAT".into(), |t| t.to_string());
+                        say(st, &msg);
+                    }
+                }
+            }
+            // `SND_PlayLocal_f` (KisakCOD snd.cpp:3344): an alias played at a spot relative to the listener.
+            "snd_playlocal" => {
+                if !(2..=5).contains(&cmd.len()) {
+                    say(
+                        st,
+                        &format!("USAGE: {} <sndalias> [<dist> <yaw> <pitch>]", cmd[0]),
+                    );
+                    continue;
+                }
+                let atof = |i: usize, default: f32| {
+                    cmd.get(i)
+                        .and_then(|v| v.trim().parse::<f32>().ok())
+                        .unwrap_or(default)
+                };
+                let (dist, yaw, pitch) = (atof(2, 100.0), atof(3, 0.0), atof(4, 0.0));
+                let played = console_sound(st).map(|s| s.play_local(&cmd[1], dist, yaw, pitch));
+                match played {
+                    Some(Some(at)) => say(
+                        st,
+                        &format!(
+                            "Playing local sound alias \"{}\" at ({:.2}, {:.2}, {:.2}).",
+                            cmd[1], at[0], at[1], at[2]
+                        ),
+                    ),
+                    _ => say(st, &format!("Couldn't find sound alias \"{}\".", cmd[1])),
+                }
+            }
+            // The EQ commands (`SND_SetEq_f` and friends, KisakCOD snd.cpp:285-516).
+            "snd_seteq" | "snd_seteqfreq" | "snd_seteqgain" | "snd_seteqq" | "snd_seteqtype"
+            | "snd_deactivateeq" => {
+                let lines = console_sound(st)
+                    .map(|s| s.eq_command(&cmd))
+                    .unwrap_or_default();
+                for l in lines {
+                    say(st, &l);
+                }
+            }
             // The cgame's `viewpos`: in a match it prints the drawn eye; without one the cgame's commands are not
             // registered, so the word is forwarded or unknown as any other.
             "viewpos" => match st
@@ -4404,6 +4591,32 @@ fn console_action(st: &mut State, line: &str) {
             }
         }
     }
+}
+
+/// The sound system a console sound command talks to: the match's, or the menus' before a match.
+fn console_sound(st: &mut State) -> Option<&mut crate::sound::ClientSound> {
+    if let Some(net) = st.net.as_mut() {
+        return Some(net.sound_mut());
+    }
+    st.menu_sound.as_mut()
+}
+
+/// `Sys_ShowIP`'s address: the one a UDP socket would send from (connecting chooses a route; nothing is sent).
+#[cfg(not(target_arch = "wasm32"))]
+fn local_ip() -> String {
+    std::net::UdpSocket::bind("0.0.0.0:0")
+        .ok()
+        .and_then(|s| {
+            s.connect("192.0.2.1:9").ok()?;
+            s.local_addr().ok()
+        })
+        .map_or_else(|| "127.0.0.1".into(), |a| a.ip().to_string())
+}
+
+/// A browser has no UDP socket to ask: the loopback address, as the listen server's own.
+#[cfg(target_arch = "wasm32")]
+fn local_ip() -> String {
+    "127.0.0.1".into()
 }
 
 /// `CL_ForwardCommandToServer`: a word nothing here knows goes to the server while connected (which answers an
@@ -4542,7 +4755,9 @@ fn recover_surface(
     if st.loading.is_some() {
         return Ok(SurfaceAction::Retry);
     }
-    if st.gpu.lost().is_some() {
+    // A device lost under a frame can fail the acquisition before a plain poll reports it; wait for it here, which
+    // also lets wgpu release the surface's images before recovery drops the surface.
+    if st.gpu.lost_waiting().is_some() {
         return Ok(SurfaceAction::DeviceLost);
     }
     if matches!(outcome, C::Timeout | C::Occluded) {
@@ -4794,9 +5009,11 @@ fn vid_restart(cli: &Cli, st: &mut State) {
 ///
 /// Never while a map loads: reconfiguring a surface fails (a panic) when another thread submits to the queue at the
 /// same moment, and the loader does. The size is kept in `pending_resize` until the load is done.
-/// `cg_fov` in degrees at 4:3, within the original's 1 to 160.
+/// `cg_fov` in degrees at 4:3, within `iw3mp.exe` 1.7's registered 65 to 80 (a value written past the console's
+/// range check, such as `--fov`, is held to it).
 fn cg_fov(input: &Input) -> f32 {
-    input.cvars.f32("cg_fov").clamp(1.0, 160.0)
+    let (min, max) = crate::input::Cvars::float_domain("cg_fov").unwrap_or((65.0, 80.0));
+    input.cvars.f32("cg_fov").clamp(min, max)
 }
 
 /// The world's field of view in degrees at 4:3 (`CG_GetViewFov`).
@@ -4984,7 +5201,10 @@ fn finish_load(
         net.new_level(Some((library, &data, sound)))?;
         if let Some(sh) = st.shell.as_ref() {
             net.upload_stats(&sh.st.stats);
-            net.set_tracer_material(sh.ui.assets.material("gfx_tracer").cloned());
+            net.set_beam_materials(
+                sh.ui.assets.material("gfx_tracer").cloned(),
+                sh.ui.assets.material("gfx_laser").cloned(),
+            );
         }
     } else {
         let (addr, listen) = server.ok_or("no server to connect to")?;
@@ -4994,6 +5214,7 @@ fn finish_load(
         let name = player_name(cli, &st.input);
         let mut net =
             NetPlay::connect(library, &data, addr, &name, &password, limits, false, sound)?;
+        net.map_init(crate::sound::level_fade_of(&st.input.cvars));
         if let Some(path) = st.pending_demo.take() {
             net.play_demo(&path)?;
         }
@@ -5002,7 +5223,10 @@ fn finish_load(
         net.set_userinfo(&name, rate, snaps);
         if let Some(sh) = st.shell.as_ref() {
             net.set_profile(&sh.st.stats);
-            net.set_tracer_material(sh.ui.assets.material("gfx_tracer").cloned());
+            net.set_beam_materials(
+                sh.ui.assets.material("gfx_tracer").cloned(),
+                sh.ui.assets.material("gfx_laser").cloned(),
+            );
         }
         net.start_client_side_effects(crate::ambient::enabled_by(&st.input.cvars));
         st.net = Some(net);
@@ -5217,6 +5441,7 @@ fn end_session(map_slot: &mut Option<MapData>, st: &mut State) {
     release_pointer(st);
     if let Some(sh) = st.shell.as_mut() {
         sh.st.in_game = false;
+        sh.st.server_addr.clear();
         sh.st.game.hud.live = false;
         sh.close_all(&mut st.input);
         sh.open(&mut st.input, "main");
@@ -5739,6 +5964,9 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
                 "yaw": st.yaw.to_degrees(),
                 "roll": st.roll.to_degrees(),
                 "drawn_frames": st.samples.len(),
+                // `cg_fov` widened for the display (Hor+), degrees, and the aspect it was widened for.
+                "fov_x": st.fov_x.to_degrees(),
+                "aspect": st.aspect.unwrap_or(st.config.width as f32 / st.config.height.max(1) as f32),
             }),
             "draw" => json!({
                 "surfaces": st.surfaces_drawn.last().copied(),
@@ -5757,8 +5985,8 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
     Value::Object(m)
 }
 
-/// The menus on the stack, the item that has the focus, and every item of each open menu with the rectangle a click
-/// is tested against.
+/// The menus on the stack, the item that has the focus, every item of each open menu with the rectangle a click
+/// is tested against, the setting it shows and whether it is only decoration, and the build number drawn last frame.
 fn menu_state(st: &mut State) -> Value {
     let Some(sh) = st.shell.as_mut() else {
         return Value::Null;
@@ -5776,11 +6004,13 @@ fn menu_state(st: &mut State) -> Value {
                 "name": it.name,
                 "text": it.text,
                 "visible": it.visible,
+                "decoration": it.decoration,
+                "value": it.value,
                 "rect": it.rect,
             }));
         }
     }
-    json!({"open": open, "focused": focused, "items": items})
+    json!({"open": open, "focused": focused, "items": items, "build": sh.ui.build_drawn})
 }
 
 /// What the HUD drew and counted since the run began (`stats`, the counters `hud_draw` of `ui-script.json` has),
@@ -5791,6 +6021,12 @@ fn hud_state(st: &mut State) -> Value {
     };
     let g = &sh.st.game;
     let live = &sh.st.live;
+    // The scoreboard's rows in list order as `[client, team]`.
+    let score_rows: Vec<[u32; 2]> = live
+        .scores
+        .iter()
+        .map(|r| [u32::from(r.client), u32::from(r.team)])
+        .collect();
     json!({
         "report": sh.st.game.hud.report(),
         "stats": sh.st.hud_stats.report(),
@@ -5803,6 +6039,9 @@ fn hud_state(st: &mut State) -> Value {
             // A message window has a line up.
             "feed": (0..crate::hud::WINDOWS).any(|w| sh.st.feed.active(w, live.time)),
             "players_listed": live.scores.len(),
+            "score_rows": score_rows,
+            // The viewer's client number.
+            "own": live.own,
             "own_team": live.own_team,
         },
         "missing_images": sh.missing(),

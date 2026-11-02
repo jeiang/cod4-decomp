@@ -201,6 +201,37 @@ impl Ui {
     }
 }
 
+/// What `UI_DrawBuildNumber` draws: the 1.7 `iw3mp.exe` formats `"%s.%i"` from `"1.7"` and its build number, 568
+/// (KisakCOD `ui_mp/ui_main_mp.cpp`, `UI_DrawBuildNumber`, has `"1.0"` in its place).
+pub const BUILD_NUMBER: &str = "1.7.568";
+
+impl Ui {
+    /// `UI_DrawBuildNumber`: [`BUILD_NUMBER`] at `ui_buildLocation` (virtual units from the safe area's right edge and
+    /// the screen's top; `y` is the baseline) in the font `ui_buildSize` picks, medium grey (`colorMdGrey`), plain.
+    fn paint_build_number(&self, host: &dyn Host, p: &mut Painter) {
+        let loc = host.dvar("ui_buildLocation");
+        let mut xy = loc
+            .split_whitespace()
+            .map(|v| v.parse::<f32>().unwrap_or(0.0));
+        let (x, y) = (xy.next().unwrap_or(-100.0), xy.next().unwrap_or(52.0));
+        let scale = host.dvar("ui_buildSize").trim().parse().unwrap_or(0.3);
+        self.draw_text(
+            p,
+            &TextDraw {
+                text: BUILD_NUMBER,
+                font_enum: 0,
+                scale,
+                style: 0,
+                color: [0.5, 0.5, 0.5, 1.0],
+                x,
+                y,
+                horz: super::place::horz::RIGHT,
+                vert: 0,
+            },
+        );
+    }
+}
+
 impl Painter<'_> {
     pub(crate) fn material_of_font(
         &mut self,
@@ -245,6 +276,11 @@ impl Ui {
         for m in self.stack.clone() {
             self.paint_menu(host, p, m);
         }
+        // `UI_Refresh`: with menus up and no server connected, the build number goes over them, under the pointer.
+        self.build_drawn = (!self.stack.is_empty() && !host.in_game()).then(|| {
+            self.paint_build_number(&*host, p);
+            BUILD_NUMBER.to_owned()
+        });
         if self.cursor_visible && !self.stack.is_empty() {
             let (x, y) = self.cursor;
             // 32 virtual units square, centred on the pointer (what the original draws; the system cursor is hidden).
@@ -436,6 +472,68 @@ impl Ui {
         }
     }
 
+    /// The setting a dvar-bound control shows now: `Yes`/`No` (`Item_YesNo_Paint`), the label of a list's current
+    /// value (`Item_Multi_Setting`, empty when the value is not one of the list's), an enumerated dvar's current
+    /// string, a slider's value, a bind's keys, a text field's value. `None` for an item that shows no setting.
+    pub(super) fn item_value(
+        &self,
+        host: &dyn Host,
+        m: usize,
+        i: usize,
+        d: &ItemDef,
+    ) -> Option<String> {
+        let dvar = d.dvar.as_deref().unwrap_or("");
+        Some(match d.ty {
+            ity::YESNO => {
+                let on = host.dvar(dvar).trim().parse::<f64>().unwrap_or(0.0) != 0.0;
+                self.assets
+                    .translate(if on { "MENU_YES" } else { "MENU_NO" })
+                    .map_or_else(
+                        || if on { "Yes" } else { "No" }.to_owned(),
+                        |s| s.to_string(),
+                    )
+            }
+            ity::MULTI => {
+                let cur = host.dvar(dvar);
+                let label = match &d.data {
+                    ItemData::Multi(Some(mu)) => multi_index(mu, &cur)
+                        .and_then(|k| mu.dvar_list.get(k))
+                        .and_then(|s| s.as_deref())
+                        .unwrap_or(""),
+                    _ => "",
+                };
+                self.translate(label)
+            }
+            ity::DVARENUM => {
+                let name = match &d.data {
+                    ItemData::EnumDvarName(n) => n.as_deref().unwrap_or(""),
+                    _ => "",
+                };
+                let list = host.dvar_enum(name);
+                let cur = host.dvar(dvar);
+                let label = list
+                    .get(enum_index(&list, &cur))
+                    .cloned()
+                    .unwrap_or_default();
+                self.translate(&label)
+            }
+            ity::BIND => {
+                if self.bind_pending == Some((m, i)) {
+                    self.translate("@MENU_BIND_KEY_PENDING")
+                } else {
+                    self.bind_label(host, dvar)
+                }
+            }
+            ity::SLIDER
+            | ity::EDITFIELD
+            | ity::NUMERICFIELD
+            | ity::VALIDFILEFIELD
+            | ity::DECIMALFIELD
+            | ity::UPREDITFIELD => host.dvar(dvar),
+            _ => return None,
+        })
+    }
+
     fn text_color(&self, m: usize, i: usize, d: &ItemDef, host: &dyn Host) -> [f32; 4] {
         let it = &self.menus[m].items[i];
         let menu = &self.menus[m].def;
@@ -615,47 +713,9 @@ impl Ui {
                 });
                 self.paint_text_field(host, p, m, i, d, &shown, caret);
             }
-            ity::YESNO => {
-                let on = host
-                    .dvar(d.dvar.as_deref().unwrap_or(""))
-                    .trim()
-                    .parse::<f64>()
-                    .unwrap_or(0.0)
-                    != 0.0;
-                let v = self
-                    .assets
-                    .translate(if on { "MENU_YES" } else { "MENU_NO" })
-                    .map_or_else(
-                        || if on { "Yes" } else { "No" }.to_owned(),
-                        |s| s.to_string(),
-                    );
+            ity::YESNO | ity::MULTI | ity::DVARENUM | ity::BIND => {
+                let v = self.item_value(&*host, m, i, d).unwrap_or_default();
                 self.paint_item_text(host, p, m, i, d, Some(&v));
-            }
-            ity::MULTI => {
-                let cur = host.dvar(d.dvar.as_deref().unwrap_or(""));
-                let label = match &d.data {
-                    ItemData::Multi(Some(mu)) => multi_index(mu, &cur)
-                        .and_then(|k| mu.dvar_list.get(k))
-                        .and_then(|s| s.as_deref())
-                        .unwrap_or(""),
-                    _ => "",
-                };
-                let label = self.translate(label);
-                self.paint_item_text(host, p, m, i, d, Some(&label));
-            }
-            ity::DVARENUM => {
-                let name = match &d.data {
-                    ItemData::EnumDvarName(n) => n.as_deref().unwrap_or(""),
-                    _ => "",
-                };
-                let list = host.dvar_enum(name);
-                let cur = host.dvar(d.dvar.as_deref().unwrap_or(""));
-                let label = list
-                    .get(enum_index(&list, &cur))
-                    .cloned()
-                    .unwrap_or_default();
-                let label = self.translate(&label);
-                self.paint_item_text(host, p, m, i, d, Some(&label));
             }
             ity::SLIDER => {
                 if let ItemData::EditField(Some(e)) = &d.data {
@@ -685,14 +745,6 @@ impl Ui {
                     let img = p.named(&self.assets, "ui_sliderbutt_1");
                     p.pic(&img, thumb, color);
                 }
-            }
-            ity::BIND => {
-                let text = if self.bind_pending == Some((m, i)) {
-                    self.translate("@MENU_BIND_KEY_PENDING")
-                } else {
-                    self.bind_label(&*host, d.dvar.as_deref().unwrap_or(""))
-                };
-                self.paint_item_text(host, p, m, i, d, Some(&text));
             }
             ity::LISTBOX => self.paint_listbox(host, p, m, i, d),
             ity::GAME_MSG_WINDOW => {

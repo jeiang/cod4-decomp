@@ -63,6 +63,9 @@ pub struct Entry {
     /// `ff` and `kc`: `scr_team_fftype` and `scr_game_allowkillcam`.
     pub friendly_fire: i32,
     pub killcam: bool,
+    /// `hc` and `od` (the 1.7 keys): `scr_hardcore` and `scr_oldschool`.
+    pub hardcore: i32,
+    pub old_school: i32,
     /// `minPing` and `maxPing` the server lets in (0: no limit).
     pub min_ping: i32,
     pub max_ping: i32,
@@ -91,6 +94,8 @@ impl Entry {
             hardware: 0,
             friendly_fire: 0,
             killcam: false,
+            hardcore: 0,
+            old_school: 0,
             min_ping: 0,
             max_ping: 0,
             game: String::new(),
@@ -143,6 +148,8 @@ impl Entry {
             hardware: num("hw"),
             friendly_fire: num("ff"),
             killcam: num("kc") != 0,
+            hardcore: num("hc"),
+            old_school: num("od"),
             min_ping: num("minPing"),
             max_ping: num("maxPing"),
             game: get("game").to_owned(),
@@ -537,12 +544,15 @@ pub struct Filter {
     pub pure_only: bool,
     /// `ui_browserShowDedicated`: only dedicated servers.
     pub dedicated_only: bool,
-    /// `ui_browserMod`, `ui_browserFriendlyfire`, `ui_browserKillcam` and `ui_browserShowPunkBuster`: the value the
-    /// server's `mod`, `ff`, `kc` or `pb` must hold.
+    /// `ui_browserMod`, `ui_browserFriendlyfire`, `ui_browserKillcam`, `ui_browserShowPunkBuster`, and the 1.7
+    /// `ui_browserHardcore` and `ui_browserOldSchool`: the value the server's `mod`, `ff`, `kc`, `pb`, `hc` or `od` must
+    /// hold (the 1.7 `iw3mp.exe` compares `hc` and `od` as numbers, `0x547729-0x54778b`).
     pub modded: i32,
     pub friendly_fire: i32,
     pub killcam: i32,
     pub punkbuster: i32,
+    pub hardcore: i32,
+    pub old_school: i32,
 }
 
 impl Default for Filter {
@@ -558,6 +568,8 @@ impl Default for Filter {
             friendly_fire: -1,
             killcam: -1,
             punkbuster: -1,
+            hardcore: -1,
+            old_school: -1,
         }
     }
 }
@@ -578,6 +590,8 @@ impl Filter {
             && (self.friendly_fire < 0 || self.friendly_fire == e.friendly_fire)
             && is(self.killcam, e.killcam)
             && is(self.punkbuster, e.punkbuster)
+            && (self.hardcore < 0 || self.hardcore == e.hardcore)
+            && (self.old_school < 0 || self.old_school == e.old_school)
     }
 }
 
@@ -611,6 +625,9 @@ pub struct ServerList {
     status_req: Option<(SocketAddr, Instant, u32)>,
     /// An answer that arrived and has not been taken yet.
     status: Option<Status>,
+    /// The console's `serverstatus` asked for the answer: it is printed, not only shown in the Server Info popup
+    /// (`serverStatus_s.print`, KisakCOD cl_main_pc_mp.cpp:651).
+    status_print: bool,
     /// Where the favorites are kept (`None`: nowhere, they last until the client exits). A browser has no files.
     #[cfg(not(target_arch = "wasm32"))]
     store: Option<std::path::PathBuf>,
@@ -779,6 +796,27 @@ impl ServerList {
     /// The status answer that arrived since the last call.
     pub fn take_status(&mut self) -> Option<Status> {
         self.status.take()
+    }
+
+    /// `CL_ServerStatus_f`: as [`ServerList::request_status`], with the answer printed to the console.
+    pub fn request_status_console(&mut self, addr: SocketAddr) {
+        self.status_print = true;
+        self.request_status(addr);
+    }
+
+    /// Whether the pending status answer is the console's, clearing the flag.
+    pub fn take_status_print(&mut self) -> bool {
+        std::mem::take(&mut self.status_print)
+    }
+
+    /// `CL_Ping_f`: asks one server for its info, which refreshes its row (KisakCOD cl_main_mp.cpp:2879).
+    pub fn ping(&mut self, addr: SocketAddr) {
+        if self.browser.is_none() {
+            self.browser = self.open_browser();
+        }
+        if let Some(b) = self.browser.as_mut() {
+            b.ask(addr);
+        }
     }
 
     /// Adds a favorite (once) and asks it.
@@ -1401,12 +1439,16 @@ mod tests {
         kc.killcam = true;
         let mut pb = open.clone();
         pb.punkbuster = true;
+        let mut hc = open.clone();
+        hc.hardcore = 1;
+        let mut od = open.clone();
+        od.old_school = 1;
         let mut home = open.clone();
         home.hardware = 0;
         let mut loose = open.clone();
         loose.pure = false;
         let all = [
-            &open, &full, &empty, &locked, &modded, &ff, &kc, &pb, &home, &loose,
+            &open, &full, &empty, &locked, &modded, &ff, &kc, &pb, &home, &loose, &hc, &od,
         ];
         let shown =
             |f: Filter| -> Vec<usize> { (0..all.len()).filter(|&i| f.passes(all[i])).collect() };
@@ -1473,6 +1515,27 @@ mod tests {
                 ..base
             }),
             [7]
+        );
+        assert_eq!(
+            shown(Filter {
+                hardcore: 1,
+                ..base
+            }),
+            [10]
+        );
+        assert!(
+            !shown(Filter {
+                hardcore: 0,
+                ..base
+            })
+            .contains(&10)
+        );
+        assert_eq!(
+            shown(Filter {
+                old_school: 1,
+                ..base
+            }),
+            [11]
         );
         // A favorite that has not answered has nothing to test and is kept.
         let silent = Entry::unanswered(addr("10.0.0.9:28960"));

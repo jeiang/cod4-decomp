@@ -30,16 +30,46 @@ pub struct Allow {
 /// measured on the Linux host (the largest stage; each entry says its measurement and date) plus a margin of 25% or
 /// more. It catches a gross regression, not a one-off.
 pub const ALLOWED: &[Allow] = &[
-    // Known gaps: the code is right to say so; the cause is not fixed yet.
+    // The stage's own conditions: the code is right to say so.
     Allow {
         contains: &[
             "cod4e::ui::assets",
             "localized string is missing",
             "key=\"\"",
         ],
-        reason: "menus show an empty `@` reference (#372)",
+        reason: "the team and class menus title the map from mp/mapsTable.csv by `mapname`: with no map (client-ui) or \
+                 a synthetic test map the table does not list (client-objective, client-hardpoint) the title is the bare \
+                 `@` stock shows too (#372)",
+        stages: &["client-ui", "client-objective", "client-hardpoint"],
+        max: Some(10), // measured 4 (client-ui) and 7 (client-objective, client-hardpoint) on the Linux host, 2026-11-01
+    },
+    Allow {
+        contains: &[
+            "cod4e::input",
+            "a menu's dvar write was refused",
+            "cvar=\"monkeytoy\"",
+        ],
+        reason: "client-frontend clicks Enable Console to check a menu cannot move monkeytoy off its one value (#372)",
+        stages: &["client-frontend"],
+        max: Some(2), // one click
+    },
+    Allow {
+        contains: &[
+            "cod4e::shell",
+            "hardware icon column is not drawn",
+            "issue=502",
+        ],
+        reason: "the join list draws no `server_hardware_*` icon (#502); warned once per process",
         stages: &[],
-        max: Some(12), // measured 7 (2026-10-14) and 11 with the class menu drawn (control-channel, 2026-10-29)
+        max: Some(2), // once per client process
+    },
+    Allow {
+        contains: &["server::server", "not extrapolated", "issue=514"],
+        reason: "g_smoothClients is on by default and player entity states are not extrapolated (#514); warned once \
+                 per server process",
+        stages: &[],
+        // Measured: 1 on client-hud and net-match; 2 on script-builtins (its in-process server and its listen client).
+        max: Some(2),
     },
     // Timing of the harness's own clients and bots.
     Allow {
@@ -55,6 +85,21 @@ pub const ALLOWED: &[Allow] = &[
         max: Some(20),
     },
     // Stages that provoke the event on purpose.
+    Allow {
+        contains: &[
+            "cvar set refused",
+            "g_mantleBlockTimeBuffer is cheat protected.",
+        ],
+        reason: "net-info sets a cheat dvar over rcon with sv_cheats 0 to check the stock refusal (#398)",
+        stages: &["net-info"],
+        max: Some(2), // provoked once
+    },
+    Allow {
+        contains: &["vision file missing", "vision/does_not_exist.vision"],
+        reason: "client-hud names a vision set with no file to check the vision/default.vision fallback (#401)",
+        stages: &["client-hud"],
+        max: Some(2), // provoked once
+    },
     Allow {
         contains: &["net::connect", "Server is full"],
         reason: "net-hardening fills the server to check the refusal",
@@ -134,6 +179,12 @@ pub const ALLOWED: &[Allow] = &[
         max: Some(2), // measured 1 on the Linux host, 2026-10-14,
     },
     Allow {
+        contains: &["server::cvar", "cvar set refused", "rcon_ranged"],
+        reason: "net-rcon sets a `dvar_int` dvar out of its range to check that it is refused (#479)",
+        stages: &["net-rcon"],
+        max: Some(2), // one expected
+    },
+    Allow {
         contains: &["cod4e::console", "unknown command", "zz_unknown_at_front"],
         reason: "client-commands types an unknown word at the front end to check `Unknown command`",
         stages: &["client-commands"],
@@ -149,9 +200,9 @@ pub const ALLOWED: &[Allow] = &[
         contains: &[
             "cod4e::console",
             "stock command not implemented",
-            "issue=479",
+            "issue=527",
         ],
-        reason: "client-commands runs two stock commands we do not implement (imagelist, gfx_stats) to check the #479 warning and the error channel",
+        reason: "client-commands runs two stock renderer commands we do not implement (imagelist, r_smc_stats; #527) to check the not-implemented warning and the error channel",
         stages: &["client-commands"],
         max: Some(3), // two expected
     },
@@ -176,16 +227,6 @@ pub const ALLOWED: &[Allow] = &[
     },
     Allow {
         contains: &[
-            "cod4e::ui",
-            "script names a menu that is not loaded",
-            "menu=\"options_",
-        ],
-        reason: "the options screens name menus (options_view, options_defaults, options_driverinfo, options_credits) the loaded UI zones lack (#372)",
-        stages: &["client-ui"],
-        max: Some(10), // measured 8 on the Linux host, 2026-10-14,
-    },
-    Allow {
-        contains: &[
             "cod4e::display",
             "exclusive fullscreen is not available on Wayland",
         ],
@@ -204,6 +245,30 @@ pub const ALLOWED: &[Allow] = &[
         reason: "client-gfx destroys the device to check recovery",
         stages: &["client-gfx"],
         max: Some(2), // measured 1 on the Linux host, 2026-10-14,
+    },
+    // Stock-script defects the original raises too.
+    Allow {
+        contains: &[
+            "server::server",
+            "script runtime error: cannot cast undefined to bool seen=",
+            "at=\"maps\\\\mp\\\\gametypes\\\\_missions::ch_kills line 545\"",
+        ],
+        reason: "a player their own frag killed: the stock _missions::ch_kills reads explosiveInfo[\"suicideGrenadeKill\"], \
+                 which the stock damage callback sets only for damage from someone else (#539); client-match fails \
+                 unless the server counted a frag suicide for each such error",
+        stages: &["client-match"],
+        max: Some(4), // a 90 s match; the stage itself caps the errors by the frag suicides the server counted
+    },
+    Allow {
+        contains: &[
+            "cod4e::listen",
+            "script error on the listen server",
+            "cause=\"cannot cast undefined to bool\"",
+            "at=\"maps\\\\mp\\\\gametypes\\\\_missions::ch_kills line 545\"",
+        ],
+        reason: "the listen server's log line for the same stock frag-suicide error (#539)",
+        stages: &["client-match"],
+        max: Some(4), // one per error; the stage caps the errors by the frag suicides the server counted
     },
 ];
 
@@ -448,6 +513,36 @@ mod tests {
                     .contains("animation data read out of range")
             );
         }
+    }
+
+    /// The two lines the stock frag-suicide error logs pass client-match (#539), as a serial run logged them; the
+    /// same error at another site, another error at that site, or the lines in another stage still fail.
+    #[test]
+    fn only_the_stock_frag_suicide_error_lines_pass_client_match() {
+        let lines = |cause: &str, at: &str| {
+            format!(
+                "2026-11-02T16:41:00.692267Z  WARN server::server: script runtime error: {cause} seen=1 at=\"{at}\"\n\
+                 2026-11-02T16:41:00.750894Z  WARN cod4e::listen: script error on the listen server map=mp_crash \
+                 cause=\"{cause}\" at=\"{at}\" error=******* script runtime error *******\n\
+                 {cause}\n  at {at}\n"
+            )
+        };
+        let site = r"maps\\mp\\gametypes\\_missions::ch_kills line 545";
+        let gate = |log: &str, stage: &str| {
+            let mut r = StageReport::new(stage, Status::Passed);
+            apply_with(&mut r, stage_dir(log).path(), stage, ALLOWED);
+            r.status
+        };
+        let stock = lines("cannot cast undefined to bool", site);
+        assert_eq!(gate(&stock, "client-match"), Status::Passed);
+        assert_eq!(gate(&stock, "net-match"), Status::Failed);
+        let other_site = lines(
+            "cannot cast undefined to bool",
+            r"maps\\mp\\gametypes\\_missions::ch_kills line 546",
+        );
+        assert_eq!(gate(&other_site, "client-match"), Status::Failed);
+        let other_error = lines("cannot cast undefined to int", site);
+        assert_eq!(gate(&other_error, "client-match"), Status::Failed);
     }
 
     #[test]

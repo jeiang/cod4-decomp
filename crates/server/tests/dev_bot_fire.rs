@@ -120,4 +120,54 @@ fn a_bot_fires_then_throws_after_the_compass_stage_sequence() {
         trace.join("\n")
     );
     assert_eq!(after.0, before.0, "an offhand throw is not FireWeapon");
+
+    // #494: the listen-server stage once had a bot that no longer held the pre-raised weapon (a respawn resets the
+    // inventory) when the burst was asked for. The drop of its weapon and the first raise of the given one outlast
+    // the burst, so the burst time must run from the raise, not from the command.
+    let killer = s
+        .game
+        .connected_clients()
+        .find(|&(m, c)| c.bot && m != n)
+        .map(|(m, _)| m)
+        .expect("a second bot");
+    let spawns = s.game.client(n).unwrap().ps.spawn_count;
+    s.exec_line(&format!("devkill {n} {killer}")).unwrap();
+    let respawned = (0..frames(30)).any(|_| {
+        s.run_frames(1);
+        let c = s.game.client(n).unwrap();
+        c.ps.spawn_count != spawns
+            && c.ps.pm_type < sim::pm::PmType::Dead
+            && c.ps.weapon != 0
+            && c.ps.weapon_state == sim::pm::weapon_state::READY
+    });
+    assert!(respawned, "the bot did not respawn");
+    // Let the class pick the bot script sends after a spawn settle.
+    s.run_frames(frames(2));
+    let c = s.game.client(n).unwrap();
+    let weapon = ["mp5_mp", "p90_mp", "ak47_mp"]
+        .into_iter()
+        .find(|w| !c.inv.has(s.game.weapons.index(w)))
+        .expect("the class carries none of the test weapons");
+    let index = s.game.weapons.index(weapon);
+    let w = s.game.weapons.info(index);
+    let switch = s.game.weapons.info(c.ps.weapon as u16).drop_time + w.first_raise_time;
+    assert!(
+        switch >= 500,
+        "{weapon}: the switch ({switch} ms) no longer outlasts the 500 ms burst, so this no longer tests #494"
+    );
+    let burst = (500 / w.fire_time.max(1)) as u32;
+    let before = record(&s, n);
+    s.exec_line(&format!("devbotfire {n} {weapon} 500"))
+        .unwrap();
+    s.run_frames(frames(4));
+    let after = record(&s, n);
+    assert_eq!(
+        after.1,
+        u32::from(index),
+        "{weapon}: the bot did not raise it"
+    );
+    assert!(
+        after.0.saturating_sub(before.0) >= burst.saturating_sub(1).max(1),
+        "{weapon}: a {switch} ms switch ate the burst: {before:?} -> {after:?}, want about {burst} shots"
+    );
 }

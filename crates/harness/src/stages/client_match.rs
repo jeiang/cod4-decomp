@@ -4,7 +4,8 @@
 //! enemy along the bots' navigation mesh, turns toward enemies it can see and shoots them, for 90 seconds. The stage
 //! reads the client's report and asserts what makes a match playable: connected and spawned, the player moved by
 //! prediction, the others were drawn,
-//! snapshots kept coming, prediction was rarely corrected, shots were fired and their events (impacts, flashes, pain) became effects, and the server ran without
+//! snapshots kept coming, prediction was rarely corrected, shots were fired and their events (impacts, flashes) became
+//! effects with at most one blood effect per impact on a player, and the server ran without
 //! script errors. Bandwidth, frame times and the server's tick cost are reported as metrics. Needs a display and the
 //! install; skips cleanly without.
 use super::client_flythrough::locate_client;
@@ -285,6 +286,27 @@ fn misses(what: &str, list: &Value, allowed: &[&str]) -> Option<String> {
     (!names.is_empty()).then(|| format!("{} names missing: {}", what, names.join(", ")))
 }
 
+/// The runtime error the stock scripts raise for a player their own frag killed (#539): the stock damage callback
+/// (`_globallogic`) sets `explosiveInfo["suicideGrenadeKill"]` only for damage from someone else, and the stock kill
+/// challenges (`_missions::ch_kills`) test it in their frag branch, so the original's VM raises the same error there
+/// (KisakCOD `script/scr_variable.cpp:1727`). Message and innermost location, as the listen report gives them.
+const FRAG_SUICIDE_ERROR: (&str, &str) = (
+    "cannot cast undefined to bool",
+    "maps\\mp\\gametypes\\_missions::ch_kills line 545",
+);
+
+/// How many of the server's script errors were [`FRAG_SUICIDE_ERROR`] with a frag suicide the server counted behind
+/// each: never more than the suicides, so the same error from any other kill (the engine's damage arguments wrong)
+/// still fails the stage.
+fn frag_suicide_errors(srv: &Value) -> u64 {
+    let sites = srv["script_error_sites"].as_array().map_or(0, |a| {
+        a.iter()
+            .filter(|s| s["message"] == FRAG_SUICIDE_ERROR.0 && s["at"] == FRAG_SUICIDE_ERROR.1)
+            .count() as u64
+    });
+    sites.min(srv["stats"]["frag_suicides"].as_u64().unwrap_or(0))
+}
+
 /// Why the frames hitched, if they did. `cpu_ms` is every frame's own cost (`frames.raw.csv`), `phases` where it
 /// went. The report's `late_builds` lists what was built after the load, as "frame what": a pipeline listed was
 /// missing when a frame drew (its draws were skipped for the frames the compile took), so the load's warm-up
@@ -553,9 +575,17 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         failures.push("players were drawn but none carried a model the scripts attached".into());
     }
     let script_errors = sv.get(&["script_errors"]);
-    if script_errors > 0.0 {
+    let excused = frag_suicide_errors(srv);
+    if excused > 0 {
+        report.notes.push(format!(
+            "{excused} stock-script error(s) at {} from a frag suicide, which the stock scripts raise too (#539)",
+            FRAG_SUICIDE_ERROR.1
+        ));
+    }
+    if script_errors - excused as f64 > 0.0 {
         failures.push(format!(
-            "{script_errors} script runtime errors on the server"
+            "{} script runtime errors on the server",
+            script_errors - excused as f64
         ));
     }
     if shots < 1.0 {
@@ -628,15 +658,26 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         failures.extend(misses("sound", &snd["missing"], ALLOWED_MISSING_SOUND));
     }
     // What the shots did must have reached the client as events.
-    let (impacts, pains) = (
-        num(net, &["events", "bullet_impact"]),
-        num(net, &["events", "player_pain"]),
-    );
+    let impacts = num(net, &["events", "bullet_impact"]);
     if shots >= 1.0 && impacts < 1.0 {
         failures.push("shots were fired but the client saw no bullet impact event".into());
     }
-    if hits >= 1.0 && pains < 1.0 {
-        failures.push("enemies were hit but the client saw no pain event".into());
+    // An impact on a player (a bullet's, or a grenade's bounce or blast) draws at most one blood effect, the impact
+    // table's flesh one (`CG_BulletHitEvent`); the victim's pain is player state and draws none (#422).
+    let (flesh_hits, blood) = (
+        num(&net["fx"], &["flesh_hits"]),
+        num(&net["fx"], &["played", "blood"]),
+    );
+    if hits >= 1.0 && flesh_hits < 1.0 {
+        failures.push("enemies were hit but the client saw no bullet impact on flesh".into());
+    }
+    if flesh_hits >= 1.0 && blood < 1.0 {
+        failures.push(format!("{flesh_hits} impacts on players drew no blood"));
+    }
+    if blood > flesh_hits {
+        failures.push(format!(
+            "{blood} blood effects for {flesh_hits} impacts on players: one impact draws one"
+        ));
     }
     if impacts >= 1.0 && heard(&["bulletimpact"]) < 1.0 {
         failures.push(format!(
@@ -740,7 +781,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     );
     m.insert("client.walked".into(), num(net, &["path"]));
     m.insert("client.event_bullet_impacts".into(), impacts);
-    m.insert("client.event_pains".into(), pains);
+    m.insert("client.fx_flesh_hits".into(), flesh_hits);
+    m.insert("client.fx_blood".into(), blood);
     m.insert("match.shots".into(), shots);
     m.insert("match.hits".into(), hits);
     m.insert("match.eye_jerk".into(), jerky);
@@ -791,6 +833,23 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The stock frag-suicide error passes only with a counted frag suicide behind it (#539); another error, or the
+    /// same one without a suicide, still counts.
+    #[test]
+    fn only_the_stock_frag_suicide_error_with_a_suicide_behind_it_is_excused() {
+        let site = json!({"message": FRAG_SUICIDE_ERROR.0, "at": FRAG_SUICIDE_ERROR.1});
+        let other = json!({"message": "cannot cast undefined to bool", "at": "maps\\mp\\gametypes\\_teams::x line 1"});
+        let srv = |sites: Vec<Value>, suicides: u64| json!({"script_error_sites": sites, "stats": {"frag_suicides": suicides}});
+        assert_eq!(frag_suicide_errors(&srv(vec![site.clone()], 1)), 1);
+        assert_eq!(frag_suicide_errors(&srv(vec![site.clone()], 0)), 0);
+        assert_eq!(
+            frag_suicide_errors(&srv(vec![site.clone(), site.clone()], 1)),
+            1
+        );
+        assert_eq!(frag_suicide_errors(&srv(vec![other], 3)), 0);
+        assert_eq!(frag_suicide_errors(&json!({"script_errors": 1})), 0);
+    }
 
     #[test]
     fn a_counter_the_report_lacks_is_a_failure_not_a_zero() {

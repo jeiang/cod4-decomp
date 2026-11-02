@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Snapshot reset handling follows KisakCOD (GPL-3.0, KisakCOD contributors and Activision),
+// `cgame_mp/cg_snapshot_mp.cpp:419-426` and `CG_TransitionKillcam` (`:521-560`) (CoD4 MP 1.8; native 1.7 unverified).
 // Translated in part from KisakCOD cgame/cg_event.cpp (CG_PlayFxOnTag),
 // GPL-3.0, copyright the KisakCOD contributors and Activision.
 //! What the server tells the client happened: the one-shot events of `server::tempev` turned into [`ClientEvent`]s,
@@ -36,6 +38,8 @@ pub enum ClientEvent {
         surface: u8,
         weapon: u16,
         owner: u16,
+        /// The persistent smoke cloud is reconstructed separately from its burst.
+        persistent_smoke: bool,
     },
     /// A missile that will not go off hit or settled on a surface (a grenade that never armed, a `dud` explosion).
     Dud {
@@ -65,6 +69,9 @@ pub enum ClientEvent {
     /// A script effect following a world-model bone for its authored lifetime.
     PlayFxOnTag {
         entity: u16,
+        /// The entity's model (configstring index) in the snapshot that carried the event. The match draws entities
+        /// `INTERP_DELAY_MS` behind that snapshot, so the number may still be drawn as another entity or model.
+        model: u16,
         name: String,
         tag: String,
     },
@@ -73,11 +80,6 @@ pub enum ClientEvent {
         client: u16,
         /// The impulse to push the body with.
         push: [f32; 3],
-    },
-    PlayerPain {
-        origin: [f32; 3],
-        client: u16,
-        damage: u8,
     },
     /// A physics world event (`physicsexplosionsphere`, `physicsexplosioncylinder`, `physicsjolt`, `physicsjitter`):
     /// loose bodies near `origin` are pushed.
@@ -120,7 +122,6 @@ impl ClientEvent {
             Self::PlayFx { .. } => "play_fx",
             Self::PlayFxOnTag { .. } => "play_fx_on_tag",
             Self::PlayerDeath { .. } => "player_death",
-            Self::PlayerPain { .. } => "player_pain",
             Self::Physics { .. } => "physics",
             Self::Earthquake { .. } => "earthquake",
             Self::WeaponFire { .. } => "weapon_fire",
@@ -189,8 +190,10 @@ pub struct Events {
     /// Effect names by index - 1.
     fx: Vec<String>,
     effect_tags: HashMap<u16, String>,
-    /// Last sequence acted on, by event entity number.
-    seen: HashMap<u16, u8>,
+    /// Last sequence and smoke burst time acted on, by entity number.
+    seen: HashMap<u16, (u8, Option<i32>)>,
+    /// The last snapshot scanned was a killcam replay of the past.
+    killcam: bool,
 }
 
 impl Events {
@@ -240,39 +243,75 @@ impl Events {
 
     /// The events in `snap` not delivered before. Call once per snapshot, oldest first.
     pub fn scan(&mut self, snap: &Snapshot) -> Vec<ClientEvent> {
+        // Back from a killcam, the live world replaces the replayed past entity by entity: `CG_TransitionKillcam`
+        // (cg_snapshot_mp.cpp:541-560) resets every entity of the snapshot as a new one (`CG_ResetEntity(.., 1)`), so a
+        // number the past and the present gave to different entities replays neither's events. Temporary event
+        // entities keep their own once-only rule.
+        let killcam = snap.killcam();
+        if self.killcam && !killcam {
+            for e in snap.entities.iter().filter(|e| e.etype != etype::EVENT) {
+                self.seen.remove(&e.number);
+            }
+        }
+        self.killcam = killcam;
         let mut out = Vec::new();
         let mut live = Vec::new();
         let entities = &snap.entities;
-        for e in snap.entities.iter().filter(|e| e.etype == etype::EVENT) {
-            live.push(e.number);
-            if self.seen.get(&e.number) == Some(&e.event_seq) {
-                continue;
-            }
-            self.seen.insert(e.number, e.event_seq);
-            out.extend(self.decode(e, entities));
-        }
         for e in snap
             .entities
             .iter()
-            .filter(|e| !matches!(e.etype, etype::EVENT | etype::FX | etype::LOOP_FX))
+            .filter(|e| e.etype == etype::EVENT || persistent_smoke(e))
         {
+            live.push(e.number);
+            let key = (
+                e.event_seq,
+                persistent_smoke(e).then_some(e.custom_explode_start_time),
+            );
+            if self.seen.get(&e.number) == Some(&key) {
+                continue;
+            }
+            self.seen.insert(e.number, key);
+            // Reset entities more than 200 ms after the burst inherit its sequence without
+            // replaying the explosion (including audio). Exactly 200 ms is still fresh.
+            if persistent_smoke(e)
+                && (snap.server_time < e.custom_explode_start_time
+                    || snap.server_time > e.time2
+                    || snap.server_time.wrapping_sub(e.custom_explode_start_time) > 200)
+            {
+                continue;
+            }
+            out.extend(self.decode(e, entities));
+        }
+        for e in snap.entities.iter().filter(|e| {
+            !matches!(e.etype, etype::EVENT | etype::FX | etype::LOOP_FX) && !persistent_smoke(e)
+        }) {
             live.push(e.number);
             // An entity not seen before follows `CG_ResetEntity` (cg_snapshot_mp.cpp:415-479): a general entity or a
             // missile starts from sequence 0, so the events it was spawned with play; any other type starts from its
             // current sequence, so a late joiner or a re-entering entity does not replay its history.
-            // Stock's one exception (cg_snapshot_mp.cpp:419-422) keeps the current sequence for an entity with eFlags
-            // 0x10000 seen more than 200 ms after its `launchTime`. Only the persistent smoke-grenade explode entity
-            // (an `ET_GENERAL`, g_missile.cpp:399, time in `customExplode.startTime`) carries it. We send no such
-            // entity (#480), and our missile `eflags` hold a launch time rather than flags, so the exception cannot
-            // apply here.
-            let last = self.seen.get(&e.number).copied().unwrap_or(match e.etype {
-                etype::GENERAL | etype::MISSILE => 0,
-                _ => e.event_seq,
-            });
-            let count = e.event_seq.wrapping_sub(last).min(4);
-            self.seen.insert(e.number, e.event_seq);
+            // Persistent smoke is handled above, including CG_ResetEntity's 200 ms exception.
+            let last = self
+                .seen
+                .get(&e.number)
+                .map(|key| key.0)
+                .unwrap_or(match e.etype {
+                    etype::GENERAL | etype::MISSILE => 0,
+                    _ => e.event_seq,
+                });
+            // `CG_CheckEvents` (cg_event.cpp:1374-1409) on the 8-bit sequence: a sequence of 0 plays nothing; the last
+            // one counts as 256 lower only when more than 64 ahead (a wrap), otherwise one ahead of the new sequence
+            // (a killcam's past behind the live entity at its number) plays nothing; at most the last 4 play.
+            let next = i32::from(e.event_seq);
+            let count = if next == 0 {
+                0
+            } else {
+                let last = i32::from(last);
+                let last = if last > next + 64 { last - 256 } else { last };
+                usize::try_from((next - last).clamp(0, 4)).unwrap_or(0)
+            };
+            self.seen.insert(e.number, (e.event_seq, None));
             let recent = e.recent_events();
-            for &(event, parm) in &recent[4 - usize::from(count)..] {
+            for &(event, parm) in &recent[4 - count..] {
                 if event == ev::PLAY_FX_ON_TAG {
                     let mut event_state = e.clone();
                     event_state.event = event;
@@ -300,6 +339,7 @@ impl Events {
                 let tag = encoded.get(2..).filter(|s| !s.is_empty())?;
                 ClientEvent::PlayFxOnTag {
                     entity: e.number,
+                    model: e.model,
                     name: self.fx_name(index)?.to_owned(),
                     tag: tag.to_owned(),
                 }
@@ -319,6 +359,7 @@ impl Events {
                 surface: e.event_parm,
                 weapon: e.weapon,
                 owner: e.client,
+                persistent_smoke: persistent_smoke(e),
             },
             ev::DUD | ev::CHANGE_TO_DUD => ClientEvent::Dud {
                 settled: e.event == ev::CHANGE_TO_DUD,
@@ -356,11 +397,6 @@ impl Events {
                 origin: e.origin,
                 client: e.client,
                 push: e.velocity,
-            },
-            ev::PLAYER_PAIN => ClientEvent::PlayerPain {
-                origin: e.origin,
-                client: e.client,
-                damage: e.event_parm,
             },
             ev::PHYSICS_EXPLOSION
             | ev::PHYSICS_EXPLOSION_CYLINDER
@@ -441,6 +477,11 @@ impl Events {
     }
 }
 
+/// GENERAL smoke entities carry their explosion event for clients entering their snapshot later.
+pub(crate) fn persistent_smoke(e: &EntityState) -> bool {
+    e.etype == etype::GENERAL && e.eflags & net::entity::SMOKE_EXPLODE != 0
+}
+
 /// The unit vector a pitch/yaw/roll in degrees points along.
 fn direction(angles: [f32; 3]) -> [f32; 3] {
     sim::pm::math::angle_vectors(&angles).0
@@ -477,11 +518,13 @@ mod tests {
             vec![
                 ClientEvent::PlayFxOnTag {
                     entity: 20,
+                    model: 0,
                     name: "bolt_a".into(),
                     tag: "tag_flash".into()
                 },
                 ClientEvent::PlayFxOnTag {
                     entity: 20,
+                    model: 0,
                     name: "bolt_b".into(),
                     tag: "tag_brass".into()
                 },
@@ -508,6 +551,55 @@ mod tests {
     }
 
     #[test]
+    fn a_killcam_plays_a_past_sequence_only_when_ahead_and_leaving_it_resets_every_entity() {
+        let mut events = Events::default();
+        events.take_commands(&mut vec!["fx 1 bolt".into()]);
+        events.set_effect_tags(&[(net::ui::cs::EFFECT_TAGS + 1, "01tag_origin".into())]);
+        let mut live = EntityState::new(30);
+        live.etype = etype::SCRIPT_MODEL;
+        live.event_seq = 5;
+        live.set_recent_events([(ev::PLAY_FX_ON_TAG, 1); 4]);
+        let mut past = live.clone();
+        past.etype = etype::PLANE;
+        let killcam = |entities: &[EntityState]| {
+            let mut s = snap(entities);
+            s.follow = Some(net::snapshot::Follow {
+                own: 0,
+                followed: 1,
+                archive_ms: 5000,
+                ps_offset_ms: 0,
+                entity: None,
+            });
+            s
+        };
+        assert!(events.scan(&snap(std::slice::from_ref(&live))).is_empty());
+        // Entering resets nothing (`CG_TransitionKillcam`): a past entity whose sequence is ahead of the live one's at
+        // its number plays its last events.
+        past.event_seq = 9;
+        assert_eq!(events.scan(&killcam(std::slice::from_ref(&past))).len(), 4);
+        assert!(
+            events
+                .scan(&killcam(std::slice::from_ref(&past)))
+                .is_empty()
+        );
+        // Leaving, every entity starts over as first seen: the live script model, behind the past's sequence, replays
+        // nothing and takes its own.
+        assert!(events.scan(&snap(std::slice::from_ref(&live))).is_empty());
+        live.event_seq = 6;
+        assert_eq!(events.scan(&snap(std::slice::from_ref(&live))).len(), 1);
+        // A past sequence behind the live one (not a wrap: within 64) plays nothing (`CG_CheckEvents`).
+        past.event_seq = 4;
+        assert!(
+            events
+                .scan(&killcam(std::slice::from_ref(&past)))
+                .is_empty()
+        );
+        // Leaving, the live script model, ahead of the past's sequence, replays nothing either.
+        live.event_seq = 7;
+        assert!(events.scan(&snap(std::slice::from_ref(&live))).is_empty());
+    }
+
+    #[test]
     fn target_tag_event_sequence_wraps_and_invalid_tag_entries_are_not_played() {
         let mut events = Events::default();
         events.take_commands(&mut vec!["fx 1 bolt".into()]);
@@ -523,9 +615,19 @@ mod tests {
         target.event = ev::PLAY_FX_ON_TAG;
         target.event_parm = 1;
         assert!(events.scan(&snap(std::slice::from_ref(&target))).is_empty());
+        // Wrapping to sequence 0 plays nothing (`CG_CheckEvents` skips a zero sequence); the next one counts from 0.
         target.event_seq = 0;
+        assert!(events.scan(&snap(std::slice::from_ref(&target))).is_empty());
+        target.event_seq = 1;
         assert_eq!(events.scan(&snap(std::slice::from_ref(&target))).len(), 1);
         assert!(events.scan(&snap(std::slice::from_ref(&target))).is_empty());
+        // Far ahead plays the last four; a wrap (the last sequence more than 64 ahead counts as 256 lower) plays the
+        // last four again.
+        target.set_recent_events([(ev::PLAY_FX_ON_TAG, 1); 4]);
+        target.event_seq = 250;
+        assert_eq!(events.scan(&snap(std::slice::from_ref(&target))).len(), 4);
+        target.event_seq = 3;
+        assert_eq!(events.scan(&snap(std::slice::from_ref(&target))).len(), 4);
         for parm in [0, 2, 3, 4, 255] {
             target.event_seq = target.event_seq.wrapping_add(1);
             target.event_parm = parm;
@@ -593,6 +695,72 @@ mod tests {
         assert_eq!(ev.scan(&snap(std::slice::from_ref(&e))).len(), 1);
         assert!(ev.scan(&snap(&[])).is_empty());
         assert_eq!(ev.scan(&snap(&[e])).len(), 1);
+    }
+
+    fn smoke(start: i32) -> EntityState {
+        let mut e = event(961, super::ev::EXPLOSION, 1);
+        e.etype = etype::GENERAL;
+        e.eflags = net::entity::SMOKE_EXPLODE;
+        e.custom_explode_start_time = start;
+        e.time2 = start + 61_000;
+        e
+    }
+
+    fn at(time: i32, entities: &[EntityState]) -> Snapshot {
+        let mut s = snap(entities);
+        s.server_time = time;
+        s
+    }
+
+    #[test]
+    fn general_smoke_bursts_once_only_when_first_seen_within_200_ms() {
+        for age in [0, 1, 199, 200, 201, 2_000, 60_000] {
+            let e = smoke(1_000);
+            let s = at(1_000 + age, std::slice::from_ref(&e));
+            let mut events = Events::default();
+            let burst = events.scan(&s);
+            assert_eq!(burst.len(), usize::from(age <= 200), "age {age}");
+            if age <= 200 {
+                assert!(matches!(
+                    burst[0],
+                    ClientEvent::Explosion {
+                        persistent_smoke: true,
+                        ..
+                    }
+                ));
+            }
+            assert!(events.scan(&s).is_empty(), "repeated age {age}");
+            events.scan(&at(4_000, &[]));
+            assert!(
+                events.scan(&at(4_001, &[e])).is_empty(),
+                "late reentry age {age}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reused_smoke_slot_with_sequence_one_has_a_new_burst_time() {
+        let mut events = Events::default();
+        assert_eq!(events.scan(&at(1_000, &[smoke(1_000)])).len(), 1);
+        assert_eq!(events.scan(&at(2_000, &[smoke(2_000)])).len(), 1);
+        assert!(events.scan(&at(2_001, &[smoke(2_000)])).is_empty());
+        // A restart recreates the scanner; an existing old cloud stays silent.
+        assert!(
+            Events::default()
+                .scan(&at(3_000, &[smoke(2_000)]))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn smoke_outside_its_active_interval_has_no_burst() {
+        for time in [999, 62_001] {
+            assert!(
+                Events::default()
+                    .scan(&at(time, &[smoke(1_000)]))
+                    .is_empty()
+            );
+        }
     }
 
     #[test]
@@ -813,13 +981,8 @@ mod tests {
         );
     }
 
-    /// Both tests below send an unknown event type, whose warning is rate limited by one shared `dedup!` key: run in
-    /// parallel, the ignore test can spend the key and the warn test then sees one warning instead of two.
-    static UNKNOWN_EVENTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn non_event_entities_and_unknown_kinds_are_ignored() {
-        let _unknown = UNKNOWN_EVENTS.lock().unwrap_or_else(|e| e.into_inner());
         let mut ev = Events::default();
         let mut p = EntityState::new(5);
         p.etype = etype::PLAYER;
@@ -831,8 +994,6 @@ mod tests {
 
     #[test]
     fn an_unknown_event_type_and_a_malformed_fx_announcement_warn() {
-        let _unknown = UNKNOWN_EVENTS.lock().unwrap_or_else(|e| e.into_inner());
-        logging::new_window();
         let (_, events) = logging::capture(|| {
             let mut ev = Events::default();
             ev.scan(&snap(&[event(965, 0x7e, 1)]));

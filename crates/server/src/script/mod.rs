@@ -11,6 +11,7 @@ use crate::game::{self, Game};
 
 mod args;
 mod combat;
+pub mod dev;
 mod ent;
 pub(crate) use ent::{entity_contact, expand_bounds_to_width, hint_value};
 mod funcs;
@@ -67,6 +68,7 @@ impl Dispatch {
                 prog.builtins.function_names(),
                 &[
                     funcs::TABLE,
+                    dev::FUNCS,
                     ent::FUNCS,
                     misc::FUNCS,
                     weapons::FUNCS,
@@ -111,19 +113,6 @@ impl Dispatch {
     }
 }
 
-/// Every logged no-op in the tables, with its milestone.
-pub fn later_tables() -> Vec<(&'static str, &'static str)> {
-    let f = funcs::TABLE.iter().filter_map(|(n, i)| match i {
-        Impl::Later(m) => Some((*n, *m)),
-        Impl::Real(_) => None,
-    });
-    let m = methods::TABLE.iter().filter_map(|(n, i)| match i {
-        Impl::Later(m) => Some((*n, *m)),
-        Impl::Real(_) => None,
-    });
-    f.chain(m).collect()
-}
-
 /// What the VM calls back into: the game state plus the resolved builtin tables.
 pub struct ScriptHost<'a> {
     pub game: &'a mut Game,
@@ -135,6 +124,7 @@ impl ScriptHost<'_> {
     /// wait before this returns, and may queue more. Errors are kept for the server's report.
     pub fn run_calls(&mut self, vm: &mut Vm) {
         let _span = tracing::debug_span!("script_calls").entered();
+        self.game.run_calls_depth += 1;
         loop {
             while !self.game.calls.is_empty() {
                 for c in std::mem::take(&mut self.game.calls) {
@@ -152,6 +142,22 @@ impl ScriptHost<'_> {
             }
             for n in begins {
                 self.game.client_begin(vm, n);
+            }
+        }
+        self.game.run_calls_depth -= 1;
+        // `ClientDisconnect` frees the entity straight after the disconnect callback: a player
+        // left in the world until the end of the frame could still be damaged, and the damage
+        // callback's threads would outlive the `disconnect` notify they end on (#505). Only the
+        // outermost call frees: every builtin runs a nested one, which may be inside the
+        // disconnect callback itself.
+        if self.game.run_calls_depth == 0 {
+            self.game.finish_disconnects(vm);
+            // An exploded missile whose blast queued damage callbacks goes now: stock `G_ExplodeMissile` frees it
+            // after the whole `G_RadiusDamage`, whose callbacks run inline and read it as the inflictor
+            // (`_weapons::onWeaponDamage` measures the concussion from it), including after the nested run
+            // `finishPlayerDamage` makes.
+            for n in std::mem::take(&mut self.game.free_after_calls) {
+                self.game.free_entity(vm, n);
             }
         }
     }

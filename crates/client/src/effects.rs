@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Persistent smoke follows KisakCOD (GPL-3.0, KisakCOD contributors and Activision),
+// `cgame_mp/cg_main_mp.cpp:1578-1616` and `cgame_mp/cg_ents_mp.cpp:1462-1482`
+// (CoD4 MP 1.8; native 1.7 unverified).
 // Translated in part from KisakCOD cgame/cg_event.cpp (CG_PlayFxOnTag) and
 // EffectsCore/fx_system.cpp / fx_update.cpp (FX_PlayBoltedEffect / FX_UpdateEffectBolt),
 // GPL-3.0, copyright the KisakCOD contributors and Activision.
@@ -57,8 +60,6 @@ const NO_BLOOD_FLESH_HIT: &str = "impacts/flesh_hit_noblood";
 fn flesh_column(head: bool) -> usize {
     2 * usize::from(head)
 }
-/// How high above a player's feet blood appears.
-const CHEST: f32 = 40.0;
 
 /// Whether a weapon's explosion also plays the impact table's blast for the surface (a flashbang's and a dud's do
 /// not): `weapProjExplosion_t` 2 and 4.
@@ -167,6 +168,8 @@ pub struct Effects {
     /// The script effect entities, by entity number.
     world_fx: HashMap<u16, WorldFx>,
     world_fx_stamp: u32,
+    smoke: HashMap<u16, SmokeCloud>,
+    smoke_quads: usize,
     /// The client number of this player and the gun in their hands, for the first-person flash.
     own: u16,
     view: Option<ViewTags>,
@@ -196,8 +199,15 @@ pub struct Effects {
     dice: u32,
     /// `gfx_tracer`, which the tracers are drawn with; none, none are drawn.
     tracer_material: Option<Arc<Material>>,
-    /// What was played, by kind; for the report.
+    /// What was played, by kind; for the report. `blood` counts every play of an impact table's flesh effect looked up
+    /// for a flesh surface, whatever asked for it.
     pub played: BTreeMap<&'static str, u64>,
+    /// Impacts on a player that reached the effects: `BULLET_IMPACT` events on flesh (exit wounds aside) and missile
+    /// bounces, blasts and duds on flesh. Stock draws at most one blood effect for each, and nothing else draws one
+    /// (`CG_BulletHitEvent`; a player's pain is player state, not an effect).
+    pub flesh_hits: u64,
+    /// The last `impact_effect` lookup took the flesh column; `play` takes it to count blood.
+    flesh_lookup: bool,
     /// Total draws (sprite quads, clouds, models, trail strips) that passed the camera's cull, by the lower-case name
     /// of the effect that was played; a runner's children count against it.
     pub effect_quads: BTreeMap<String, u64>,
@@ -223,6 +233,10 @@ struct Bolted {
 struct ScriptBolt {
     id: Option<u64>,
     entity: u16,
+    /// The entity's model when the event came ([`ClientEvent::PlayFxOnTag`]); the bolt starts only on that model.
+    model: u16,
+    /// What was drawn under the number this frame had that model.
+    same_model: bool,
     name: String,
     tag: String,
     frame: Option<Frame>,
@@ -269,6 +283,60 @@ struct WorldFx {
     stamp: u32,
 }
 
+/// Kept until the server expiry, even across snapshot culling, so reentry does not
+/// layer a second cloud over the first. Restarting Effects clears this cache.
+struct SmokeCloud {
+    start: i32,
+    end: i32,
+    handle: u64,
+    def: Arc<FxEffectDef>,
+}
+
+fn smoke_clouds(
+    fx: &mut Fx,
+    clouds: &mut HashMap<u16, SmokeCloud>,
+    ents: &[EntityState],
+    effect: &dyn Fn(u16) -> Option<(Arc<FxEffectDef>, bool)>,
+    now: i32,
+) -> u64 {
+    clouds.retain(|_, cloud| now <= cloud.end);
+    let mut started = 0;
+    for e in ents.iter().filter(|e| crate::events::persistent_smoke(e)) {
+        let start = e.custom_explode_start_time;
+        if now < start || now > e.time2 {
+            continue;
+        }
+        if clouds
+            .get(&e.number)
+            .is_some_and(|cloud| cloud.start == start)
+        {
+            continue;
+        }
+        let Some((def, force_up)) = effect(e.weapon) else {
+            continue;
+        };
+        let normal = if force_up {
+            Vec3::Z
+        } else {
+            Vec3::from(sim::pm::math::angle_vectors(&e.angles).0)
+        };
+        let handle = fx.play_at(&def, Frame::facing(Vec3::from(e.origin), normal), start);
+        if handle != 0 {
+            clouds.insert(
+                e.number,
+                SmokeCloud {
+                    start,
+                    end: e.time2,
+                    handle,
+                    def,
+                },
+            );
+            started += 1;
+        }
+    }
+    started
+}
+
 /// Looping script effects do not start while this many elements are alive: the rest is for the effects of play. About
 /// half of the pool of elements (`fx::MAX_ELEMS`, the original's 2048): the other half is for impacts, explosions and
 /// muzzle flashes.
@@ -311,6 +379,27 @@ pub struct Drawn {
     pub sway: [f32; 3],
 }
 
+/// Where `tag` is on the first of the posed `models` that has it, in the world (`CG_DObjGetWorldTagMatrix`).
+pub fn model_tag_frame(models: &[ModelInstance], content: &Content, tag: &str) -> Option<Frame> {
+    models.iter().find_map(|m| {
+        let names = content.model_bone_names(m.model.name.as_deref()?)?;
+        let i = names.iter().position(|n| n.eq_ignore_ascii_case(tag))?;
+        let (quat, trans) = m
+            .bones
+            .get(i)
+            .map(|b| (b.quat, b.trans))
+            .or_else(|| m.model.base_mat.get(i).map(|b| (b.quat, b.trans)))?;
+        let axes = sim::skel::quat::axes(&quat);
+        let (f, r, u) = sim::pm::math::angle_vectors(&m.angles);
+        let axis = [Vec3::from(f), -Vec3::from(r), Vec3::from(u)];
+        let world = |v: [f32; 3]| axis[0] * v[0] + axis[1] * v[1] + axis[2] * v[2];
+        Some(Frame {
+            origin: Vec3::from(m.origin) + world(trans),
+            axis: axes.map(world),
+        })
+    })
+}
+
 impl Effects {
     pub fn new(content: &Content, world: Arc<GfxWorld>) -> Self {
         let mut lib = Library::default();
@@ -326,6 +415,8 @@ impl Effects {
             missiles: HashMap::new(),
             world_fx: HashMap::new(),
             world_fx_stamp: 0,
+            smoke: HashMap::new(),
+            smoke_quads: 0,
             clock: 0,
             sweep: None,
             own: u16::MAX,
@@ -346,6 +437,8 @@ impl Effects {
             dice: 0x9e37_79b9,
             tracer_material: None,
             played: BTreeMap::new(),
+            flesh_hits: 0,
+            flesh_lookup: false,
             effect_quads: BTreeMap::new(),
             missing: HashSet::new(),
         }
@@ -366,7 +459,7 @@ impl Effects {
     }
 
     fn impact_effect(
-        &self,
+        &mut self,
         impact_type: i32,
         surface: u8,
         flesh: usize,
@@ -375,11 +468,23 @@ impl Effects {
             .ok()
             .and_then(|i| ROW_BY_IMPACT_TYPE.get(i).copied().flatten())?;
         let entry = self.impact.as_ref()?.table.get(row)?;
+        self.flesh_lookup = surface == SURFACE_FLESH;
         if surface == SURFACE_FLESH {
             entry.flesh.get(flesh)?.clone()
         } else {
             entry.nonflesh.get(usize::from(surface))?.clone()
         }
+    }
+
+    /// `d` is one of the impact table's flesh (blood) effects.
+    fn is_blood(&self, d: &Arc<FxEffectDef>) -> bool {
+        self.impact.as_ref().is_some_and(|t| {
+            t.table.iter().any(|e| {
+                e.flesh
+                    .iter()
+                    .any(|f| f.as_ref().is_some_and(|f| Arc::ptr_eq(f, d)))
+            })
+        })
     }
 
     /// `d`, after a warning when it is a stub (the name behind a comma and nothing in it): a reference to another
@@ -397,6 +502,7 @@ impl Effects {
     }
 
     fn play(&mut self, kind: &'static str, def: Option<Arc<FxEffectDef>>, at: Vec3, dir: Vec3) {
+        let flesh = std::mem::take(&mut self.flesh_lookup);
         if let Some(d) = def {
             let d = self.resolve(&d);
             let _span =
@@ -404,6 +510,10 @@ impl Effects {
                     .entered();
             self.fx.play(&d, Frame::facing(at, dir));
             *self.played.entry(kind).or_default() += 1;
+            // The no-blood replacement is not the table's, so it does not count.
+            if flesh && self.is_blood(&d) {
+                *self.played.entry("blood").or_default() += 1;
+            }
         }
     }
 
@@ -438,6 +548,9 @@ impl Effects {
                 if *exit {
                     return;
                 }
+                if *surface == SURFACE_FLESH {
+                    self.flesh_hits += 1;
+                }
                 let t = weapon(*w).map_or(0, |d| d.impact_type);
                 // `cg_bloodLimit`: a second blood effect inside the window is not played.
                 if *surface == SURFACE_FLESH
@@ -468,6 +581,9 @@ impl Effects {
                 weapon: w,
                 ..
             } => {
+                if *surface == SURFACE_FLESH {
+                    self.flesh_hits += 1;
+                }
                 let t = weapon(*w).map_or(0, |d| d.impact_type);
                 let def = self.impact_effect(t, *surface, 0);
                 self.play(
@@ -482,6 +598,7 @@ impl Effects {
                 normal,
                 surface,
                 weapon: w,
+                persistent_smoke,
                 ..
             } => {
                 let d = weapon(*w);
@@ -496,11 +613,18 @@ impl Effects {
                 // The surface's own blast, then the weapon's (`EV_GRENADE_EXPLODE`, `EV_ROCKET_EXPLODE`); a flashbang
                 // or a dud has only its own.
                 if let Some(d) = d.as_ref().filter(|d| explodes_on_surface(d)) {
+                    if *surface == SURFACE_FLESH {
+                        self.flesh_hits += 1;
+                    }
                     let def = self.impact_effect(d.impact_type, *surface, 0);
                     self.play("explosion_impact", def, Vec3::from(*origin), n);
                 }
-                let def = d.as_ref().and_then(|d| d.proj_explosion_effect.clone());
-                self.play("explosion", def, Vec3::from(*origin), n);
+                // A persistent smoke's weapon FX is started from its original burst time
+                // by the snapshot path, not again at the first rendered frame.
+                if !*persistent_smoke {
+                    let def = d.as_ref().and_then(|d| d.proj_explosion_effect.clone());
+                    self.play("explosion", def, Vec3::from(*origin), n);
+                }
             }
             ClientEvent::Dud {
                 origin,
@@ -511,6 +635,9 @@ impl Effects {
                 ..
             } => {
                 let (at, n) = (Vec3::from(*origin), Vec3::from(*normal));
+                if !*settled && *surface == SURFACE_FLESH {
+                    self.flesh_hits += 1;
+                }
                 // `EV_CHANGE_TO_DUD`: the table's first surface only.
                 let table =
                     self.impact_effect(IMPACT_TYPE_DUD, if *settled { 0 } else { *surface }, 0);
@@ -548,10 +675,17 @@ impl Effects {
                     self.missing.insert(name.clone());
                 }
             },
-            ClientEvent::PlayFxOnTag { entity, name, tag } => {
+            ClientEvent::PlayFxOnTag {
+                entity,
+                model,
+                name,
+                tag,
+            } => {
                 self.script_bolts.push(ScriptBolt {
                     id: None,
                     entity: *entity,
+                    model: *model,
+                    same_model: false,
                     name: name.clone(),
                     tag: tag.clone(),
                     frame: None,
@@ -561,15 +695,6 @@ impl Effects {
                     last_frame: None,
                     waiting_since: None,
                 });
-            }
-            ClientEvent::PlayerPain { origin, .. } => {
-                let def = self.impact_effect(1, SURFACE_FLESH, flesh_column(false));
-                self.play(
-                    "player_pain",
-                    def,
-                    Vec3::from(*origin) + Vec3::Z * CHEST,
-                    Vec3::Z,
-                );
             }
             // A death plays no blood of its own in stock: the bullet impacts did (the event only pushes the body).
             ClientEvent::PlayerDeath { .. }
@@ -815,6 +940,53 @@ impl Effects {
         });
     }
 
+    /// Reconstructs active GENERAL smoke from the authoritative burst time. This also
+    /// runs after an effects restart, without delivering an explosion event or sound.
+    pub fn smoke(
+        &mut self,
+        ents: &[EntityState],
+        weapon: &dyn Fn(u16) -> Option<Arc<WeaponDef>>,
+        now: i32,
+    ) {
+        let started = smoke_clouds(
+            &mut self.fx,
+            &mut self.smoke,
+            ents,
+            &|w| {
+                let weapon = weapon(w)?;
+                Some((
+                    weapon.proj_explosion_effect.clone()?,
+                    weapon.proj_explosion_effect_force_normal_up != 0,
+                ))
+            },
+            now,
+        );
+        if started != 0 {
+            *self.played.entry("persistent_smoke").or_default() += started;
+        }
+    }
+
+    pub fn smoke_report(&self) -> serde_json::Value {
+        serde_json::json!(
+            self.smoke
+                .iter()
+                .map(|(number, cloud)| {
+                    serde_json::json!({
+                        "number": number,
+                        "start_time": cloud.start,
+                        "end_time": cloud.end,
+                        "age_ms": self.clock.wrapping_sub(cloud.start),
+                        "live": self.fx.is_live(cloud.handle),
+                    })
+                })
+                .collect::<Vec<_>>()
+        )
+    }
+
+    pub fn smoke_quads(&self) -> usize {
+        self.smoke_quads
+    }
+
     /// Keeps the script effect entities of the newest snapshot playing (`CG_Fx`, `CG_LoopFx`): a looped effect starts
     /// when its entity is in range of `eye` and restarts every period (it is stopped beyond its cull distance, and
     /// not started while the effects are near their element budget); a triggered one plays once per trigger, from the
@@ -961,9 +1133,11 @@ impl Effects {
     }
 
     /// Begins a rendered pose frame; only tags actually resolved this frame may move an attachment. A bolt is judged
-    /// only once [`Effects::script_model_tags`] poses its entity: events are read from the newest snapshot, but
-    /// entities are drawn `INTERP_DELAY_MS` behind it, so an entity spawned with its `playfxontag` (an airstrike's
-    /// `tag_origin` model) is not drawn yet. Stock reads the event as the snapshot becomes current, when the
+    /// only once [`Effects::script_model_tags`] poses its entity with the model the event came with: events are read
+    /// from the newest snapshot, but entities are drawn `INTERP_DELAY_MS` behind it, so an entity spawned with its
+    /// `playfxontag` (an airstrike's `tag_origin` model) is not drawn yet, and a number the event's snapshot gave to
+    /// another entity (a killcam's replayed past against the live world, `CG_TransitionKillcam` resetting nothing on
+    /// the way in) may still be drawn as that one. Stock reads the event as the snapshot becomes current, when the
     /// entity's DObj exists (`CG_PlayBoltedEffect`, cg_event.cpp:46-61).
     pub fn begin_script_tags(&mut self) {
         for b in &mut self.script_bolts {
@@ -972,30 +1146,24 @@ impl Effects {
         }
     }
 
-    /// Resolves requested tags against the exact posed model instances submitted to the renderer.
-    pub fn script_model_tags(&mut self, entity: u16, models: &[ModelInstance], content: &Content) {
+    /// Resolves requested tags against the exact posed model instances submitted to the renderer for `entity`, whose
+    /// drawn state has model `model` (configstring index).
+    pub fn script_model_tags(
+        &mut self,
+        entity: u16,
+        model: u16,
+        models: &[ModelInstance],
+        content: &Content,
+    ) {
         for bolt in self.script_bolts.iter_mut().filter(|b| b.entity == entity) {
+            bolt.same_model = bolt.model == model;
+            // Not started and drawn as another entity or model: it waits. A playing effect follows whatever the number
+            // is drawn as and stops once the tag is gone (`FX_UpdateEffectBolt`).
+            if bolt.id.is_none() && !bolt.same_model {
+                continue;
+            }
             bolt.attempted = true;
-            let frame = models.iter().find_map(|m| {
-                let names = content.model_bone_names(m.model.name.as_deref()?)?;
-                let i = names
-                    .iter()
-                    .position(|n| n.eq_ignore_ascii_case(&bolt.tag))?;
-                let (quat, trans) = m
-                    .bones
-                    .get(i)
-                    .map(|b| (b.quat, b.trans))
-                    .or_else(|| m.model.base_mat.get(i).map(|b| (b.quat, b.trans)))?;
-                let axes = sim::skel::quat::axes(&quat);
-                let (f, r, u) = sim::pm::math::angle_vectors(&m.angles);
-                let axis = [Vec3::from(f), -Vec3::from(r), Vec3::from(u)];
-                let world = |v: [f32; 3]| axis[0] * v[0] + axis[1] * v[1] + axis[2] * v[2];
-                Some(Frame {
-                    origin: Vec3::from(m.origin) + world(trans),
-                    axis: axes.map(world),
-                })
-            });
-            bolt.frame = frame;
+            bolt.frame = model_tag_frame(models, content, &bolt.tag);
         }
     }
 
@@ -1022,12 +1190,14 @@ impl Effects {
                 return false;
             }
             if b.attempted && b.frame.is_none() {
-                self.bolt_stats.missing_tags += 1;
                 if let Some(id) = b.id {
-                    // A tag that resolved before and no longer does: the model changed under the effect.
+                    // A tag that resolved before and no longer does: the number is drawn as another model now. A tag
+                    // is missing only from the model the event named.
                     self.fx.stop(id);
                     self.bolt_stats.stopped += 1;
+                    self.bolt_stats.missing_tags += u64::from(b.same_model);
                 } else {
+                    self.bolt_stats.missing_tags += 1;
                     logging::dedup!(
                         WARN,
                         "bolt-tag",
@@ -1261,6 +1431,9 @@ impl Effects {
         let mut d = Draws::default();
         let quads = &mut self.effect_quads;
         let ambient_quads = &mut self.ambient.quads;
+        self.smoke_quads = 0;
+        let smoke_quads = &mut self.smoke_quads;
+        let smoke = &self.smoke;
         self.fx.draw_counted(&cam, &mut d, &mut |name, n| {
             if let Some(count) = quads.get_mut(name) {
                 *count += n as u64;
@@ -1269,6 +1442,12 @@ impl Effects {
             }
             if let Some(count) = ambient_quads.get_mut(name) {
                 *count += n as u64;
+            }
+            if smoke
+                .values()
+                .any(|cloud| cloud.def.name.as_deref() == Some(name))
+            {
+                *smoke_quads += n;
             }
         });
         let beams = self.tracers.beams(self.clock);
@@ -1426,5 +1605,147 @@ mod flesh_tests {
             [super::flesh_column(false), super::flesh_column(true)],
             [0, 2]
         );
+    }
+}
+
+#[cfg(test)]
+mod smoke_tests {
+    use super::*;
+    use assets::zone::fx::{FxElemDef, FxVisuals, Range};
+
+    fn probe() -> Arc<FxEffectDef> {
+        let zero = Range {
+            base: 0.0,
+            amplitude: 0.0,
+        };
+        let elem = FxElemDef {
+            flags: 0,
+            spawn: [1, 0],
+            spawn_range: zero,
+            fade_in_range: zero,
+            fade_out_range: zero,
+            spawn_frustum_cull_radius: 0.0,
+            spawn_delay_msec: Range {
+                base: 0,
+                amplitude: 0,
+            },
+            life_span_msec: Range {
+                base: 1_000,
+                amplitude: 0,
+            },
+            spawn_origin: [zero; 3],
+            spawn_offset_radius: zero,
+            spawn_offset_height: zero,
+            spawn_angles: [zero; 3],
+            angular_velocity: [zero; 3],
+            initial_rotation: zero,
+            gravity: zero,
+            reflection_factor: zero,
+            atlas: [0; 6],
+            atlas_entry_count: 0,
+            elem_type: assets::zone::fx::elem::OMNI_LIGHT,
+            vel_samples: Arc::from(Vec::new()),
+            vis_samples: Arc::from(Vec::new()),
+            visuals: FxVisuals::None,
+            coll_mins: [0.0; 3],
+            coll_maxs: [0.0; 3],
+            effect_on_impact: None,
+            effect_on_death: None,
+            effect_emitted: None,
+            emit_dist: zero,
+            emit_dist_variance: zero,
+            trail: None,
+            sort_order: 0,
+            lighting_frac: 0,
+            use_item_clip: false,
+        };
+        Arc::new(FxEffectDef {
+            name: Some("smoke-age-probe".into()),
+            flags: 0,
+            total_size: 0,
+            msec_looping_life: 0,
+            looping_count: 0,
+            one_shot_count: 1,
+            emission_count: 0,
+            elems: Arc::from(vec![elem]),
+        })
+    }
+
+    fn smoke(start: i32) -> EntityState {
+        let mut e = EntityState::new(42);
+        e.etype = etype::GENERAL;
+        e.eflags = net::entity::SMOKE_EXPLODE;
+        e.custom_explode_start_time = start;
+        e.time2 = start + 61_000;
+        e
+    }
+
+    #[test]
+    fn a_late_or_restarted_smoke_uses_original_effect_age_not_join_age() {
+        let def = probe();
+        let effect = |_: u16| Some((def.clone(), false));
+        let e = smoke(1_000);
+        for now in [1_000, 1_200, 1_500, 2_001, 10_000] {
+            // Each iteration also represents rebuilding the FX pool on restart.
+            let mut fx = Fx::new(Arc::new(Library::default()));
+            let mut clouds = HashMap::new();
+            assert_eq!(
+                smoke_clouds(&mut fx, &mut clouds, std::slice::from_ref(&e), &effect, now),
+                1
+            );
+            fx.update(now, &fx::Empty);
+            assert_eq!(clouds[&42].start, 1_000);
+            // A probe with a 1000 ms life must already be over on a late join.
+            // Starting at `now` instead would incorrectly leave one element alive.
+            assert_eq!(
+                fx.live_elems(),
+                usize::from(now < 2_000),
+                "first seen {now}"
+            );
+            assert!(fx.take_sounds().is_empty());
+        }
+    }
+
+    #[test]
+    fn snapshot_reentry_keeps_the_existing_cloud_and_reuse_starts_a_new_one() {
+        let def = probe();
+        let effect = |_: u16| Some((def.clone(), false));
+        let mut fx = Fx::new(Arc::new(Library::default()));
+        let mut clouds = HashMap::new();
+        let e = smoke(1_000);
+        assert_eq!(
+            smoke_clouds(
+                &mut fx,
+                &mut clouds,
+                std::slice::from_ref(&e),
+                &effect,
+                1_000
+            ),
+            1
+        );
+        let handle = clouds[&42].handle;
+        assert_eq!(smoke_clouds(&mut fx, &mut clouds, &[], &effect, 1_100), 0);
+        assert_eq!(smoke_clouds(&mut fx, &mut clouds, &[e], &effect, 1_300), 0);
+        assert_eq!(clouds[&42].handle, handle);
+        assert_eq!(
+            smoke_clouds(&mut fx, &mut clouds, &[smoke(2_000)], &effect, 2_000),
+            1
+        );
+        assert_ne!(clouds[&42].handle, handle);
+        assert_eq!(clouds[&42].start, 2_000);
+    }
+
+    #[test]
+    fn smoke_reconstruction_obeys_both_ends_of_the_server_interval() {
+        let def = probe();
+        let effect = |_: u16| Some((def.clone(), false));
+        for (now, expected) in [(999, 0), (1_000, 1), (62_000, 1), (62_001, 0)] {
+            let mut fx = Fx::new(Arc::new(Library::default()));
+            let mut clouds = HashMap::new();
+            assert_eq!(
+                smoke_clouds(&mut fx, &mut clouds, &[smoke(1_000)], &effect, now),
+                expected
+            );
+        }
     }
 }

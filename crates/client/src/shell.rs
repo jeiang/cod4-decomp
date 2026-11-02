@@ -95,6 +95,8 @@ pub struct ShellState {
     /// The menu `soundLoop`s playing now.
     pub menu_loops: Vec<String>,
     pub in_game: bool,
+    /// The server being played on, as `connect` named it: what a bare `serverstatus` asks (`cls.servername`).
+    pub server_addr: String,
     /// The GPU's name, for `setRecommended`'s match against `configure_mp.csv`.
     pub gpu_description: String,
     /// The languages the install has files for (`g_languages[].bPresent`), for the language menu.
@@ -115,7 +117,8 @@ pub struct ShellState {
     /// Message windows, chat and the centre string, which keep their lines between frames.
     pub feed: Feed,
     pub score_view: ScoreView,
-    /// First scoreboard line shown (1 = the top).
+    /// First scoreboard line shown (1 = the top); 0 until the open list has rows and is centred on the viewer
+    /// (stock `scoresTop` -1, `CenterViewOnClient`).
     pub scores_top: usize,
     /// The scoreboard held up by a script step instead of the key (the `--ui-script` `scores` step).
     pub scores_forced: bool,
@@ -318,6 +321,7 @@ impl ShellState {
             actions: Vec::new(),
             menu_loops: Vec::new(),
             in_game: false,
+            server_addr: String::new(),
             gpu_description: String::new(),
             languages_present: vec![0],
             started: Instant::now(),
@@ -331,7 +335,7 @@ impl ShellState {
             live: LiveUi::default(),
             feed: Feed::default(),
             score_view: ScoreView::default(),
-            scores_top: 1,
+            scores_top: 0,
             scores_forced: false,
             draw_2d: true,
             fps: hud::fps::Meter::default(),
@@ -376,25 +380,32 @@ impl ShellState {
     }
 
     /// The wheel and the page keys move the scoreboard's list while it is up (`Scoreboard_HandleInput`: those keys
-    /// are the scoreboard's whenever it is displayed, at a bound or with no rows too, and go no further; the arrows
-    /// are not its and stay the binds'). `true` when the key was the scoreboard's.
+    /// are the scoreboard's whenever it is displayed, at a bound or with no rows too; the arrows are not its and stay
+    /// the binds'). Each moves `cg_scoreboardScrollStep` lines (`CG_ScrollScoreboardUp`/`Down`): up stops at the
+    /// top, down only while a line is cut off below and stops at the last line. `true` when the key was the
+    /// scoreboard's.
     pub fn scroll_scores(&mut self, ui: &Ui, key: &UiKey) -> bool {
         if !self.scoreboard_shown(ui) {
             return false;
         }
         let live = &self.live;
         let m = &self.score_view.metrics;
-        let page = hud::rows_shown(&live.scores, live.own_team, self.scores_top, m).max(1);
-        let total = hud::scoreboard_lines(&live.scores, live.own_team, m);
-        let top = self.scores_top;
-        let to = match key {
-            UiKey::WheelUp => top.saturating_sub(1),
-            UiKey::WheelDown => top + 1,
-            UiKey::PageUp => top.saturating_sub(page),
-            UiKey::PageDown => top + page,
+        let step = m.scroll_step;
+        let top = self.scores_top.max(1);
+        match key {
+            UiKey::WheelUp | UiKey::PageUp => {
+                if top > 1 {
+                    self.scores_top = top.saturating_sub(step).max(1);
+                }
+            }
+            UiKey::WheelDown | UiKey::PageDown => {
+                if hud::scores_off_bottom(&live.scores, live.own_team, top, m) {
+                    let total = hud::scoreboard_lines(&live.scores, live.own_team, m);
+                    self.scores_top = (top + step).min(total);
+                }
+            }
             _ => return false,
-        };
-        self.scores_top = to.clamp(1, total.max(1));
+        }
         true
     }
 }
@@ -452,6 +463,7 @@ const UI_DEFAULTS: &[(&str, &str)] = &[
     ("cg_scoreboardHeight", "435"),
     ("cg_scoreboardItemHeight", "18"),
     ("cg_scoreboardBannerHeight", "35"),
+    ("cg_scoreboardScrollStep", "3"),
     ("cg_scoreboardPingWidth", "0.036"),
     ("cg_scoreboardPingHeight", "0.7"),
     ("cg_scoreboardPingText", "1"),
@@ -523,6 +535,8 @@ const OPTION_DEFAULTS: &[(&str, &str)] = &[
     ("snd_volume", "0.8"),
     // Stock: archived and cheat protected (they only act with `sv_cheats` on): how long slaves take to duck.
     ("snd_slaveFadeTime", "500"),
+    // Stock: archived and cheat protected: the ms every sound channel takes to fade in when a level starts.
+    ("snd_levelFadeTime", "250"),
     // The shortest time a subtitle stays up, seconds (stock: archived).
     ("cg_subtitleMinTime", "3"),
     ("sm_enable", "1"),
@@ -551,6 +565,14 @@ const OPTION_DEFAULTS: &[(&str, &str)] = &[
     ("cg_ScoresPing_MedColor", "0.8 0.8 0 1"),
     ("cg_ScoresPing_LowColor", "0 0.75 0 1"),
     ("cg_ScoresPing_BgColor", "0.25 0.25 0.25 0.5"),
+    // The minimap's objective icons, the multiplayer defaults (`CG_CompassRegisterDvars`; `compassMaxRange`, cheat
+    // protected, is registered with the cvars).
+    ("compassObjectiveWidth", "20"),
+    ("compassObjectiveHeight", "20"),
+    ("compassObjectiveIconWidth", "16"),
+    ("compassObjectiveIconHeight", "16"),
+    ("compassObjectiveMaxRange", "2048"),
+    ("compassObjectiveMinAlpha", "1"),
     // The four game message windows: seconds on screen, lines, scroll, fade in and fade out.
     ("con_gameMsgWindow0MsgTime", "5"),
     ("con_gameMsgWindow0LineCount", "4"),
@@ -585,6 +607,9 @@ const OPTION_DEFAULTS: &[(&str, &str)] = &[
     ("ui_browserFriendlyfire", "-1"),
     ("ui_browserKillcam", "-1"),
     ("ui_browserShowPunkBuster", "-1"),
+    // The 1.7 filters on `hc` and `od` (`iw3mp.exe` registers both -1, `0x542285-0x5422be`).
+    ("ui_browserHardcore", "-1"),
+    ("ui_browserOldSchool", "-1"),
     // Not a stock dvar: the bots a server started from the menus plays with, on every map.
     ("bot_count", "0"),
     // Not a stock dvar: the master servers (`host[:port]`, space separated, up to five) the Internet list asks.
@@ -854,6 +879,18 @@ impl Shell {
     pub fn has_item(&mut self, input: &mut Input, want: &str) -> bool {
         let mut h = Self::host(&mut self.st, input);
         self.ui.has_item(&mut h, want)
+    }
+
+    /// See [`Ui::item_state`].
+    pub fn item_state(&mut self, input: &mut Input, want: &str) -> Option<bool> {
+        let mut h = Self::host(&mut self.st, input);
+        self.ui.item_state(&mut h, want)
+    }
+
+    /// See [`Ui::unset_values`].
+    pub fn unset_values(&mut self, input: &mut Input, menu: &str) -> Vec<String> {
+        let mut h = Self::host(&mut self.st, input);
+        self.ui.unset_values(&mut h, menu)
     }
 
     /// Clicks the item of the top menu named or labelled `want`.
@@ -1144,6 +1181,8 @@ impl Shell {
             let mut h = Self::host(&mut self.st, input);
             self.ui.check_waiting_menu(&mut h);
         }
+        // A console `serverstatus` has no menu polling for it: take its answer here, once a frame.
+        Self::host(&mut self.st, input).poll_servers();
         for (old, new) in std::mem::take(&mut self.st.live.renamed) {
             let verb = hud::localize(&self.ui.assets, "&CGAME_PLAYERRENAMES");
             let verb = if verb == "CGAME_PLAYERRENAMES" {
@@ -1164,6 +1203,19 @@ impl Shell {
         }
         Self::intermission_menus(&mut self.st, &mut self.ui, input);
         self.st.live.scores_wanted = self.st.scoreboard_shown(&self.ui);
+        // Closed, or no rows yet: the next rows to show open centred on the viewer (`CG_ScoresUp`/`CG_ScoresDown`
+        // and `CG_ParseScores` reset `scoresTop`; `CG_DrawScoreboard` centres it).
+        if !self.st.live.scores_wanted || self.st.live.scores.is_empty() {
+            self.st.scores_top = 0;
+        } else if self.st.scores_top == 0 {
+            let live = &self.st.live;
+            self.st.scores_top = hud::centred_top(
+                &live.scores,
+                live.own,
+                live.own_team,
+                &self.st.score_view.metrics,
+            );
+        }
         if self.st.live.active {
             let st = &mut self.st;
             let rows = st.live.scores_wanted.then(|| {
@@ -1176,15 +1228,35 @@ impl Shell {
             });
             st.hud_stats.frame(&st.live, rows);
             st.names_cfg = hud::names::Cfg::read(&input.cvars);
-            st.names
-                .update(&st.live, &st.names_cfg, hud::team_colors(&input.cvars));
+            let colors = hud::team_colors(&input.cvars);
+            st.names.update(&st.live, &st.names_cfg, colors);
             st.hud_stats.names_offered(&st.names, &st.live);
+            // `CG_CalcCrosshairColor`: the target the names track tints the reticle.
+            let [mine, theirs] = colors.map(|c| [c[0], c[1], c[2]]);
+            st.hud_stats.crosshair_team_tints = [mine, theirs];
+            if let Some(r) = st.live.reticle.as_mut() {
+                let tint = crate::crosshair::Tint {
+                    // A cheat dvar: the store puts it back on without `sv_cheats`.
+                    enemy_color: input.cvars.bool("cg_crosshairEnemyColor"),
+                    friendly_fade_in: st.names_cfg.friendly_fade_in,
+                    enemy_fade_in: st.names_cfg.enemy_fade_in,
+                    my_team: mine,
+                    enemy_team: theirs,
+                };
+                let held = st.names.crosshair_held();
+                r.color =
+                    crate::crosshair::color(r.color_change, st.live.scan.weap_flags, held, &tint);
+                // An enemy held past the fade-in, the frames an enemy tint is due if anything is to tint it.
+                if st.live.scan.weap_flags & sim::pm::wf::ENEMY_IN_CROSSHAIR != 0
+                    && held >= tint.enemy_fade_in
+                {
+                    st.hud_stats.crosshair_enemy_due_frames += 1;
+                    st.hud_stats.crosshair_enemy_due_white_frames += u32::from(r.color == [1.0; 3]);
+                }
+            }
         } else {
             let st = &mut self.st;
             st.names.update(&st.live, &st.names_cfg, [[1.0; 4]; 2]);
-        }
-        if !self.st.live.scores_wanted {
-            self.st.scores_top = 1;
         }
         // The join list's highlight follows the selected server as rows come, go and re-sort.
         if self.ui.is_open("pc_join_unranked") {
@@ -1232,6 +1304,17 @@ impl Shell {
                 cache: &mut self.cache,
                 images: &mut self.images,
             };
+            // `RB_DrawDebug`: part of the world view, so drawn whatever `cg_draw2D` says.
+            let mut debug_drawn = (0, 0);
+            if self.st.in_game {
+                crate::listen::with_debug_draw(|d| {
+                    debug_drawn = hud::debug::draw(&self.ui, &mut p, &self.st.live, d);
+                });
+            }
+            (
+                self.st.hud_stats.debug_lines,
+                self.st.hud_stats.debug_strings,
+            ) = debug_drawn;
             // `CG_Draw2D`: with `cg_draw2D` off none of the match's 2D is drawn; the open menus still are.
             let hud_on = self.st.in_game && self.st.draw_2d;
             if hud_on {
@@ -1441,7 +1524,7 @@ impl HostCx<'_> {
             Some(s) => s.as_str(),
             None => value,
         };
-        self.input.set_cvar(name, value);
+        self.input.set_cvar_from_menu(name, value);
     }
 
     /// The game mode the server settings show: the one `ui_netGametypeName` holds (a saved profile may have set it).
@@ -1612,6 +1695,8 @@ impl HostCx<'_> {
             friendly_fire: n("ui_browserFriendlyfire"),
             killcam: n("ui_browserKillcam"),
             punkbuster: n("ui_browserShowPunkBuster"),
+            hardcore: n("ui_browserHardcore"),
+            old_school: n("ui_browserOldSchool"),
         }
     }
 
@@ -1657,9 +1742,12 @@ impl HostCx<'_> {
     }
 
     /// Takes in what the network brought: server answers and a status answer, which becomes the Server Info lines.
+    /// A status the console's `serverstatus` asked for is printed too (`CL_ServerStatusResponse`,
+    /// KisakCOD cl_main_pc_mp.cpp:466).
     fn poll_servers(&mut self) {
         self.st.servers.poll();
         if let Some(status) = self.st.servers.take_status() {
+            let print = self.st.servers.take_status_print();
             let st = &*self.st;
             let mode = |id: &str| {
                 st.gametypes
@@ -1674,6 +1762,20 @@ impl HostCx<'_> {
                     .map_or_else(|| id.to_owned(), |m| m.title.clone())
             };
             self.st.status_rows = crate::serverlist::status_rows(&status, &mode, &map);
+            if print {
+                self.st.log("Server settings:");
+                for (k, v) in &status.info {
+                    self.st.log(&format!("{k:<24}{v}"));
+                }
+                self.st.log("\nPlayers:");
+                self.st.log("num: score: ping: name:");
+                for (i, p) in status.players.iter().enumerate() {
+                    self.st.log(&format!(
+                        "{i:<2}   {:<3}    {:<3}   {}",
+                        p.score, p.ping, p.name
+                    ));
+                }
+            }
         }
     }
 
@@ -1883,6 +1985,114 @@ impl HostCx<'_> {
                         }
                     }
                 }
+                // `Com_WriteDefaults_f`: every registered dvar's reset value, as `set` lines in `main`.
+                "writedefaults" => {
+                    if cmd.len() != 2 {
+                        self.input.say("Usage: writedefaults <filename>");
+                    } else {
+                        let file = crate::input::config::exec_name(a(1));
+                        self.input.say(format!("Writing {file}."));
+                        match self.input.write_defaults(&file) {
+                            Ok(Some(_)) => {}
+                            Ok(None) | Err(_) => {
+                                self.input.say(format!("Couldn't write {file}."))
+                            }
+                        }
+                    }
+                }
+                // `FS_Dir_f` and `FS_NewDir_f` (KisakCOD universal/com_files.cpp:1765, 1855).
+                "dir" | "fdir" => {
+                    let args: Vec<&str> = cmd[1..].iter().map(String::as_str).collect();
+                    let lines = self.input.vfs().map_or_else(Vec::new, |vfs| {
+                        if name == "dir" {
+                            crate::fscmds::dir(vfs, &args)
+                        } else {
+                            crate::fscmds::fdir(vfs, &args)
+                        }
+                    });
+                    for l in lines {
+                        self.st.log(&l);
+                    }
+                }
+                // `FS_Path_f` and `FS_FullPath_f`: the search path, `path` only the current language's nodes.
+                "path" | "fullpath" => {
+                    let lines = self
+                        .input
+                        .vfs()
+                        .map_or_else(Vec::new, |vfs| crate::fscmds::path(vfs, name == "path"));
+                    for l in lines {
+                        self.st.log(&l);
+                    }
+                }
+                // `CL_OpenedIWDList_f` (KisakCOD cl_main_mp.cpp:3015).
+                "fs_openedlist" => {
+                    let line = self.input.vfs().map_or_else(
+                        || "Opened IWD Names: ".to_owned(),
+                        crate::fscmds::opened_iwds,
+                    );
+                    self.st.log(&line);
+                }
+                // `CL_LocalServers_f` (KisakCOD cl_main_mp.cpp:3747).
+                "localservers" => {
+                    self.st.log("Scanning for servers on the local network...");
+                    let _ = self.st.servers.refresh(crate::serverlist::Source::Lan, true, "");
+                }
+                // `CL_GlobalServers_f` (KisakCOD cl_main_pc_mp.cpp:422): the Internet list from the masters.
+                "globalservers" => {
+                    if cmd.len() < 3 {
+                        self.st.log("usage: globalservers <master# 0-1> <protocol> [keywords]");
+                    } else {
+                        self.st.log("Requesting servers from the master...");
+                        let masters = self.dvar_get("cl_masters");
+                        let _ = self
+                            .st
+                            .servers
+                            .refresh(crate::serverlist::Source::Internet, true, &masters);
+                    }
+                }
+                // `CL_Ping_f` (KisakCOD cl_main_mp.cpp:2879).
+                "ping" => {
+                    if cmd.len() != 2 {
+                        self.st.log("usage: ping [server]");
+                    } else if let Ok(addr) = crate::serverlist::resolve(a(1)) {
+                        self.st.servers.ping(addr);
+                    }
+                }
+                // `CL_ServerStatus_f` (KisakCOD cl_main_mp.cpp:3362): without an argument the server being
+                // played on; the answer prints when it arrives (see `poll_servers`).
+                "serverstatus" => {
+                    let server = if cmd.len() == 2 {
+                        Some(a(1).to_owned())
+                    } else if self.st.in_game && !self.st.server_addr.is_empty() {
+                        Some(self.st.server_addr.clone())
+                    } else {
+                        self.st.log("Not connected to a server.");
+                        self.st.log("Usage: serverstatus [server]");
+                        None
+                    };
+                    if let Some(server) = server
+                        && let Ok(addr) = crate::serverlist::resolve(&server)
+                    {
+                        self.st.servers.request_status_console(addr);
+                    }
+                }
+                // `LiveStorage_ReadStatsCmd` (KisakCOD win_storage.cpp:809).
+                "readstats" => {
+                    self.st.stats = self.st.profiles.reload_stats();
+                }
+                // `LiveStorage_UploadStatsCmd` (win_storage.cpp:802): only stats that changed are written.
+                "uploadstats" => {
+                    match self.st.profiles.save_if_changed(&self.st.stats) {
+                        Ok(true) => self.st.log("Successfully wrote stats data"),
+                        Ok(false) => {}
+                        Err(_) => {
+                            let path = self.st.profiles.active_mpdata();
+                            self.st.log(&format!("Unable to write stats: {path}."));
+                        }
+                    }
+                }
+                // `resetStats` has no body in 1.7 (iw3mp.exe 0x4d74b0 is a bare `ret`).
+                "resetstats" => {}
                 // `vstr` and `exec` run their commands in place, in this buffer.
                 "vstr" | "exec" => {
                     inserted += 1;
@@ -2932,6 +3142,18 @@ fn server_cell(
 ) -> String {
     match col {
         0 => mark(e.password),
+        // The original draws a `server_hardware_*` icon for `hw` here (`ui_main_mp.cpp:4699-4704`); not built (#502).
+        1 => {
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!(
+                    issue = 502,
+                    "hardware icon column is not drawn (server_hardware_*)"
+                );
+            }
+            String::new()
+        }
         2 if e.ping > 0 => e.hostname.chars().take(38).collect(),
         2 => e.addr.to_string(),
         3 => maps
@@ -3576,7 +3798,8 @@ mod tests {
         );
     }
 
-    /// The wheel, arrows and page keys scroll a scoreboard that has more rows than fit, and stay in range.
+    /// The wheel and page keys move a scoreboard that has more rows than fit by `cg_scoreboardScrollStep` lines, and
+    /// stay in range (`CG_ScrollScoreboardUp`/`Down`).
     #[test]
     fn the_scoreboard_scrolls_with_the_wheel_and_page_keys() {
         let root =
@@ -3604,21 +3827,32 @@ mod tests {
                 ..Default::default()
             })
             .collect();
+        st.scores_top = 1;
+        assert_eq!(st.score_view.metrics.scroll_step, 3, "the stock step");
         assert!(st.scroll_scores(&ui, &UiKey::WheelUp));
         assert_eq!(st.scores_top, 1, "not above the top");
         st.scroll_scores(&ui, &UiKey::WheelDown);
-        assert_eq!(st.scores_top, 2);
+        assert_eq!(st.scores_top, 4, "one notch is a step");
         st.scroll_scores(&ui, &UiKey::PageDown);
-        assert!(st.scores_top > 4);
+        assert_eq!(st.scores_top, 7, "a page key is a step too");
         for _ in 0..100 {
             assert!(
                 st.scroll_scores(&ui, &UiKey::WheelDown),
                 "the wheel is its at the bound too"
             );
         }
-        assert_eq!(st.scores_top, 32, "the last of 30 rows and the banners");
+        let m = &st.score_view.metrics;
+        assert!(
+            !crate::hud::scores_off_bottom(&st.live.scores, 2, st.scores_top, m),
+            "down stops once the last line is in view"
+        );
+        assert!(st.scores_top <= 32, "within the 30 rows and the banners");
+        let bottom = st.scores_top;
         st.scroll_scores(&ui, &UiKey::PageUp);
-        assert!(st.scores_top < 32);
+        assert_eq!(st.scores_top, bottom - 3);
+        st.score_view.metrics.scroll_step = 5;
+        st.scroll_scores(&ui, &UiKey::WheelUp);
+        assert_eq!(st.scores_top, bottom - 8, "the dvar sets the step");
         for key in [UiKey::Tab, UiKey::Up, UiKey::Down] {
             let top = st.scores_top;
             assert!(!st.scroll_scores(&ui, &key), "{key:?} is not its own");
@@ -3819,6 +4053,8 @@ mod tests {
             ("ui_browserFriendlyfire", "-1"),
             ("ui_browserKillcam", "-1"),
             ("ui_browserShowPunkBuster", "-1"),
+            ("ui_browserHardcore", "-1"),
+            ("ui_browserOldSchool", "-1"),
             ("password", ""),
         ] {
             assert_eq!(input.cvar(k), Some(v), "{k}");

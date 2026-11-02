@@ -42,6 +42,10 @@ struct Cfg {
     fade_sprint: f32,
     compass_size: f32,
     max_range: f32,
+    obj_size: [f32; 2],
+    obj_map_size: [f32; 2],
+    obj_max_range: f32,
+    obj_min_alpha: f32,
     rotation: bool,
     show_enemies: bool,
     radar_ping_fade: f32,
@@ -68,7 +72,18 @@ impl Cfg {
             fade_offhand: f("hud_fade_offhand", 0.0),
             fade_sprint: f("hud_fade_sprint", 1.7),
             compass_size: f("compassSize", 1.0),
-            max_range: f("compassMaxRange", 3500.0).max(0.0001),
+            // The multiplayer defaults (`CG_CompassRegisterDvars`; single player's `compassMaxRange` is 3500).
+            max_range: f("compassMaxRange", 2500.0).max(0.0001),
+            obj_size: [
+                f("compassObjectiveWidth", 20.0).max(0.0),
+                f("compassObjectiveHeight", 20.0).max(0.0),
+            ],
+            obj_map_size: [
+                f("compassObjectiveIconWidth", 16.0).max(0.0),
+                f("compassObjectiveIconHeight", 16.0).max(0.0),
+            ],
+            obj_max_range: f("compassObjectiveMaxRange", 2048.0),
+            obj_min_alpha: f("compassObjectiveMinAlpha", 1.0).clamp(0.0, 1.0),
             rotation: b("compassRotation", true),
             show_enemies: b("g_compassShowEnemies", false),
             radar_ping_fade: f("compassRadarPingFadeTime", 4.0).clamp(0.01, 60.0),
@@ -1352,8 +1367,12 @@ fn draw_marks_sized(
     }
 }
 
-/// The scripts' objectives (`objective_add` with a position) on the minimap and the full map, the current one over
-/// the others; each keeps its own icon.
+/// The scripts' objectives (`objective_add` with a position) on the minimap and the full map, in objective order
+/// (`CG_CompassDrawPlayerPointers_MP`). Every objective is drawn whatever its distance, pulled onto the rim when it is
+/// off the map, `compassObjectiveWidth` by `compassObjectiveHeight` times `compassSize` on the minimap and
+/// `compassObjectiveIconWidth` by `compassObjectiveIconHeight` on the full map, and as opaque as
+/// [`compass::objective_alpha`] says. The current objective also gets a 2-unit line across the map at its row and one
+/// down it at its column, in the item's own material, faded as its icon leaves the map.
 fn compass_objectives(
     dc: &mut Dc,
     h: &mut HudFacts,
@@ -1363,31 +1382,103 @@ fn compass_objectives(
     let a = if full { 1.0 } else { compass_alpha(dc, h) };
     h.objectives_listed = h.objectives_listed.max(objectives.len() as u32);
     h.objectives_alpha = h.objectives_alpha.max(a);
+    if !full {
+        h.objective_draws.clear();
+    }
     let Some(map) = h.map.clone().filter(|_| a > 0.0) else {
         return;
     };
-    for current in [false, true] {
-        let mut icons: Vec<&str> = Vec::new();
-        for o in objectives
-            .iter()
-            .filter(|o| o.current == current && !o.icon.is_empty())
-        {
-            if !icons.contains(&o.icon.as_str()) {
-                icons.push(&o.icon);
+    let cfg = dc.cfg;
+    let u = dc.u();
+    let (rect, size) = if full {
+        let m = full_rect(dc, &map);
+        (m, cfg.obj_map_size)
+    } else {
+        let (r, k) = (dc.r, cfg.compass_size);
+        (
+            Px {
+                w: r.w * k,
+                h: r.h * k,
+                ..r
+            },
+            cfg.obj_size.map(|s| s * k),
+        )
+    };
+    let (w, ht) = (size[0] * u, size[1] * u);
+    let line = 2.0 * u;
+    let center = [rect.x + rect.w * 0.5, rect.y + rect.h * 0.5];
+    let up = compass::up_vector(cfg.rotation, h.yaw, map.north_yaw);
+    let me = [h.origin[0], h.origin[1]];
+    let line_img = dc.bg().unwrap_or_else(|| dc.p.g.white());
+    for o in objectives.iter().filter(|o| !o.icon.is_empty()) {
+        let pos = [o.pos[0], o.pos[1]];
+        let dist = (pos[0] - me[0]).hypot(pos[1] - me[1]);
+        let alpha =
+            compass::objective_alpha(dist, cfg.max_range, cfg.obj_max_range, cfg.obj_min_alpha)
+                .min(a);
+        let xy = if full {
+            map.to_map((rect.w, rect.h), pos)
+        } else {
+            compass::to_compass(up, me, pos, rect.h, cfg.max_range)
+        };
+        let (clipped_xy, clipped) = compass::clip_to_rect(xy, rect.w, rect.h);
+        let at = [center[0] + xy[0], center[1] + xy[1]];
+        // What was drawn, in virtual units, for the HUD report: the lines' thickness and the icon's size.
+        let (mut lines, mut line_width) = (0, 0.0);
+        let fade = compass::objective_fade(
+            [rect.x, rect.y, rect.w, rect.h],
+            at[0] - w * 0.5,
+            at[1] - ht * 0.5,
+            w,
+            ht,
+        );
+        if fade > 0.0 && o.current {
+            let c = with_alpha(dc.color, alpha * fade);
+            if (rect.y..=rect.y + rect.h).contains(&at[1]) {
+                let r = Px {
+                    y: at[1] - line * 0.5,
+                    h: line,
+                    ..rect
+                };
+                dc.p.pic(&line_img, r, c);
+                lines += 1;
+                line_width = r.h / u;
+            }
+            if (rect.x..=rect.x + rect.w).contains(&at[0]) {
+                let r = Px {
+                    x: at[0] - line * 0.5,
+                    w: line,
+                    ..rect
+                };
+                dc.p.pic(&line_img, r, c);
+                lines += 1;
+                line_width = r.w / u;
             }
         }
-        for icon in icons {
-            let marks: Vec<Mark> = objectives
-                .iter()
-                .filter(|o| o.current == current && o.icon == icon)
-                .map(|o| Mark {
-                    pos: [o.pos[0], o.pos[1]],
-                    angle: 0.0,
-                    alpha: a,
-                })
-                .collect();
-            h.objective_marks += marks.len() as u32;
-            draw_marks(dc, h, &map, full, icon, &marks);
+        let img = dc.p.named(&dc.ui.assets, &o.icon);
+        let c = [center[0] + clipped_xy[0], center[1] + clipped_xy[1]];
+        let r = Px {
+            x: c[0] - w * 0.5,
+            y: c[1] - ht * 0.5,
+            w,
+            h: ht,
+        };
+        dc.p.pic(&img, r, with_alpha(dc.color, alpha));
+        h.objective_marks += 1;
+        if !full {
+            let off = xy[0].hypot(xy[1]);
+            h.objective_draws.push(hudstate::ObjectiveDraw {
+                dist,
+                range: if off > 0.0 { dist * rect.h / off } else { 0.0 },
+                edge: (clipped_xy[0].abs() / (rect.w * 0.5))
+                    .max(clipped_xy[1].abs() / (rect.h * 0.5)),
+                clipped,
+                size: [r.w / u, r.h / u],
+                alpha,
+                current: o.current,
+                lines,
+                line_width,
+            });
         }
     }
 }
@@ -1401,6 +1492,8 @@ fn mark_angle(rotation_up: bool, view_yaw: f32, north_yaw: f32, yaw: f32) -> f32
     }
 }
 
+/// How long a player stays on the compass after their last update: multiplayer's 1500 ms
+/// (`cgame_mp/cg_compassfriendlies_mp.cpp`; single player's `cg_compassfriendlies.cpp` uses 800).
 const FRIEND_RANGE_MS: i32 = 1500;
 
 fn compass_friendlies(dc: &mut Dc, h: &mut HudFacts, full: bool) {
@@ -1471,6 +1564,10 @@ fn compass_enemies(dc: &mut Dc, h: &mut HudFacts, full: bool) {
                 angle: 0.0,
                 alpha: a * fade,
             });
+        } else if client == h.last_fire_actor && h.last_fire_mark_ms > 0 && h.last_fire_gone_ms == 0
+        {
+            // The mark ended between this frame and the last that drew it: at a low frame rate that gap is long.
+            h.last_fire_gone_ms = h.now - ac.fire_time;
         }
     }
     if !dc.cfg.show_enemies {
@@ -1632,6 +1729,16 @@ mod tests {
         // Fixed north-up map: someone facing north points up, facing west (north + 90) points left.
         assert_eq!(mark_angle(false, 0.0, 0.0, 0.0), 0.0);
         assert_eq!(mark_angle(false, 0.0, 0.0, 90.0), 270.0);
+    }
+
+    #[test]
+    fn the_compass_reads_the_multiplayer_defaults() {
+        let cfg = Cfg::read(&crate::input::Cvars::default());
+        assert_eq!(cfg.max_range, 2500.0);
+        assert_eq!(cfg.obj_size, [20.0, 20.0]);
+        assert_eq!(cfg.obj_map_size, [16.0, 16.0]);
+        assert_eq!(cfg.obj_max_range, 2048.0);
+        assert_eq!(cfg.obj_min_alpha, 1.0);
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! like to any other server.
 
 use serde_json::{Value, json};
-use server::server::{Server, TickSample};
+use server::server::{Server, TickSample, listen_cmdline};
 use std::cell::RefCell;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -65,6 +65,18 @@ pub fn objectives() -> (u64, u64, u64, u64, u64) {
     OBJECTIVES.lock().map_or((0, 0, 0, 0, 0), |o| *o)
 }
 
+/// The running listen server's `line`/`print3d` drawings as of its last frame (`cls.debug.svLinesBuffer`,
+/// `svStringsBuffer`): the original draws them only in the hosting process, never over the network.
+static DEBUG_DRAW: std::sync::Mutex<server::debugdraw::DebugDraw> =
+    std::sync::Mutex::new(server::debugdraw::DebugDraw::new());
+
+/// Runs `f` on the listen server's latest debug drawings.
+pub fn with_debug_draw(f: impl FnOnce(&server::debugdraw::DebugDraw)) {
+    if let Ok(d) = DEBUG_DRAW.lock() {
+        f(&d);
+    }
+}
+
 /// Requests for the running listen server's state and console, keyed by the control channel's request number.
 static REQUESTS: std::sync::Mutex<Vec<(u64, serde_json::Map<String, Value>)>> =
     std::sync::Mutex::new(Vec::new());
@@ -116,6 +128,11 @@ fn answer(s: &mut Server, req: &serde_json::Map<String, Value>) -> Result<Value,
                 .ok_or("cvar needs a name")?;
             match req.get("value").and_then(Value::as_str) {
                 None => Ok(json!({"name": name, "value": s.control_cvar(name)})),
+                // `"force": true` writes as the engine does (`devmap` sets the init-protected `sv_cheats` so).
+                Some(v) if req.get("force").and_then(Value::as_bool) == Some(true) => {
+                    s.game.cvars.force(name, v);
+                    Ok(json!({"name": name, "value": s.control_cvar(name)}))
+                }
                 Some(v) => {
                     s.exec_line(&format!("set {name} \"{}\"", v.replace('"', "'")))?;
                     Ok(json!({"name": name, "value": s.control_cvar(name)}))
@@ -261,20 +278,9 @@ fn run(
     tx: &mpsc::Sender<Result<SocketAddr, String>>,
 ) -> Value {
     let started = || -> Result<(Server, SocketAddr), String> {
-        // The server a player starts runs pure, as the stock one does: its clients' IWDs must be its own.
-        let mut args: Vec<String> = [
-            "+set",
-            "sv_pure",
-            "1",
-            "+set",
-            "net_port",
-            &cfg.port.to_string(),
-        ]
-        .map(String::from)
-        .to_vec();
-        if !cfg.game.is_empty() {
-            args.extend(["+set", "fs_game", &cfg.game].map(String::from));
-        }
+        // The server a player starts runs pure, which is ours (the original's is impure, README `sv_pure`): its
+        // clients' IWDs must be its own. It is not dedicated (`dedicated 0`), which its `getinfo` reports as hardware 6.
+        let args = listen_cmdline(cfg.port, &cfg.game);
         let mut s = Server::boot(install, &args, false)?;
         let addr = s.net_addr().ok_or("cannot bind a UDP socket")?;
         let gt = cfg.gametype.as_deref().unwrap_or("war");
@@ -370,9 +376,12 @@ fn run(
             }
         }
         server.run_for(Duration::from_millis(100));
-        // A script error ends a thread chain silently for the player; the client log is where it shows.
+        // A script error ends a thread chain silently for the player; the client log is where it shows. The message
+        // and innermost site lead, on the line's first line, so the harness's log gate can tell one error from
+        // another (#539); the whole text with its call stack follows.
         for (map, text) in server.all_script_errors.iter().skip(reported_errors) {
-            tracing::warn!(%map, error = %text, "script error on the listen server");
+            let (cause, at) = error_site(text);
+            tracing::warn!(%map, cause, at, error = %text, "script error on the listen server");
         }
         reported_errors = server.all_script_errors.len();
         if let Ok(mut o) = OBJECTIVES.lock() {
@@ -384,6 +393,12 @@ fn run(
                 server.game.stats.heli_shots,
             );
         }
+        if let Ok(mut d) = DEBUG_DRAW.lock() {
+            d.shown_lines
+                .clone_from(&server.game.debug_draw.shown_lines);
+            d.shown_strings
+                .clone_from(&server.game.debug_draw.shown_strings);
+        }
         if let Some((n, c)) = server.game.connected_clients().find(|(_, c)| !c.bot) {
             person = json!({
                 "slot": n, "shots": c.shots, "hits": c.hits,
@@ -392,6 +407,9 @@ fn run(
         }
     }
     RUNNING.store(false, Ordering::Relaxed);
+    if let Ok(mut d) = DEBUG_DRAW.lock() {
+        *d = server::debugdraw::DebugDraw::new();
+    }
     if let Ok(mut q) = HOST_LINES.lock() {
         q.clear();
     }
@@ -414,12 +432,30 @@ fn run(
         "bytes_in": stats.bytes_in,
         "bots": cfg.bots.unwrap_or(cfg.bot_count),
         "script_errors": server.all_script_errors.len(),
+        // Each error's message and innermost `at` line, so the harness can tell a known stock-script defect apart.
+        "script_error_sites": server.all_script_errors.iter().map(|(_, text)| {
+            let (message, at) = error_site(text);
+            json!({ "message": message, "at": at })
+        }).collect::<Vec<_>>(),
         "level_time_ms": server.level_time(),
         "stats": {
             "shots": server.game.stats.shots, "hits": server.game.stats.hits,
             "kills": server.game.stats.kills, "deaths": server.game.stats.deaths,
             "plants": server.game.stats.plants, "defuses": server.game.stats.defuses,
+            "frag_suicides": server.game.stats.frag_suicides,
         },
         "person": person,
     })
+}
+
+/// A script error's message and its innermost `at` location (the frame that raised it), from the text the VM wrote:
+/// a `*******` banner, the message, then one `at` line per frame, innermost first. Empty where the text lacks one.
+fn error_site(text: &str) -> (&str, &str) {
+    let mut lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with("*******"));
+    let message = lines.next().unwrap_or("");
+    let at = lines.find_map(|l| l.strip_prefix("at ")).unwrap_or("");
+    (message, at)
 }

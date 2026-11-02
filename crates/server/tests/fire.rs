@@ -280,6 +280,31 @@ fn live_events(g: &Game, kind: u8) -> Vec<net::entity::EntityState> {
         .collect()
 }
 
+/// A bullet into a player corpse strikes flesh, as into the player (KisakCOD `game/bullet.cpp:58-67`).
+#[test]
+fn a_bullet_into_a_corpse_strikes_flesh() {
+    use server::tempev::ev;
+    let (mut g, mut vm) = arena(&[], 0, vec![rifle()]);
+    let shooter = add_player(&mut g, &mut vm, [0.0; 3], 0.0, Team::Allies);
+    let victim = add_player(&mut g, &mut vm, [40.0, 0.0, 0.0], 180.0, Team::Axis);
+    let body = g
+        .clone_player(&mut vm, victim, 5000, "pb_death_run_onfront")
+        .expect("corpse");
+    // The player leaves; only the corpse is in the line of fire.
+    g.ent_mut(victim).unwrap().contents = 0;
+    g.relink(victim);
+    fire_weapon(&mut g, &mut vm, shooter, "ak47_mp");
+    let hits = live_events(&g, ev::BULLET_IMPACT);
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert!(
+        hits[0].origin[0] > 20.0,
+        "struck the corpse at {:?}",
+        hits[0].origin
+    );
+    assert_eq!(hits[0].event_parm, 7, "flesh, not the corpse's surface 0");
+    assert!(g.ent(body).unwrap().x.corpse.is_some());
+}
+
 #[test]
 fn the_last_round_and_a_bolt_actions_case_are_announced() {
     use server::tempev::{FIRE_LAST_SHOT, ev};
@@ -617,14 +642,21 @@ fn the_knife_reaches_a_short_way() {
 
 /// Runs `g` in 5 ms frames until entity `n` is gone; returns the level time then and the
 /// heights it flew at.
+/// The missile went off: freed, or held for the damage callbacks its blast queued (`Game::free_after_calls`).
+fn exploded(g: &Game, n: u16) -> bool {
+    g.ent(n).is_none() || g.free_after_calls.contains(&n)
+}
+
 fn fly(g: &mut Game, vm: &mut Vm, n: u16, from: i32, to: i32) -> (Option<i32>, Vec<f32>) {
     let mut heights = Vec::new();
     for t in (from..to).step_by(5) {
         g.level.time = t;
         g.run_entity(vm, n);
-        match g.ent(n) {
-            Some(e) => heights.push(e.origin[2]),
-            None => return (Some(t), heights),
+        if exploded(g, n) {
+            return (Some(t), heights);
+        }
+        if let Some(e) = g.ent(n) {
+            heights.push(e.origin[2]);
         }
     }
     (None, heights)
@@ -710,8 +742,77 @@ fn c4_sticks_where_it_lands_and_waits_to_be_detonated() {
     assert!(g.calls.is_empty());
     // `detonate` sets it off; the player in the radius is hurt.
     g.detonate_missile(&mut vm, c4);
-    assert!(g.ent(c4).is_none());
+    assert!(exploded(&g, c4));
     assert!(!damage_calls(&g, victim).is_empty());
+}
+
+/// Stock `G_ExplodeMissile` frees the missile only after `G_RadiusDamage`, whose damage callbacks run inline
+/// and read it as the inflictor (`_weapons::onWeaponDamage` measures a concussion's shock from its origin). Here
+/// the callbacks are queued, so the missile is held through the whole run, including the nested run every builtin
+/// makes (`finishPlayerDamage` before the shock), and freed when the outermost run ends.
+#[test]
+fn an_exploded_missile_outlives_its_damage_callbacks_and_goes_after_them() {
+    let src = "CodeCallback_PlayerDamage(eInflictor, eAttacker, iDamage, iDFlags, sMeansOfDeath, sWeapon, vPoint, vDir, sHitLoc, psOffsetTime)\n\
+               {\n\
+               \tn = eInflictor getentitynumber();\n\
+               \tlevel.origin = eInflictor.origin;\n\
+               \tlevel.inflictor = eInflictor;\n\
+               }\n\
+               origin() { return level.origin; }\n\
+               still_there() { return isdefined(level.inflictor); }\n";
+    let p = compile(&[("t.gsc", src)], &Builtins::stock_mp(), Options::default()).unwrap();
+    let callback = p.find("t", "CodeCallback_PlayerDamage").unwrap();
+    let origin = p.find("t", "origin").unwrap();
+    let still_there = p.find("t", "still_there").unwrap();
+    let dispatch = server::script::Dispatch::new(&p);
+    let (mut g, _) = arena(&[], 0, vec![c4()]);
+    let mut vm = Vm::new(p).unwrap();
+    g.callbacks.player_damage = Some(callback);
+    let planter = add_player(&mut g, &mut vm, [0.0; 3], 0.0, Team::Allies);
+    add_player(&mut g, &mut vm, [200.0, 0.0, 0.0], 0.0, Team::Axis);
+    g.level.time = 1000;
+    let weapon = g.weapons.index("c4_mp");
+    fire(
+        &mut g,
+        &mut vm,
+        planter,
+        WeaponEvent::OffhandThrow {
+            weapon,
+            fuse_left: 0,
+            cooked: 0,
+        },
+    );
+    let c4 = server_first_missile(&g);
+    fly(&mut g, &mut vm, c4, 1005, 3000);
+    let at = g.ent(c4).unwrap().origin;
+    g.detonate_missile(&mut vm, c4);
+    assert!(!g.calls.is_empty(), "the blast queued no damage callback");
+    assert!(
+        g.ent(c4).is_some(),
+        "the missile went before its blast's callbacks ran"
+    );
+    let mut host = server::script::ScriptHost {
+        game: &mut g,
+        dispatch: &dispatch,
+    };
+    host.run_calls(&mut vm);
+    let errors: Vec<_> = host.game.nested_errors.iter().map(|e| &e.message).collect();
+    assert!(errors.is_empty(), "the damage callback failed: {errors:?}");
+    let seen = vm.call(&mut host, origin, None, &[]).unwrap();
+    assert!(
+        matches!(seen, gsc::CallOutcome::Finished(Value::Vector(v)) if v == at),
+        "the callback did not read the inflictor's origin {at:?}: {seen:?}"
+    );
+    let left = vm.call(&mut host, still_there, None, &[]).unwrap();
+    assert!(
+        matches!(left, gsc::CallOutcome::Finished(Value::Int(0))),
+        "the missile's script reference is still defined: {left:?}"
+    );
+    assert!(
+        g.ent(c4).is_none(),
+        "the missile outlived the outermost run"
+    );
+    assert!(g.free_after_calls.is_empty());
 }
 
 fn server_first_missile(g: &Game) -> u16 {
@@ -793,7 +894,7 @@ fn flight_path(
 ) -> Vec<[f32; 3]> {
     let infos = vec![sidewinder(), lock_on_launcher(), hellfire(), rpg()];
     let (mut g, mut vm) = arena(&[], 0, infos);
-    for (name, defaults) in server::missile::MISSILE_CVARS {
+    for (name, defaults, _) in server::missile::MISSILE_CVARS {
         g.cvars.register(name, defaults, 0);
     }
     let shooter = add_player(&mut g, &mut vm, [-500.0, 0.0, 0.0], 0.0, Team::Allies);
@@ -1367,7 +1468,9 @@ fn a_blast_hurts_by_how_much_of_the_player_it_reaches() {
 
 fn run_script(g: &mut Game, vm: Vm, src: &str, func: &str) -> Vm {
     use server::script::{Dispatch, ScriptHost};
-    let prog = compile(&[("t.gsc", src)], &Builtins::stock_mp(), Options::default()).unwrap();
+    // `developer_script`, for the developer-only `getentbynum` in `/# ... #/` blocks.
+    let opts = Options { developer: true };
+    let prog = compile(&[("t.gsc", src)], &Builtins::stock_mp(), opts).unwrap();
     let f = prog.find("t", func).unwrap();
     let dispatch = Dispatch::new(&prog);
     drop(vm);
@@ -1543,7 +1646,7 @@ fn the_engine_sends_no_obituary_of_its_own_and_the_script_one_carries_its_argume
     };
     assert!(obits(&g).is_empty(), "death alone is not a kill-feed line");
     let src = format!(
-        "go() {{ obituary(getentbynum({b}), getentbynum({a}), \"rifle_mp\", \"MOD_HEAD_SHOT\"); }}"
+        "go() {{ /# obituary(getentbynum({b}), getentbynum({a}), \"rifle_mp\", \"MOD_HEAD_SHOT\"); #/ }}"
     );
     let _ = run_script(&mut g, vm, &src, "go");
     let o = obits(&g);
@@ -1691,7 +1794,7 @@ fn pool(surface: i32, extra: Vec<BrushSpec>, models: Vec<Vec<BrushSpec>>) -> (Ga
     };
     let (mut g, vm) = arena(&[], 0, vec![rpg()]);
     g.world = Some(World::new(map.build()));
-    for (name, defaults) in server::missile::MISSILE_CVARS {
+    for (name, defaults, _) in server::missile::MISSILE_CVARS {
         g.cvars.register(name, defaults, 0);
     }
     (g, vm)

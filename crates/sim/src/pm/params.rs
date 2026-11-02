@@ -64,6 +64,8 @@ pub struct Params {
     // Aim down sights.
     pub player_ads_exit_delay: i32,
     pub player_scope_exit_on_damage: bool,
+    /// The view and gun bob (`bg_bobMax`, `bg_bobAmplitude*`).
+    pub bob: super::bob::Bob,
     /// The dvars the weapon code reads (breath, melee, burst cooldown, penetration, perks).
     pub weapon: WeaponParams,
     /// Mantle animation tracks; mantling is unavailable until set.
@@ -116,35 +118,63 @@ impl Default for Params {
             player_melee_charge_friction: 1200.0,
             player_ads_exit_delay: 0,
             player_scope_exit_on_damage: false,
+            bob: super::bob::Bob::default(),
             weapon: WeaponParams::default(),
             mantle_anims: None,
         }
     }
 }
 
-/// One tunable's storage, so [`Params`] has a single table of dvar names.
+/// The type and range of a movement dvar (`dvarType_t` with its `DvarLimits`), for the server to register.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Domain {
+    Bool,
+    Int(i32, i32),
+    Float(f32, f32),
+    /// Two floats, each held to the range.
+    Vec2(f32, f32),
+}
+
+/// One tunable's storage with the range its stock registration holds it to, so [`Params`] has a single table of
+/// dvar names.
 enum Tunable<'a> {
-    Float(&'a mut f32),
-    /// A float the dvar's registration holds to a range (`min`, `max`).
-    Ranged(&'a mut f32, f32, f32),
-    Int(&'a mut i32),
+    Float(&'a mut f32, f32, f32),
+    Int(&'a mut i32, i32, i32),
     Bool(&'a mut bool),
+    /// Two floats, `"x y"`, each held to the range (`min`, `max`).
+    Vec2(&'a mut [f32; 2], f32, f32),
 }
 
 impl Tunable<'_> {
     fn text(&self) -> String {
         match self {
-            Tunable::Float(v) | Tunable::Ranged(v, ..) => v.to_string(),
-            Tunable::Int(v) => v.to_string(),
+            Tunable::Float(v, ..) => v.to_string(),
+            Tunable::Int(v, ..) => v.to_string(),
             Tunable::Bool(v) => u8::from(**v).to_string(),
+            Tunable::Vec2(v, ..) => format!("{} {}", v[0], v[1]),
+        }
+    }
+
+    fn domain(&self) -> Domain {
+        match *self {
+            Tunable::Float(_, lo, hi) => Domain::Float(lo, hi),
+            Tunable::Int(_, lo, hi) => Domain::Int(lo, hi),
+            Tunable::Bool(_) => Domain::Bool,
+            Tunable::Vec2(_, lo, hi) => Domain::Vec2(lo, hi),
         }
     }
 
     /// Takes the value `text` gives; text that is no number leaves it as it was (the original's `atof`/`atoi`
-    /// would give 0, but a dvar only holds what its registration accepts).
+    /// would give 0, but a dvar only holds what its registration accepts). A two-float value takes its
+    /// components in order and a missing second one is 0, as `Dvar_StringToVec2` reads them.
     fn set(&mut self, text: &str) {
         let text = text.trim();
-        let Ok(n) = text.parse::<f32>() else {
+        let mut words = text.split_whitespace().map(str::parse::<f32>);
+        let first = match self {
+            Tunable::Vec2(..) => words.next(),
+            _ => Some(text.parse::<f32>()),
+        };
+        let Some(Ok(n)) = first else {
             tracing::warn!(
                 value = text,
                 "tunable value is not a number, kept as it was"
@@ -152,10 +182,13 @@ impl Tunable<'_> {
             return;
         };
         match self {
-            Tunable::Float(v) => **v = n,
-            Tunable::Ranged(v, lo, hi) => **v = n.clamp(*lo, *hi),
-            Tunable::Int(v) => **v = n as i32,
+            Tunable::Float(v, lo, hi) => **v = n.clamp(*lo, *hi),
+            Tunable::Int(v, lo, hi) => **v = (n as i32).clamp(*lo, *hi),
             Tunable::Bool(v) => **v = n != 0.0,
+            Tunable::Vec2(v, lo, hi) => {
+                let y = words.next().and_then(Result::ok).unwrap_or(0.0);
+                **v = [n.clamp(*lo, *hi), y.clamp(*lo, *hi)];
+            }
         }
     }
 }
@@ -164,151 +197,197 @@ impl Params {
     /// Every tunable with the dvar it is, as `Jump_RegisterDvars`, `Mantle_RegisterDvars`, `BG_RegisterDvars`,
     /// `BG_RegisterPerks` and `G_RegisterDvars` name them.
     fn tunables(&mut self) -> Vec<(&'static str, Tunable<'_>)> {
-        use Tunable::{Bool, Float, Int, Ranged};
+        use Tunable::{Bool, Float, Int, Vec2};
         vec![
-            ("friction", Float(&mut self.friction)),
-            ("stopspeed", Float(&mut self.stopspeed)),
-            ("inertiaMax", Float(&mut self.inertia_max)),
-            ("inertiaAngle", Float(&mut self.inertia_angle)),
-            ("jump_height", Float(&mut self.jump_height)),
-            ("jump_stepSize", Float(&mut self.jump_step_size)),
+            ("friction", Float(&mut self.friction, 0.0, 100.0)),
+            ("stopspeed", Float(&mut self.stopspeed, 0.0, 1000.0)),
+            ("inertiaMax", Float(&mut self.inertia_max, 0.0, 1000.0)),
+            ("inertiaAngle", Float(&mut self.inertia_angle, -1.0, 1.0)),
+            ("jump_height", Float(&mut self.jump_height, 0.0, 1000.0)),
+            ("jump_stepSize", Float(&mut self.jump_step_size, 0.0, 64.0)),
             ("jump_slowdownEnable", Bool(&mut self.jump_slowdown_enable)),
-            ("jump_ladderPushVel", Float(&mut self.jump_ladder_push_vel)),
-            ("jump_spreadAdd", Float(&mut self.jump_spread_add)),
+            (
+                "jump_ladderPushVel",
+                Float(&mut self.jump_ladder_push_vel, 0.0, 1024.0),
+            ),
+            (
+                "jump_spreadAdd",
+                Float(&mut self.jump_spread_add, 0.0, 512.0),
+            ),
             ("mantle_enable", Bool(&mut self.mantle_enable)),
-            ("mantle_check_range", Float(&mut self.mantle_check_range)),
-            ("mantle_check_radius", Float(&mut self.mantle_check_radius)),
-            ("mantle_check_angle", Float(&mut self.mantle_check_angle)),
-            ("mantle_view_yawcap", Float(&mut self.mantle_view_yawcap)),
-            ("bg_ladder_yawcap", Float(&mut self.bg_ladder_yawcap)),
-            ("bg_prone_yawcap", Float(&mut self.bg_prone_yawcap)),
+            (
+                "mantle_check_range",
+                Float(&mut self.mantle_check_range, 0.0, 128.0),
+            ),
+            (
+                "mantle_check_radius",
+                Float(&mut self.mantle_check_radius, 0.0, 15.0),
+            ),
+            (
+                "mantle_check_angle",
+                Float(&mut self.mantle_check_angle, 0.0, 180.0),
+            ),
+            (
+                "mantle_view_yawcap",
+                Float(&mut self.mantle_view_yawcap, 0.0, 180.0),
+            ),
+            (
+                "bg_ladder_yawcap",
+                Float(&mut self.bg_ladder_yawcap, 0.0, 360.0),
+            ),
+            (
+                "bg_prone_yawcap",
+                Float(&mut self.bg_prone_yawcap, 0.0, 360.0),
+            ),
             (
                 "player_view_pitch_up",
-                Float(&mut self.player_view_pitch_up),
+                Float(&mut self.player_view_pitch_up, 0.0, 90.0),
             ),
             (
                 "player_view_pitch_down",
-                Float(&mut self.player_view_pitch_down),
+                Float(&mut self.player_view_pitch_down, 0.0, 90.0),
             ),
             (
                 "bg_fallDamageMinHeight",
-                Float(&mut self.bg_fall_damage_min_height),
+                Float(&mut self.bg_fall_damage_min_height, 1.0, f32::MAX),
             ),
             (
                 "bg_fallDamageMaxHeight",
-                Float(&mut self.bg_fall_damage_max_height),
+                Float(&mut self.bg_fall_damage_max_height, 1.0, f32::MAX),
             ),
             (
                 "bg_foliagesnd_minspeed",
-                Float(&mut self.bg_foliagesnd_minspeed),
+                Float(&mut self.bg_foliagesnd_minspeed, 0.0, f32::MAX),
             ),
             (
                 "bg_foliagesnd_maxspeed",
-                Float(&mut self.bg_foliagesnd_maxspeed),
+                Float(&mut self.bg_foliagesnd_maxspeed, 0.0, f32::MAX),
             ),
             (
                 "bg_foliagesnd_slowinterval",
-                Int(&mut self.bg_foliagesnd_slowinterval),
+                Int(&mut self.bg_foliagesnd_slowinterval, 0, i32::MAX),
             ),
             (
                 "bg_foliagesnd_fastinterval",
-                Int(&mut self.bg_foliagesnd_fastinterval),
+                Int(&mut self.bg_foliagesnd_fastinterval, 0, i32::MAX),
             ),
             (
                 "bg_foliagesnd_resetinterval",
-                Int(&mut self.bg_foliagesnd_resetinterval),
+                Int(&mut self.bg_foliagesnd_resetinterval, 0, i32::MAX),
             ),
             (
                 "player_strafeSpeedScale",
-                Float(&mut self.player_strafe_speed_scale),
+                Float(&mut self.player_strafe_speed_scale, 0.0, 20.0),
             ),
             (
                 "player_backSpeedScale",
-                Float(&mut self.player_back_speed_scale),
+                Float(&mut self.player_back_speed_scale, 0.0, 20.0),
             ),
             (
                 "player_spectateSpeedScale",
-                Float(&mut self.player_spectate_speed_scale),
+                Float(&mut self.player_spectate_speed_scale, 0.0, 20.0),
             ),
             (
                 "player_moveThreshhold",
-                Float(&mut self.player_move_threshhold),
+                Float(&mut self.player_move_threshhold, 0.000_000_01, 20.0),
             ),
             (
                 "player_footstepsThreshhold",
-                Float(&mut self.player_footsteps_threshhold),
+                Float(&mut self.player_footsteps_threshhold, 0.0, 50000.0),
             ),
             (
                 "player_sprintForwardMinimum",
-                Int(&mut self.player_sprint_forward_minimum),
+                Int(&mut self.player_sprint_forward_minimum, 0, 255),
             ),
             (
                 "player_sprintSpeedScale",
-                Float(&mut self.player_sprint_speed_scale),
+                Float(&mut self.player_sprint_speed_scale, 0.0, 5.0),
             ),
-            ("player_sprintTime", Float(&mut self.player_sprint_time)),
+            (
+                "player_sprintTime",
+                Float(&mut self.player_sprint_time, 0.0, 12.8),
+            ),
             (
                 "player_sprintMinTime",
-                Float(&mut self.player_sprint_min_time),
+                Float(&mut self.player_sprint_min_time, 0.0, 12.8),
             ),
             (
                 "player_sprintRechargePause",
-                Float(&mut self.player_sprint_recharge_pause),
+                Float(&mut self.player_sprint_recharge_pause, 0.0, 9000.0),
             ),
             (
                 "player_sprintStrafeSpeedScale",
-                Float(&mut self.player_sprint_strafe_speed_scale),
+                Float(&mut self.player_sprint_strafe_speed_scale, 0.0, 5000.0),
             ),
             (
                 "player_sprintCameraBob",
-                Float(&mut self.player_sprint_camera_bob),
+                Float(&mut self.player_sprint_camera_bob, 0.0, 2.0),
             ),
             (
                 "perk_sprintMultiplier",
-                Float(&mut self.perk_sprint_multiplier),
+                Float(&mut self.perk_sprint_multiplier, 0.0, f32::MAX),
             ),
             (
                 "player_dmgtimer_maxTime",
-                Float(&mut self.player_dmgtimer_max_time),
+                Float(&mut self.player_dmgtimer_max_time, 0.0, f32::MAX),
             ),
             (
                 "player_dmgtimer_minScale",
-                Float(&mut self.player_dmgtimer_min_scale),
+                Float(&mut self.player_dmgtimer_min_scale, 0.0, 1.0),
             ),
             (
                 "player_meleeChargeFriction",
-                Float(&mut self.player_melee_charge_friction),
+                Float(&mut self.player_melee_charge_friction, 1.0, 5000.0),
             ),
-            ("player_adsExitDelay", Int(&mut self.player_ads_exit_delay)),
+            (
+                "player_adsExitDelay",
+                Int(&mut self.player_ads_exit_delay, 0, 1000),
+            ),
             (
                 "player_scopeExitOnDamage",
                 Bool(&mut self.player_scope_exit_on_damage),
             ),
+            // `BG_RegisterDvars`: the bob of the eye and the gun, cheat protected. The amplitudes are
+            // (horizontal, vertical) per unit of speed.
+            ("bg_bobMax", Float(&mut self.bob.max, 0.0, 36.0)),
+            (
+                "bg_bobAmplitudeStanding",
+                Vec2(&mut self.bob.standing, 0.0, 1.0),
+            ),
+            (
+                "bg_bobAmplitudeDucked",
+                Vec2(&mut self.bob.ducked, 0.0, 1.0),
+            ),
+            ("bg_bobAmplitudeProne", Vec2(&mut self.bob.prone, 0.0, 1.0)),
+            (
+                "bg_bobAmplitudeSprinting",
+                Vec2(&mut self.bob.sprinting, 0.0, 1.0),
+            ),
             // The weapon dvars (`BG_RegisterDvars`, `BG_RegisterPerks`, `G_RegisterDvars`), all cheat protected.
             (
                 "bg_aimSpreadMoveSpeedThreshold",
-                Ranged(&mut self.weapon.aim_spread_move_speed_threshold, 0.0, 300.0),
+                Float(&mut self.weapon.aim_spread_move_speed_threshold, 0.0, 300.0),
             ),
             (
                 "player_burstFireCooldown",
-                Ranged(&mut self.weapon.burst_fire_cooldown, 0.0, 60.0),
+                Float(&mut self.weapon.burst_fire_cooldown, 0.0, 60.0),
             ),
             ("player_sustainAmmo", Bool(&mut self.weapon.sustain_ammo)),
             (
                 "perk_weapSpreadMultiplier",
-                Ranged(&mut self.weapon.perk_weap_spread_multiplier, 0.0, 1.0),
+                Float(&mut self.weapon.perk_weap_spread_multiplier, 0.0, 1.0),
             ),
             (
                 "perk_weapReloadMultiplier",
-                Ranged(&mut self.weapon.perk_weap_reload_multiplier, 0.0, 1.0),
+                Float(&mut self.weapon.perk_weap_reload_multiplier, 0.0, 1.0),
             ),
             (
                 "perk_weapRateMultiplier",
-                Ranged(&mut self.weapon.perk_weap_rate_multiplier, 0.0, 1.0),
+                Float(&mut self.weapon.perk_weap_rate_multiplier, 0.0, 1.0),
             ),
             (
                 "perk_bulletPenetrationMultiplier",
-                Ranged(
+                Float(
                     &mut self.weapon.perk_bullet_penetration_multiplier,
                     0.0,
                     30.0,
@@ -316,15 +395,15 @@ impl Params {
             ),
             (
                 "player_meleeRange",
-                Ranged(&mut self.weapon.melee_range, 0.0, 1000.0),
+                Float(&mut self.weapon.melee_range, 0.0, 1000.0),
             ),
             (
                 "player_meleeWidth",
-                Ranged(&mut self.weapon.melee_width, 0.0, 1000.0),
+                Float(&mut self.weapon.melee_width, 0.0, 1000.0),
             ),
             (
                 "player_meleeHeight",
-                Ranged(&mut self.weapon.melee_height, 0.0, 1000.0),
+                Float(&mut self.weapon.melee_height, 0.0, 1000.0),
             ),
             (
                 "bullet_penetrationEnabled",
@@ -332,41 +411,41 @@ impl Params {
             ),
             (
                 "player_breath_hold_time",
-                Ranged(&mut self.weapon.breath_hold_time, 0.0, 30.0),
+                Float(&mut self.weapon.breath_hold_time, 0.0, 30.0),
             ),
             (
                 "player_breath_gasp_time",
-                Ranged(&mut self.weapon.breath_gasp_time, 0.0, 30.0),
+                Float(&mut self.weapon.breath_gasp_time, 0.0, 30.0),
             ),
             (
                 "player_breath_fire_delay",
-                Ranged(&mut self.weapon.breath_fire_delay, 0.0, 30.0),
+                Float(&mut self.weapon.breath_fire_delay, 0.0, 30.0),
             ),
             (
                 "player_breath_gasp_scale",
-                Ranged(&mut self.weapon.breath_gasp_scale, 0.0, 50.0),
+                Float(&mut self.weapon.breath_gasp_scale, 0.0, 50.0),
             ),
             (
                 "player_breath_hold_lerp",
-                Ranged(&mut self.weapon.breath_hold_lerp, 0.0, 50.0),
+                Float(&mut self.weapon.breath_hold_lerp, 0.0, 50.0),
             ),
             (
                 "player_breath_gasp_lerp",
-                Ranged(&mut self.weapon.breath_gasp_lerp, 0.0, 50.0),
+                Float(&mut self.weapon.breath_gasp_lerp, 0.0, 50.0),
             ),
             (
                 "perk_extraBreath",
-                Ranged(&mut self.weapon.perk_extra_breath, 0.0, f32::MAX),
+                Float(&mut self.weapon.perk_extra_breath, 0.0, f32::MAX),
             ),
         ]
     }
 
-    /// The dvar names and their stock values, for the server to register.
-    pub fn dvars() -> Vec<(&'static str, String)> {
+    /// The dvar names, their stock values and their stock domains, for the server to register.
+    pub fn dvars() -> Vec<(&'static str, String, Domain)> {
         Params::default()
             .tunables()
             .into_iter()
-            .map(|(name, t)| (name, t.text()))
+            .map(|(name, t)| (name, t.text(), t.domain()))
             .collect()
     }
 

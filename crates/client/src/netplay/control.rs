@@ -46,10 +46,24 @@ fn player(st: &NetPlay) -> Value {
         "aim_angles": st.angles,
         "weapon": st.weapon(),
         "weapon_index": ps.weapon,
+        "weapons_enabled": ps.weapon_flags & sim::pm::wf::DISABLED == 0,
+        "weapon_state": ps.weapon_state,
+        "offhand_secondary": ps.offhand_secondary,
+        "smoke_ammo": sim::weapon::PlayerWeapons::from_words(&snap.inv)
+            .clip(&st.weapons, st.weapons.index("smoke_grenade_mp")),
+        "weapon_time": ps.weapon_time,
         "ads": ps.weapon_pos_frac,
         // The same predicted frame that supplied the rendered reticle, not an older snapshot.
         "visual_weapon_state": st.hud_view.as_ref().map(|(ps, _)| ps.weapon_state),
         "crosshair_alpha": st.reticle.as_ref().map_or(0.0, crate::crosshair::alpha),
+        // The crosshair's centre size this frame (a cooked grenade grows it), and the crosshair bits the client put
+        // on its predicted `weapFlags` (8 a teammate, 0x10 an enemy in range).
+        "crosshair_center": st.reticle.as_ref().and_then(crate::crosshair::center_size),
+        "crosshair_flags": st.hud_view.as_ref().map_or(0, |(ps, _)| ps.weapon_flags
+            & (sim::pm::wf::FRIEND_IN_CROSSHAIR | sim::pm::wf::ENEMY_IN_CROSSHAIR)),
+        "grenade_time_left": st.hud_view.as_ref().map(|(ps, _)| ps.grenade_time_left),
+        // Per weapon state, `[frames, frames with a visible crosshair]` drawn so far: a check diffs two reads.
+        "crosshair_state_frames": st.crosshair_state_frames,
         "alive": ps.health > 0 && ps.pm_type < sim::pm::PmType::Dead,
         "dead": ps.pm_type >= sim::pm::PmType::Dead && ps.pm_type != sim::pm::PmType::Spectator,
         "spectator": ps.pm_type == sim::pm::PmType::Spectator,
@@ -101,6 +115,17 @@ fn entities(st: &NetPlay) -> Value {
             "team": team_of(e.eflags).map(|t| if t == Team::Axis { 1 } else { 2 }),
             "dead": e.eflags & eflags::DEAD != 0,
             "loops": e.loop_sound != 0,
+            "persistent_smoke": crate::events::persistent_smoke(e),
+            "custom_explode_start_time": e.custom_explode_start_time,
+            "time2": e.time2,
+            // A player's stance from the snapshot's `eFlags`, for aiming at the body rather than over it.
+            "stance": if e.eflags & sim::pm::ef::PRONE != 0 {
+                "prone"
+            } else if e.eflags & sim::pm::ef::CROUCH != 0 {
+                "crouch"
+            } else {
+                "stand"
+            },
             "actor": !visible.contains(&e.number),
         }));
     }
@@ -200,6 +225,8 @@ impl NetPlay {
                 full.get("fx").cloned().unwrap_or(Value::Null)
             }
             "watch" => watch(self),
+            // The vision channels, the blend under way and the last goggles switch (`look::Look::report`).
+            "look" => self.look.report(),
             _ => Value::Null,
         }
     }
