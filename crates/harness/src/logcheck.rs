@@ -226,6 +226,30 @@ pub const ALLOWED: &[Allow] = &[
         stages: &["client-gfx"],
         max: Some(2), // measured 1 on the Linux host, 2026-10-14,
     },
+    // Stock-script defects the original raises too.
+    Allow {
+        contains: &[
+            "server::server",
+            "script runtime error: cannot cast undefined to bool seen=",
+            "at=\"maps\\\\mp\\\\gametypes\\\\_missions::ch_kills line 545\"",
+        ],
+        reason: "a player their own frag killed: the stock _missions::ch_kills reads explosiveInfo[\"suicideGrenadeKill\"], \
+                 which the stock damage callback sets only for damage from someone else (#539); client-match fails \
+                 unless the server counted a frag suicide for each such error",
+        stages: &["client-match"],
+        max: Some(4), // a 90 s match; the stage itself caps the errors by the frag suicides the server counted
+    },
+    Allow {
+        contains: &[
+            "cod4e::listen",
+            "script error on the listen server",
+            "cause=\"cannot cast undefined to bool\"",
+            "at=\"maps\\\\mp\\\\gametypes\\\\_missions::ch_kills line 545\"",
+        ],
+        reason: "the listen server's log line for the same stock frag-suicide error (#539)",
+        stages: &["client-match"],
+        max: Some(4), // one per error; the stage caps the errors by the frag suicides the server counted
+    },
 ];
 
 /// A `WARN` or `ERROR` event read from a log.
@@ -469,6 +493,36 @@ mod tests {
                     .contains("animation data read out of range")
             );
         }
+    }
+
+    /// The two lines the stock frag-suicide error logs pass client-match (#539), as a serial run logged them; the
+    /// same error at another site, another error at that site, or the lines in another stage still fail.
+    #[test]
+    fn only_the_stock_frag_suicide_error_lines_pass_client_match() {
+        let lines = |cause: &str, at: &str| {
+            format!(
+                "2026-11-02T16:41:00.692267Z  WARN server::server: script runtime error: {cause} seen=1 at=\"{at}\"\n\
+                 2026-11-02T16:41:00.750894Z  WARN cod4e::listen: script error on the listen server map=mp_crash \
+                 cause=\"{cause}\" at=\"{at}\" error=******* script runtime error *******\n\
+                 {cause}\n  at {at}\n"
+            )
+        };
+        let site = r"maps\\mp\\gametypes\\_missions::ch_kills line 545";
+        let gate = |log: &str, stage: &str| {
+            let mut r = StageReport::new(stage, Status::Passed);
+            apply_with(&mut r, stage_dir(log).path(), stage, ALLOWED);
+            r.status
+        };
+        let stock = lines("cannot cast undefined to bool", site);
+        assert_eq!(gate(&stock, "client-match"), Status::Passed);
+        assert_eq!(gate(&stock, "net-match"), Status::Failed);
+        let other_site = lines(
+            "cannot cast undefined to bool",
+            r"maps\\mp\\gametypes\\_missions::ch_kills line 546",
+        );
+        assert_eq!(gate(&other_site, "client-match"), Status::Failed);
+        let other_error = lines("cannot cast undefined to int", site);
+        assert_eq!(gate(&other_error, "client-match"), Status::Failed);
     }
 
     #[test]
