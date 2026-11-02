@@ -1367,7 +1367,9 @@ fn a_blast_hurts_by_how_much_of_the_player_it_reaches() {
 
 fn run_script(g: &mut Game, vm: Vm, src: &str, func: &str) -> Vm {
     use server::script::{Dispatch, ScriptHost};
-    let prog = compile(&[("t.gsc", src)], &Builtins::stock_mp(), Options::default()).unwrap();
+    // `developer_script`, for the developer-only `getentbynum` in `/# ... #/` blocks.
+    let opts = Options { developer: true };
+    let prog = compile(&[("t.gsc", src)], &Builtins::stock_mp(), opts).unwrap();
     let f = prog.find("t", func).unwrap();
     let dispatch = Dispatch::new(&prog);
     drop(vm);
@@ -1543,7 +1545,7 @@ fn the_engine_sends_no_obituary_of_its_own_and_the_script_one_carries_its_argume
     };
     assert!(obits(&g).is_empty(), "death alone is not a kill-feed line");
     let src = format!(
-        "go() {{ obituary(getentbynum({b}), getentbynum({a}), \"rifle_mp\", \"MOD_HEAD_SHOT\"); }}"
+        "go() {{ /# obituary(getentbynum({b}), getentbynum({a}), \"rifle_mp\", \"MOD_HEAD_SHOT\"); #/ }}"
     );
     let _ = run_script(&mut g, vm, &src, "go");
     let o = obits(&g);

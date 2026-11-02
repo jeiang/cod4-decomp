@@ -367,6 +367,11 @@ pub struct Level {
     pub free_ents: std::collections::VecDeque<(u16, i32)>,
     /// `level.pendingTriggerList`: touches the next trigger pass delivers.
     pub pending_triggers: Vec<crate::trigger::PendingTrigger>,
+    /// `setclientnamemode("manual_change")`: a connected person's new name waits for `updateclientnames`
+    /// (`level.manualNameChange`).
+    pub manual_name_change: bool,
+    /// The console channel `print`/`println` write to (`level.scriptPrintChannel`; `script` at level start).
+    pub script_print_channel: usize,
 }
 
 /// What happened in play since boot, for harness reports.
@@ -645,7 +650,11 @@ impl Game {
 
     /// Clears per-map state for a new `G_InitGame`.
     pub fn reset_level(&mut self, max_clients: usize) {
-        self.level = Level::default();
+        self.level = Level {
+            // `G_InitGame`: the `script` console channel (KisakCOD `game_mp/g_main_mp.cpp:244`).
+            script_print_channel: 24,
+            ..Level::default()
+        };
         self.vote = Default::default();
         self.ambient = None;
         self.sound_out.clear();

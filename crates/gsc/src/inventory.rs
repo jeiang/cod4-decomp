@@ -214,6 +214,28 @@ pub const FUNCTIONS: &[&str] = &[
     "endlobby",
 ];
 
+/// The function entries flagged developer-only in the 1.7 table (third field 1); KisakCOD `g_scr_main_mp.cpp`
+/// marks the same ones. A call to one outside `/# ... #/` compiles only with `developer_script`, and only as a
+/// statement. No method of the multiplayer tables is developer-only.
+pub const DEVELOPER_FUNCTIONS: &[&str] = &[
+    "createprintchannel",
+    "setprintchannel",
+    "print",
+    "println",
+    "print3d",
+    "line",
+    "assert",
+    "assertex",
+    "assertmsg",
+    "getentbynum",
+    "openfile",
+    "closefile",
+    "fprintln",
+    "fprintfields",
+    "freadln",
+    "fgetarg",
+];
+
 /// Player table, `PlayerCmd_*` (83 entries).
 pub const PLAYER_METHODS: &[&str] = &[
     "giveweapon",
