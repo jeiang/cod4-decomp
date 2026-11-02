@@ -31,6 +31,7 @@ pub const PARTS: &[&str] = &[
     "cvars",
     "binds",
     "view",
+    "look",
     "server",
     "watch",
 ];

@@ -12,9 +12,10 @@
 //! The cgame and renderer dvars of #369 are checked on the way: untouched registration defaults are observed before
 //! writes, and the menu-started match resets cheat dvars and refuses protected writes. A `devmap` match then checks
 //! live near/far/depthhack, outdoor, sun, film, glow and blur settings without restarting the renderer, including
-//! sun-flare source defaults, overrides and persistence after their gate closes. The view model, HUD, shellshock,
-//! unlit scene, frame counter, subtitles, blood and brass retain their player-path checks. Needs a display and the
-//! install; skips without.
+//! sun-flare source defaults, overrides and persistence after their gate closes, and the `r_blur` filter shaped for
+//! the 4:3 `r_aspectRatio` (`RB_VirtualToSceneRadius`, #402). In that match walking bobs the eye, and after
+//! `set bg_bobMax 0` on the host walking does not (#408). The view model, HUD, shellshock, unlit scene, frame counter,
+//! subtitles, blood and brass retain their player-path checks. Needs a display and the install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
 use super::client_session::{run_client, verdict};
@@ -87,14 +88,14 @@ wait=1,gfxis=sun_flare 1 24 4 600 0.6 250 500 sun sun_flare,gfxis=sun_fx_positio
 set=set r_znear 4,set=set r_zfar 0,set=set r_znear_depthhack 0.1,\
 set=set r_outdoorAwayBias 32,set=set r_outdoorDownBias 0,set=set r_outdoorFeather 8,\
 wait=1,gfxis=nearfar 4 0,gfxis=depthhack_near 0.1,gfxis=outdoor 1 32 0 8,\
-gfxis=blur_radius 0,set=set r_blur 3,wait=1,gfxis=blur_radius 3,\
+gfxis=blur_radius 0,set=set r_blur 3,wait=1,gfxis=blur_radius 3,gfxis=blur_shape 1.33,\
 set=set r_blur 4,wait=1,gfxis=blur_radius 4,set=set r_blur 0,wait=1,gfxis=blur_radius 0,\
 cgis=gun 1,set=set cg_drawGun 0,wait=1,cgis=gun 0,shot=no-gun,set=set cg_drawGun 1,wait=1,cgis=gun 1,\
 cgis=hud2d 1,set=set cg_draw2D 0,wait=1,cgis=hud2d 0,shot=no-2d,set=set cg_draw2D 1,wait=1,cgis=hud2d 1,\
 shock=8000,wait=1,cgis=shock 1,set=set cg_drawShellshock 0,wait=1,cgis=shock 0,set=set cg_drawShellshock 1,wait=1,cgis=shock 1,\
 fxmark,set=set cg_blood 0,hitflesh,wait=1,cgis=fx:bullet_impact_noblood +1,cgis=fx:bullet_impact_flesh +0,\
 set=set cg_blood 1,hitflesh,wait=1,cgis=fx:bullet_impact_flesh +1,cgis=fx:bullet_impact_noblood +1,\
-set=set cg_brass 0,holdkey=mouse1,wait=1,releasekey=mouse1,cgis=fx:shell_eject 0,set=set cg_brass 1,\
+set=set cg_brass 0,wait=0.1,fxmark,holdkey=mouse1,wait=1,releasekey=mouse1,cgis=fx:shell_eject +0,set=set cg_brass 1,\
 cgis=fullbright 0,set=set r_fullbright 1,wait=1,cgis=fullbright 1,shot=fullbright,set=set r_fullbright 0,wait=1,cgis=fullbright 0,\
 cgis=centertime 3000,set=set cg_centertime 1.5,wait=1,cgis=centertime 1500,set=set cg_centertime 3,\
 set=set cg_crosshairAlpha 0,set=set cg_crosshairAlphaMin 0,wait=1,cgis=crosshair_alpha 0.00,\
@@ -142,6 +143,9 @@ set=set r_zFeather 1,set=set r_drawWater 1,set=set r_texFilterAnisoMin 1,set=set
 set=set r_aspectRatio auto,vidrestart,wait=2,gfxis=zfeather 1,gfxis=water 1,\
 gfxis=aa 1,gfxis=specular 1,gfxis=dof 1,gfxis=blur 0,holdkey=mouse2,releasekey=mouse2,wait=2,gfxis=blur 1,\
 holdkey=mouse2,releasekey=mouse2,wait=1,gfxis=glow 1,gfxis=shadows 1,gfxis=aspect 0.00,shot=gfx-off,\
+bobmark,holdkey=w,wait=1.5,releasekey=w,holdkey=s,wait=1.5,releasekey=s,cgis=eyebob 1,\
+console=set bg_bobMax 0,wait=1,bobmark,holdkey=w,wait=1.5,releasekey=w,holdkey=s,wait=1.5,releasekey=s,cgis=eyebob 0,\
+console=set bg_bobMax 8,wait=1,\
 losedevice,renderer=90,ingame=120,wait=2,gfxis=aa 1,shot=recovered";
 
 /// Share of pixels a light must brighten, and by how much (of 255, in luma).

@@ -1426,6 +1426,14 @@ impl Renderer {
         self.prepare_ahead(m, techs, kind, hsm)
     }
 
+    /// The last screen blur's horizontal over vertical filter radius, times the scene's width over its height: the
+    /// window aspect `RB_VirtualToSceneRadius` blurred for (the scene's own shape with square pixels). `None` before
+    /// a blur was drawn.
+    pub fn blur_shape(&self) -> Option<f32> {
+        let ([x, y], (w, h)) = self.post_state.last_blur?;
+        (y > 0.0 && h > 0).then(|| x / y * w as f32 / h as f32)
+    }
+
     /// The post parameters as the settings allow them: depth of field and glow can be switched off.
     pub(crate) fn post_params(&self) -> crate::post::PostParams {
         let mut p = self.post.clone();

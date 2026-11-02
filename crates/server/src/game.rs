@@ -452,6 +452,11 @@ pub struct Game {
     pub callbacks: Callbacks,
     /// Script calls waiting for the host (see [`ScriptCall`]).
     pub calls: Vec<ScriptCall>,
+    /// Exploded missiles whose entity outlives the script calls the blast queued: stock runs `Callback_PlayerDamage`
+    /// inside `G_RadiusDamage`, before `G_ExplodeMissile` frees the missile, so a script reads the inflictor
+    /// (`_weapons::onWeaponDamage` takes the concussion's distance from it). Freed when the outermost
+    /// `ScriptHost::run_calls` ends (see `run_calls_depth`).
+    pub free_after_calls: Vec<u16>,
     /// Errors of script calls that ran nested inside a builtin.
     pub nested_errors: Vec<gsc::VmError>,
     /// Clients whose disconnect callback is queued; their slots free afterwards.
@@ -533,6 +538,7 @@ impl Game {
             clients: Vec::new(),
             callbacks: Callbacks::default(),
             calls: Vec::new(),
+            free_after_calls: Vec::new(),
             nested_errors: Vec::new(),
             pending_free: Vec::new(),
             run_calls_depth: 0,

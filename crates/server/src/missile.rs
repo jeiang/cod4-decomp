@@ -577,7 +577,9 @@ impl Game {
     ) -> Option<R> {
         let mut m = self.ent_mut(n)?.missile.take()?;
         let r = f(self, &mut m);
-        if let Some(e) = self.ent_mut(n)
+        let exploded = self.free_after_calls.contains(&n);
+        if !exploded
+            && let Some(e) = self.ent_mut(n)
             && e.missile.is_none()
         {
             e.missile = Some(m);
@@ -1249,7 +1251,20 @@ impl Game {
         }
         self.missile_flash(vm, m, origin);
         vm.notify_entity(n, "death", &[]);
-        self.free_entity(vm, n);
+        if self.calls.is_empty() {
+            self.free_entity(vm, n);
+        } else {
+            // The damage callbacks the blast queued still read the inflictor: it goes once they ran
+            // ([`Game::free_after_calls`]), out of the world and no missile any more meanwhile.
+            self.unlink_all(n);
+            if let Some(w) = self.world.as_mut() {
+                w.unlink(n);
+            }
+            if let Some(e) = self.ent_mut(n) {
+                e.missile = None;
+            }
+            self.free_after_calls.push(n);
+        }
     }
 
     /// The `EV_*_EXPLODE` of a missile going off on a surface of type `surface` (a `proj_explosion` of `dud` also

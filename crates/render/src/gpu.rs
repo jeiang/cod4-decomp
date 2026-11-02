@@ -143,7 +143,18 @@ impl Gpu {
     /// Why the device was lost, once it is: every call on it fails from then on and nothing can be recovered
     /// without a new device and new resources. wgpu reports the loss from a device poll, so this polls.
     pub fn lost(&self) -> Option<String> {
-        let _ = self.device.poll(wgpu::PollType::Poll);
+        self.lost_after(wgpu::PollType::Poll)
+    }
+
+    /// `lost`, after waiting for the device's queue. A plain poll can miss a loss that already failed a surface
+    /// acquisition; the wait completes wgpu's handling of it, which also releases the surface's in-flight
+    /// images so the surface can be dropped. Waiting on a healthy device only finishes its submitted work.
+    pub fn lost_waiting(&self) -> Option<String> {
+        self.lost_after(wgpu::PollType::wait_indefinitely())
+    }
+
+    fn lost_after(&self, poll: wgpu::PollType) -> Option<String> {
+        let _ = self.device.poll(poll);
         self.health
             .lost
             .lock()

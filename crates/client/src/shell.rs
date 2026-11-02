@@ -532,6 +532,8 @@ const OPTION_DEFAULTS: &[(&str, &str)] = &[
     ("snd_volume", "0.8"),
     // Stock: archived and cheat protected (they only act with `sv_cheats` on): how long slaves take to duck.
     ("snd_slaveFadeTime", "500"),
+    // Stock: archived and cheat protected: the ms every sound channel takes to fade in when a level starts.
+    ("snd_levelFadeTime", "250"),
     // The shortest time a subtitle stays up, seconds (stock: archived).
     ("cg_subtitleMinTime", "3"),
     ("sm_enable", "1"),

@@ -5,9 +5,9 @@ use logging::Hit;
 
 #[test]
 fn a_new_window_logs_again() {
-    let d = logging::Dedup::new();
-    let before: Vec<_> = (0..3).map(|_| d.hit("w")).collect();
+    static D: logging::Dedup = logging::Dedup::new();
+    let before: Vec<_> = (0..3).map(|_| D.hit("w")).collect();
     assert_eq!(before, [Hit::Log(1), Hit::Log(2), Hit::Skip]);
     logging::new_window();
-    assert_eq!(d.hit("w"), Hit::Log(1));
+    assert_eq!(D.hit("w"), Hit::Log(1));
 }
