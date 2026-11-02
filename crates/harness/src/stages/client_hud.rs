@@ -196,10 +196,101 @@ fn night_vision_view(dir: &std::path::Path) -> Result<NvView, String> {
     Ok(nv_measure(w, h, &off, &still, &on))
 }
 
+/// Where a target bot is put for the crosshair colour steps, tried in turn: degrees off the player's view and
+/// distance. A spot behind a wall or inside geometry hides the bot from the crosshair trace; the next one is tried.
+const CROSSHAIR_SPOTS: [(f64, f64); 4] =
+    [(0.0, 200.0), (90.0, 150.0), (-90.0, 150.0), (180.0, 150.0)];
+/// How long the walker gets to turn onto one placed bot and hold it past the fade-in.
+const CROSSHAIR_SPOT_LIMIT: Duration = Duration::from_secs(25);
+
+/// Puts a live bot of the wanted side next to the player and drives the walker, aimed at that bot alone, until
+/// `state` holds (#494). Left to the match, the walker turned to the nearest bot of the side, which with every bot
+/// held still (`bot_idle 1`) could stand behind a wall for the whole step. The walker still has to turn onto the
+/// bot itself and the HUD has to draw the tint; every spot failing fails the step.
+fn hold_on_placed(
+    c: &mut Driven,
+    w: &mut Walker,
+    enemy: bool,
+    state: &Value,
+    what: &str,
+) -> Result<(), String> {
+    use super::client_hud_compass::{enemy_bot, exec, server_client};
+    let mine = c.lookup("player.team")?.as_u64().unwrap_or(0);
+    let team = match (mine, enemy) {
+        (1, true) => 2,
+        (2, true) => 1,
+        (1 | 2, false) => mine,
+        _ => return Err(format!("the player is on no team ({mine})")),
+    };
+    let me = c
+        .lookup("player.client")?
+        .as_u64()
+        .ok_or("the player has no client slot")?;
+    let mut tried = Vec::new();
+    for (off, reach) in CROSSHAIR_SPOTS {
+        let person = server_client(c, me)?;
+        let at = |i: usize| person["origin"][i].as_f64().unwrap_or(0.0);
+        let yaw = (c.lookup("player.aim_angles")?[1].as_f64().unwrap_or(0.0) + off).to_radians();
+        let bot = enemy_bot(c, team)?;
+        exec(
+            c,
+            &format!(
+                "devtele {bot} {} {} {}",
+                at(0) + reach * yaw.cos(),
+                at(1) + reach * yaw.sin(),
+                at(2)
+            ),
+        )?;
+        w.target = Some(bot);
+        let r = w.drive_until(c, state.clone(), CROSSHAIR_SPOT_LIMIT, what);
+        w.target = None;
+        match r {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                // What the client and the server had at the end: the placed bot as the snapshot carried it, the
+                // player's aim and crosshair bits, and the bot as the server has it.
+                let ents = c.state("entities")?;
+                let seen = ents["list"]
+                    .as_array()
+                    .and_then(|l| {
+                        l.iter()
+                            .find(|e| e["kind"] == "player" && e["client"].as_u64() == Some(bot))
+                    })
+                    .map(|e| {
+                        json!({"origin": e["origin"], "team": e["team"], "dead": e["dead"],
+                            "stance": e["stance"], "actor": e["actor"]})
+                    });
+                let p = c.state("player")?;
+                let server = server_client(c, bot)?;
+                tried.push(format!(
+                    "bot {bot} at {off} degrees, {reach} units: {e}; client sees bot {seen:?}; player origin {} \
+                     aim {} crosshair flags {} client {}; server bot origin {} alive {} team {}",
+                    p["origin"],
+                    p["aim_angles"],
+                    p["crosshair_flags"],
+                    p["crosshair_client"],
+                    server["origin"],
+                    server["alive"],
+                    server["team"]
+                ));
+            }
+        }
+    }
+    Err(tried.join("; "))
+}
+
 /// The crosshair colour steps, once the server has `sv_cheats` on: waits for the client to take it, puts the
 /// player in `god` mode, then holds the sights on an enemy, on an enemy with `cg_crosshairEnemyColor 0`, and on a
-/// teammate.
+/// teammate. Each target is a bot placed next to the player ([`hold_on_placed`]) rather than left to the match.
 fn crosshair_colours(c: &mut Driven, w: &mut Walker) -> Result<(), String> {
+    use super::client_hud_compass::exec;
+    exec(c, "set bot_idle 1")?;
+    let r = crosshair_colour_steps(c, w);
+    exec(c, "set bot_idle 0")?;
+    r
+}
+
+fn crosshair_colour_steps(c: &mut Driven, w: &mut Walker) -> Result<(), String> {
     c.step("crosshair cheats", |c| {
         let end = Instant::now() + Duration::from_secs(15);
         while c.ask(json!({"cmd": "cvar", "name": "sv_cheats"}))?["value"] != "1" {
@@ -214,10 +305,11 @@ fn crosshair_colours(c: &mut Driven, w: &mut Walker) -> Result<(), String> {
     w.hold_fire = true;
     c.step("crosshair over an enemy", |c| {
         let theirs = c.lookup("hud.stats.crosshair_team_tints.1")?;
-        w.drive_until(
+        hold_on_placed(
             c,
-            json!({"hud.stats.crosshair_enemy_tints": {"contains": theirs}}),
-            Duration::from_secs(100),
+            w,
+            true,
+            &json!({"hud.stats.crosshair_enemy_tints": {"contains": theirs}}),
             "the crosshair never took the enemy team's colour over an enemy",
         )?;
         c.capture("crosshair_enemy").map(|_| ())
@@ -227,10 +319,11 @@ fn crosshair_colours(c: &mut Driven, w: &mut Walker) -> Result<(), String> {
     c.step("crosshair over a teammate", |c| {
         let mine = c.lookup("hud.stats.crosshair_team_tints.0")?;
         w.friends = true;
-        let r = w.drive_until(
+        let r = hold_on_placed(
             c,
-            json!({"hud.stats.crosshair_friend_tints": {"contains": mine}}),
-            Duration::from_secs(100),
+            w,
+            false,
+            &json!({"hud.stats.crosshair_friend_tints": {"contains": mine}}),
             "the crosshair never took the player's team colour over a teammate",
         );
         w.friends = false;
@@ -267,10 +360,11 @@ fn enemy_colour_off(c: &mut Driven, w: &mut Walker) -> Result<(), String> {
         ))
     };
     let (due, white) = counts(c)?;
-    w.drive_until(
+    hold_on_placed(
         c,
-        json!({"hud.stats.crosshair_enemy_due_frames": {"gt": due + 60}}),
-        Duration::from_secs(150),
+        w,
+        true,
+        &json!({"hud.stats.crosshair_enemy_due_frames": {"gt": due + 60}}),
         "the crosshair was never held on an enemy past the fade-in with cg_crosshairEnemyColor 0",
     )?;
     c.capture("crosshair_enemy_white")?;
@@ -920,7 +1014,13 @@ fn killcam_kill(c: &mut Driven) -> Result<(), String> {
             &format!("devtele {bot} {} {} {}", at(0) + dx, at(1) + dy, at(2)),
         )?;
         c.pause(KILLCAM_AIM)?;
-        if server_client(c, me)?["alive"] == json!(true) {
+        // Where the bot stood and looked when it killed, against the player: a failure says whether it faced them.
+        let (b, p) = (server_client(c, bot)?, server_client(c, me)?);
+        let seen = format!(
+            "bot origin {} view {} alive {} session {}, player origin {}",
+            b["origin"], b["viewangles"], b["alive"], b["session"], p["origin"]
+        );
+        if p["alive"] == json!(true) {
             exec(c, &format!("devkill {me} {bot}"))?;
         }
         c.until(
@@ -936,7 +1036,7 @@ fn killcam_kill(c: &mut Driven) -> Result<(), String> {
                 return Ok(());
             }
             if hud["live"]["killcam"] != json!(true) || Instant::now() > end {
-                tried.push(format!("bot {bot} at ({dx}, {dy})"));
+                tried.push(format!("bot {bot} at ({dx}, {dy}) [{seen}]"));
                 break;
             }
             c.frames(1)?;
