@@ -8,7 +8,7 @@ use crate::stage::{StageCtx, StageReport, Status};
 use serde_json::json;
 use std::fs;
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const NAME: &str = "server-control";
 
@@ -49,7 +49,9 @@ fn drive(c: &mut Driven, report: &mut StageReport) -> Result<(), String> {
     c.ask(json!({"cmd": "assert", "state": {"clients.clients": {"len": 3}}}))?;
 
     let script = c.state("script")?;
-    let errors = script["errors"].as_u64().unwrap_or(u64::MAX);
+    let errors = script["errors"]
+        .as_array()
+        .map_or(u64::MAX, |list| list.len() as u64);
     report
         .metrics
         .insert("script_errors".to_owned(), errors as f64);
@@ -83,9 +85,20 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         Err(e) => return Ok(report.with_status(Status::Failed).with_reason(e)),
     };
     let outcome = (|| {
-        let addr = fs::read_to_string(&addr_file)
-            .map_err(|e| format!("cannot read {}: {e}", addr_file.display()))?;
-        let addr = addr.trim();
+        // The server binds its channel after the map loads, which can be after `boot_with_control` returns.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let addr = loop {
+            if let Ok(s) = fs::read_to_string(&addr_file)
+                && let Some(line) = s.lines().next().filter(|l| l.contains(':'))
+            {
+                break line.trim().to_owned();
+            }
+            if Instant::now() > deadline {
+                return Err(format!("the server never wrote {}", addr_file.display()));
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        };
+        let addr = addr.as_str();
         report.notes.push(format!("channel {addr}"));
         let mut c = Driven::connect(addr, &dir)?;
         drive(&mut c, &mut report)
