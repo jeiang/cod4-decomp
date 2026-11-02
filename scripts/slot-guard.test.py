@@ -119,6 +119,18 @@ class SlotGuard(unittest.TestCase):
         self.assertEqual(r.returncode, 7, r.stderr)
         self.assertEqual(r.stdout.strip(), "None worker-a")
 
+    @unittest.skipIf(os.geteuid() == 0, "root writes into a read-only directory")
+    def test_a_run_info_that_cannot_be_written_is_reported_and_the_run_still_waits(self):
+        self.lease()
+        # One run first, so the slot's run lock file exists; then nothing new can be written in the state directory.
+        self.assertEqual(self.guard("run", "1", "--", sys.executable, "-c", "pass", token=TOKEN_A).returncode, 0)
+        os.chmod(self.dir, 0o555)
+        self.addCleanup(os.chmod, self.dir, 0o755)
+        code = "import time, sys; time.sleep(0.5); sys.exit(3)"
+        r = self.guard("run", "1", "--", sys.executable, "-c", code, token=TOKEN_A)
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertIn("run-info was not written", r.stderr)
+
     def test_live_run_blocks_release_reassignment_and_a_second_run(self):
         self.lease()
         run = self.start("run", "1", "--", *self.held_command("a"), token=TOKEN_A)

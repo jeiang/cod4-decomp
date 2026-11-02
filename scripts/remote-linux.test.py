@@ -69,17 +69,19 @@ class RemoteLinux(unittest.TestCase):
         executable(os.path.join(self.bin, "ssh"), SSH)
         executable(os.path.join(self.bin, "nix"), NIX)
         executable(os.path.join(self.tmp, "host-run"), HOST_RUN)
-        git = ["git", "-c", "user.name=test", "-c", "user.email=test@example.invalid"]
-        subprocess.run(["git", "init", "-q", self.repo], check=True)
+        # The temp repo must not depend on the host's git config (a global `commit.gpgsign` fails every commit here).
+        self.git_env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        git = ["git", "-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false"]
+        subprocess.run(["git", "init", "-q", self.repo], check=True, env=self.git_env)
         with open(os.path.join(self.repo, "version.txt"), "w") as f:
             f.write("v1\n")
-        subprocess.run([*git, "-C", self.repo, "add", "version.txt"], check=True)
-        subprocess.run([*git, "-C", self.repo, "commit", "-q", "-m", "v1"], check=True)
+        subprocess.run([*git, "-C", self.repo, "add", "version.txt"], check=True, env=self.git_env)
+        subprocess.run([*git, "-C", self.repo, "commit", "-q", "-m", "v1"], check=True, env=self.git_env)
         self.commit = subprocess.run(["git", "-C", self.repo, "rev-parse", "HEAD"], check=True, capture_output=True,
                                      text=True).stdout.strip()
 
     def remote(self, *args, **env):
-        full = dict(os.environ, PATH=self.bin + os.pathsep + os.environ["PATH"], COD4E_LINUX_HOST="testhost",
+        full = dict(self.git_env, PATH=self.bin + os.pathsep + os.environ["PATH"], COD4E_LINUX_HOST="testhost",
                     FAKE_HOME=self.home, FAKE_HOST_RUN=os.path.join(self.tmp, "host-run"), FAKE_RECORD=self.record)
         for k in ("COD4E_LINUX_SLOT", "COD4E_LINUX_SLOT_TOKEN", "COD4E_LINUX_EXEC", "COD4E_LINUX_CHECKS",
                   "COD4E_SLOT_GUARD_DIR", "COD4E_SLOT_TOKEN"):

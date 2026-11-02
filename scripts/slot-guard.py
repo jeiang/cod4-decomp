@@ -295,8 +295,14 @@ def cmd_run(args):
             os.close(held)
             print(f"slot-guard: cannot start {command[0]}: {e}", file=sys.stderr)
             return 127
-        st.write(slot, "run-info", {"pid": os.getpid(), "child": child[0].pid, "owner": lease["owner"],
-                                    "started": now(), "cwd": os.getcwd()})
+        # The command is running and holds the slot: a failed write (a full disk) must not end the guard under it, or
+        # the caller would report the run over while it goes on. Say so and wait for the command as usual.
+        try:
+            st.write(slot, "run-info", {"pid": os.getpid(), "child": child[0].pid, "owner": lease["owner"],
+                                        "started": now(), "cwd": os.getcwd()})
+        except OSError as e:
+            print(f"slot-guard: slot {slot} run started (pid {child[0].pid}) but its run-info was not written ({e}); "
+                  f"status will not name this run", file=sys.stderr)
     for signum in pending:
         child[0].send_signal(signum)
     status = child[0].wait()

@@ -26,8 +26,10 @@
 # and before new ones start, so timing checks see a quiet host; it gets its own headless display like a slot.
 # Builds and tests run at nice 19.
 set -euo pipefail
-# The log is written by this script, so it is whole however the caller filters the output. stdout and stderr stay
-# apart (each copied to the log as well); the EXIT trap waits for both copies before it exits with the run's status.
+# The log is written by this script, so it is whole whatever the caller keeps of the output, as long as the caller
+# reads it to the end (`| tail`, `| grep`, a file): a reader that closes early (`| head`) stops the copies, and the log
+# with them. stdout and stderr stay apart (each copied to the log as well); the EXIT trap waits for both copies before
+# it exits with the run's status.
 mkdir -p bundles/logs
 log=$(mktemp "bundles/logs/remote-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXXXX")
 exec 3>&1 4>&2
