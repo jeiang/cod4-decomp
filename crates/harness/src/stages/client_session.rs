@@ -3,7 +3,7 @@
 //! `--listen` path (no menus: the default team and class answers); run 2 starts from the main menu and clicks
 //! through the stock menus (Start New Server, the server's team menu, the class menu, Assault). Each run must
 //! complete every step and report that the local player spawned. Run 4 is the original's launch line (#397): the
-//! client starts with `+set cg_fov 90 +exec <file> +name <nick> +connect <server>` beside its own `--` options and
+//! client starts with `+set cg_fov 75 +exec <file> +name <nick> +connect <server>` beside its own `--` options and
 //! must join the `cod4e-server` started for it under that name, with the variable set over the profile's config and
 //! the file run, read back through the control channel. Needs a display and the install; skips without.
 use super::client_dedicated::{Dedicated, lists_player, locate_server};
@@ -196,19 +196,28 @@ pub(super) fn verdict(report: &Value) -> Option<String> {
 }
 
 /// Why the other players were not in the picture, or `None`: every player the server announced must have been built
-/// and drawn in some frame. A mode without teams once drew nobody, and one that drew some of them was left to pass
-/// with `drawn == 0` checked only; a partial draw is the same bug seen earlier.
+/// and drawn in some frame. Compare client identities over the whole run, not simultaneous maxima: a death can make
+/// one frame announce ten players and draw nine even when all ten were drawn at different times.
 fn players_problem(net: &Value) -> Option<String> {
-    let seen = net["players_seen_max"].as_u64().unwrap_or(0);
-    let drawn = net["players_drawn_max"].as_u64().unwrap_or(0);
+    let (Some(seen), Some(drawn)) = (
+        net["players_seen"].as_array(),
+        net["players_drawn"].as_array(),
+    ) else {
+        return Some("the run reported no per-player draw counters".into());
+    };
     if let Some(f) = net["player_faults"].as_array().filter(|f| !f.is_empty()) {
         return Some(format!("other players could not be drawn: {f:?}"));
     }
-    if seen == 0 {
+    if seen.is_empty() {
         return Some("the server announced no other player to draw".into());
     }
-    (drawn < seen).then(|| {
-        format!("{drawn} of the {seen} other players the server announced were ever drawn")
+    let missing: Vec<&Value> = seen.iter().filter(|id| !drawn.contains(id)).collect();
+    (!missing.is_empty()).then(|| {
+        format!(
+            "{} of the {} other players the server announced were ever drawn (never drawn: {missing:?})",
+            seen.len() - missing.len(),
+            seen.len()
+        )
     })
 }
 
@@ -356,7 +365,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
 /// The name the command-line run joins under (the server keeps 15 characters).
 const CMDLINE_NICK: &str = "CmdLineTest";
 
-/// The original's launch line: `+set cg_fov 90 +exec <file> +name <nick> +connect 127.0.0.1:<port>`, with the
+/// The original's launch line: `+set cg_fov 75 +exec <file> +name <nick> +connect 127.0.0.1:<port>`, with the
 /// harness's `--` options after it (`Driven` adds `--control`, `--config-dir`, `--harness-profile`, `--out`). The
 /// harness profile's config sets `cg_fov 65`, so a `+set` the configs overwrite fails; the file sets a marker only it
 /// sets; the join must reach the server, which must list the player under the `+name` given.
@@ -381,7 +390,7 @@ fn command_line(ctx: &StageCtx, client: &Path, install: &Path) -> Result<String,
         &[
             "+set",
             "cg_fov",
-            "90",
+            "75",
             "+exec",
             &cfg,
             "+name",
@@ -397,9 +406,9 @@ fn command_line(ctx: &StageCtx, client: &Path, install: &Path) -> Result<String,
             "+connect did not join the server",
         )?;
         let fov = c.ask(json!({"cmd": "cvar", "name": "cg_fov"}))?;
-        if fov["value"] != json!("90") {
+        if fov["value"] != json!("75") {
             return Err(format!(
-                "+set cg_fov 90 did not outrank the profile's config: cg_fov is {}",
+                "+set cg_fov 75 did not outrank the profile's config: cg_fov is {}",
                 fov["value"]
             ));
         }
@@ -423,7 +432,7 @@ fn command_line(ctx: &StageCtx, client: &Path, install: &Path) -> Result<String,
     }
     dedicated.quit();
     Ok(format!(
-        "+set cg_fov 90 +exec cmdline.cfg +name {CMDLINE_NICK} +connect {target}: joined under that name, cg_fov 90 \
+        "+set cg_fov 75 +exec cmdline.cfg +name {CMDLINE_NICK} +connect {target}: joined under that name, cg_fov 75 \
          over the profile's 65, the file ran"
     ))
 }
@@ -444,34 +453,43 @@ mod tests {
     #[test]
     fn announced_players_must_be_drawn() {
         assert_eq!(
-            players_problem(&json!({"players_seen_max": 0, "players_drawn_max": 0})).unwrap(),
+            players_problem(&json!({"players_seen": [], "players_drawn": []})).unwrap(),
             "the server announced no other player to draw"
         );
         assert_eq!(
             players_problem(
-                &json!({"players_seen_max": 3, "players_drawn_max": 3, "player_faults": []})
+                &json!({"players_seen": [1, 2, 3], "players_drawn": [1, 2, 3], "player_faults": []})
             ),
+            None
+        );
+        // Different per-frame maxima are not a missing draw: all three identities were drawn over the run.
+        assert_eq!(
+            players_problem(&json!({"players_seen_max": 3, "players_drawn_max": 2,
+                "players_seen": [1, 2, 3], "players_drawn": [1, 2, 3], "player_faults": []})),
             None
         );
         // A partial draw is the same bug caught earlier.
         assert!(
             players_problem(
-                &json!({"players_seen_max": 3, "players_drawn_max": 2, "player_faults": []})
+                &json!({"players_seen": [1, 2, 3], "players_drawn": [1, 2], "player_faults": []})
             )
             .unwrap()
             .contains("2 of the 3")
         );
         assert!(
             players_problem(
-                &json!({"players_seen_max": 3, "players_drawn_max": 0, "player_faults": []})
+                &json!({"players_seen": [1, 2, 3], "players_drawn": [], "player_faults": []})
             )
             .unwrap()
             .contains("0 of the 3")
         );
         assert!(
-            players_problem(&json!({"players_seen_max": 3, "players_drawn_max": 3, "player_faults": ["no body"]}))
-                .unwrap()
-                .contains("no body")
+            players_problem(
+                &json!({"players_seen": [1, 2, 3], "players_drawn": [1, 2, 3],
+                "player_faults": ["no body"]})
+            )
+            .unwrap()
+            .contains("no body")
         );
     }
 

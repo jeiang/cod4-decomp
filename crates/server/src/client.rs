@@ -481,7 +481,7 @@ impl Game {
         let Some(world) = self.world.as_ref() else {
             return;
         };
-        let eye = crate::fire::view_origin(&seen);
+        let eye = crate::fire::view_origin(&seen, &self.pm_params.bob);
         let (forward, _, up) = pm::math::angle_vectors(&seen.viewangles);
         let end: Vec3 = std::array::from_fn(|i| eye[i] - 40.0 * forward[i] + 10.0 * up[i]);
         let t = sim::cm::Collide::trace(
@@ -763,7 +763,11 @@ impl Game {
         c.ps.speed = self.cvars.int("g_speed");
         // `ClientThink_real` works out the aim of this command's shots before `Pmove`, from the state as the last
         // command left it, and caps the step at 200 ms.
-        c.gun_step(self.weapons.get(c.ps.weapon as u16), msec.min(200));
+        c.gun_step(
+            self.weapons.get(c.ps.weapon as u16),
+            msec.min(200),
+            &self.pm_params.bob,
+        );
         let Some(world) = self.world.as_ref() else {
             return;
         };

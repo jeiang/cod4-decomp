@@ -1115,7 +1115,8 @@ impl Viewer {
         }
         if let Some(n) = net.as_mut() {
             n.set_profile(&stats);
-            // A direct join began before the config was read: its userinfo takes the `name` the configs set now.
+            // A direct join began before the config was read: its sound fade and userinfo take the configured values.
+            n.map_init(crate::sound::level_fade_of(&input.cvars));
             let (rate, snaps) = netplay_rates(&input);
             n.set_userinfo(&player_name(&self.cli, &input), rate, snaps);
         }
@@ -1728,6 +1729,7 @@ impl Viewer {
             let t_net = Instant::now();
             net.set_volume(crate::sound::volume_of(&st.input.cvars));
             net.set_sound_mix(crate::sound::mix_of(&st.input.cvars));
+            net.set_level_fade_time(crate::sound::level_fade_of(&st.input.cvars));
             net.set_client_side_effects(crate::ambient::enabled_by(&st.input.cvars));
             net.set_voice(st.input.cvar("cl_voice").is_none_or(|v| v.trim() != "0"));
             net.set_demo_paused(
@@ -1932,21 +1934,11 @@ impl Viewer {
                     }
                     // `R_SetFilmInfo`: the vision set's film block, then (with cheats on) the `r_desaturation`,
                     // `r_contrast` and `r_brightness` tweaks on top of it (desaturation is applied twice, as stock
-                    // does). The base is the look's each frame, so the tweaks never accumulate.
+                    // does). The base is the look's each frame (the vision channel shown), so the tweaks never
+                    // accumulate.
                     let cheats = st.input.cvars.bool("sv_cheats");
-                    let base = nf
-                        .look
-                        .vision
-                        .map(|(_, f)| f)
-                        .or(st.film_base)
-                        .unwrap_or(r.post.film);
+                    let (glow_base, base) = nf.look.vision;
                     st.film_base = Some(base);
-                    let glow_base = nf
-                        .look
-                        .vision
-                        .map(|(g, _)| g)
-                        .or(st.glow_base)
-                        .unwrap_or(r.post.glow);
                     st.glow_base = Some(glow_base);
                     r.post.glow = crate::gfx::glow(&st.input.cvars, glow_base);
                     r.post.film = crate::gfx::film(&st.input.cvars, base);
@@ -3495,6 +3487,12 @@ fn script_step(st: &mut State) -> bool {
                     u8::from(r.settings.dof && r.post.dof.is_some_and(|d| d.active())).to_string()
                 }),
                 "blur_radius" => st.renderer.as_ref().map(|r| r.post.blur_radius.to_string()),
+                // The window aspect the last `r_blur` filter was shaped for (`RB_VirtualToSceneRadius`), 2 decimals.
+                "blur_shape" => st
+                    .renderer
+                    .as_ref()
+                    .and_then(|r| r.blur_shape())
+                    .map(|s| format!("{s:.2}")),
                 "glow" => st
                     .renderer
                     .as_ref()
@@ -3848,6 +3846,23 @@ fn script_step(st: &mut State) -> bool {
                             });
                         p.map(|(x, y)| format!("{x} {y}"))
                     }
+                    // `in <ms>` when the level's sound faded in (`SND_MapInit`): the quietest channel under half
+                    // volume in the first mixed chunk and back at full after 300 ms; otherwise the two volumes.
+                    "levelfade" => {
+                        st.net
+                            .as_ref()
+                            .and_then(|n| n.level_fade())
+                            .map(|(ms, start, after)| match after {
+                                Some(after) if start < 0.5 && after >= 0.99 => format!("in {ms}"),
+                                _ => format!("{ms}ms start {start:.2} after_300ms {after:?}"),
+                            })
+                    }
+                    // `1` when the eye bobbed more than a tenth of a unit since `bobmark` (`bg_bobMax`,
+                    // `bg_bobAmplitude*`), `0` when it did not.
+                    "eyebob" => st
+                        .net
+                        .as_ref()
+                        .map(|n| u8::from(n.eye_bob() > 0.1).to_string()),
                     "subtitle" => sh.map(|s| {
                         u8::from(s.st.feed.active(crate::hud::SUBTITLE, s.st.live.time)).to_string()
                     }),
@@ -3892,6 +3907,13 @@ fn script_step(st: &mut State) -> bool {
                 st.fx_mark = n.fx_counts();
             }
             done(st.net.is_some(), sc, "fx marked".into());
+        }
+        // `bobmark` starts the eye bob probe over; `cgis=eyebob <0|1>` afterwards says whether the eye bobbed.
+        "bobmark" => {
+            if let Some(n) = st.net.as_mut() {
+                n.bob_mark();
+            }
+            done(st.net.is_some(), sc, "bob marked".into());
         }
         // A bullet of the weapon in hand strikes a player 64 units ahead on the next frame (`hitflesh`): the flesh
         // impact effect, or the no-blood one with `cg_blood` off.
@@ -4571,7 +4593,9 @@ fn recover_surface(
     if st.loading.is_some() {
         return Ok(SurfaceAction::Retry);
     }
-    if st.gpu.lost().is_some() {
+    // A device lost under a frame can fail the acquisition before a plain poll reports it; wait for it here, which
+    // also lets wgpu release the surface's images before recovery drops the surface.
+    if st.gpu.lost_waiting().is_some() {
         return Ok(SurfaceAction::DeviceLost);
     }
     if matches!(outcome, C::Timeout | C::Occluded) {
@@ -4823,9 +4847,11 @@ fn vid_restart(cli: &Cli, st: &mut State) {
 ///
 /// Never while a map loads: reconfiguring a surface fails (a panic) when another thread submits to the queue at the
 /// same moment, and the loader does. The size is kept in `pending_resize` until the load is done.
-/// `cg_fov` in degrees at 4:3, within the original's 1 to 160.
+/// `cg_fov` in degrees at 4:3, within `iw3mp.exe` 1.7's registered 65 to 80 (a value written past the console's
+/// range check, such as `--fov`, is held to it).
 fn cg_fov(input: &Input) -> f32 {
-    input.cvars.f32("cg_fov").clamp(1.0, 160.0)
+    let (min, max) = crate::input::Cvars::float_domain("cg_fov").unwrap_or((65.0, 80.0));
+    input.cvars.f32("cg_fov").clamp(min, max)
 }
 
 /// The world's field of view in degrees at 4:3 (`CG_GetViewFov`).
@@ -5026,6 +5052,7 @@ fn finish_load(
         let name = player_name(cli, &st.input);
         let mut net =
             NetPlay::connect(library, &data, addr, &name, &password, limits, false, sound)?;
+        net.map_init(crate::sound::level_fade_of(&st.input.cvars));
         if let Some(path) = st.pending_demo.take() {
             net.play_demo(&path)?;
         }
@@ -5774,6 +5801,9 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
                 "yaw": st.yaw.to_degrees(),
                 "roll": st.roll.to_degrees(),
                 "drawn_frames": st.samples.len(),
+                // `cg_fov` widened for the display (Hor+), degrees, and the aspect it was widened for.
+                "fov_x": st.fov_x.to_degrees(),
+                "aspect": st.aspect.unwrap_or(st.config.width as f32 / st.config.height.max(1) as f32),
             }),
             "draw" => json!({
                 "surfaces": st.surfaces_drawn.last().copied(),

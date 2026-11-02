@@ -71,9 +71,30 @@ fn drive(c: &mut Driven, report: &mut StageReport) -> Result<(), String> {
         secs(120),
         "player did not spawn",
     )?;
-    for line in ["noclip", "set cg_draw2D 0", "set cg_drawGun 0"] {
+    // The regions below were placed at the issue's field of view, 80 (the client's default then; stock's is 65).
+    for line in [
+        "noclip",
+        "set cg_draw2D 0",
+        "set cg_drawGun 0",
+        "set cg_fov 80",
+    ] {
         c.ask(json!({"cmd": "exec", "line": line}))?;
     }
+    // Stock `_globallogic::matchStartTimer` shows `mpIntro` (film desaturation 1, contrast 1.8) through the prematch
+    // and blends to the map's own set over 2 s after it; the intro's contrast crushes the tyre's shadowed corner to
+    // black with or without the tyre. The pictures are judged in the map's look.
+    c.until(
+        json!({"look.naked": "mp_crash"}),
+        secs(90),
+        "the prematch did not end in the map's vision set",
+    )?;
+    let blend = c.lookup("look.blend")?;
+    let settled = blend["start_ms"].as_f64().unwrap_or(0.0) + blend["ms"].as_f64().unwrap_or(0.0);
+    c.until(
+        json!({"look.time": {"ge": settled}}),
+        secs(10),
+        "the blend to the map's vision set did not finish",
+    )?;
     c.ask(json!({"cmd": "step", "frames": 30}))?;
     // A script_model at the garage car's spot (within `r` units in the plane), by kind and origin alone.
     let near = |e: &serde_json::Value, r: f64| {

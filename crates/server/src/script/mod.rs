@@ -152,6 +152,13 @@ impl ScriptHost<'_> {
         // disconnect callback itself.
         if self.game.run_calls_depth == 0 {
             self.game.finish_disconnects(vm);
+            // An exploded missile whose blast queued damage callbacks goes now: stock `G_ExplodeMissile` frees it
+            // after the whole `G_RadiusDamage`, whose callbacks run inline and read it as the inflictor
+            // (`_weapons::onWeaponDamage` measures the concussion from it), including after the nested run
+            // `finishPlayerDamage` makes.
+            for n in std::mem::take(&mut self.game.free_after_calls) {
+                self.game.free_entity(vm, n);
+            }
         }
     }
 
