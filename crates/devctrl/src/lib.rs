@@ -28,12 +28,16 @@ mod transport;
 
 pub use channel::{Channel, Handler, Outcome};
 pub use protocol::{Reply, Request, base64, lookup, matches, num, reply, text_lines};
-pub use transport::{QueueTransport, Transport};
 #[cfg(not(target_arch = "wasm32"))]
-pub use transport::{StdioTransport, TcpTransport};
+pub use transport::{PolledTcpTransport, StdioTransport, TcpTransport};
+pub use transport::{QueueTransport, Transport};
 
 /// The most bytes one request or reply line may hold; a longer line is refused rather than buffered for ever.
 pub const MAX_LINE: usize = 4 * 1024 * 1024;
+
+/// The most reply bytes a [`PolledTcpTransport`] connection may leave untaken: two of the longest replies. A peer
+/// that lets more pile up has stopped reading and is dropped.
+pub const MAX_PENDING: usize = 2 * MAX_LINE;
 
 /// The JSON `null`, for a request without an `id`.
 pub fn null() -> serde_json::Value {

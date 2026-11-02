@@ -184,16 +184,11 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if let Some(options) = control {
-        let transport =
-            match devctrl::TcpTransport::bind(options.port, options.addr_file.as_deref()) {
-                Ok(t) => t,
-                Err(e) => {
-                    tracing::error!(error = %e, "the control channel did not open");
-                    return ExitCode::FAILURE;
-                }
-            };
-        s.attach_control(devctrl::Channel::new(Box::new(transport)));
+    if let Some(options) = control
+        && let Err(e) = s.listen_control(options.port, options.addr_file.as_deref())
+    {
+        tracing::error!(error = %e, "the control channel did not open");
+        return ExitCode::FAILURE;
     }
     // Whatever is typed on the terminal runs as a console command (`status`, `kick name`, `map x`).
     let (tx, rx) = std::sync::mpsc::channel();

@@ -25,6 +25,11 @@ Its requests are `ping`, `state`, `cvar`, `cvars`, `exec`, `wait`, `assert` and 
 server's own console. A section query is wrapped under its name (`state what=clients` answers with `clients`), so
 `wait` and `assert` predicates use paths such as `clients.clients.2` and `script.errors`.
 
+The server stays on its one thread: the listener and its connections are nonblocking and serviced between ticks,
+and replies a client has not read yet wait in a per-connection buffer. A client that leaves more than 8 MiB
+(`devctrl::MAX_PENDING`, two of the longest replies) unread has stopped reading; the server drops it with a `warn`
+rather than hold up a frame.
+
 ## Requests
 
 Every request is an object with an optional `id` (echoed back) and a `cmd`:

@@ -1,19 +1,41 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! The headless server's dev control channel: line JSON over an optional loopback TCP listener.
 //!
-//! The channel is serviced by the simulation thread between console commands and ticks. `wait` remains at the
-//! front of [`devctrl::Channel`]'s queue until its expectation matches or its wall-clock timeout expires; it never
-//! sleeps or moves the server onto another thread.
+//! The channel is serviced by the simulation thread between console commands and ticks, and its listener starts no
+//! thread of its own: [`devctrl::PolledTcpTransport`] accepts, reads and writes nonblocking from that service, and
+//! drops a client that stops reading its replies rather than wait for it. `wait` remains at the front of
+//! [`devctrl::Channel`]'s queue until its expectation matches or its wall-clock timeout expires; it never sleeps or
+//! moves the server onto another thread.
 
 use crate::server::Server;
-use devctrl::{Channel, Handler, Outcome, Reply, Request, lookup, reply};
+use devctrl::{Handler, Outcome, Reply, Request, lookup, reply};
 use serde_json::{Map, Value, json};
 use std::time::{Duration, Instant};
 
+/// Opens the control listener on loopback `port` (0 picks a free one), writing its `127.0.0.1:<port>` address to
+/// `addr_file` when given. Returns the channel and the address it took.
+#[cfg(not(target_arch = "wasm32"))]
+fn listen(
+    port: u16,
+    addr_file: Option<&std::path::Path>,
+) -> Result<(devctrl::Channel, std::net::SocketAddr), String> {
+    let transport = devctrl::PolledTcpTransport::bind(port, addr_file)?;
+    let addr = transport.addr();
+    Ok((devctrl::Channel::new(Box::new(transport)), addr))
+}
+
 impl Server {
-    /// Attaches the control channel opened by the dedicated server's command line.
-    pub fn attach_control(&mut self, channel: Channel) {
+    /// Opens the dedicated server's control listener (`--control`, `--control-file`) and attaches it to this
+    /// server, which services it from its own thread each frame.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn listen_control(
+        &mut self,
+        port: u16,
+        addr_file: Option<&std::path::Path>,
+    ) -> Result<std::net::SocketAddr, String> {
+        let (channel, addr) = listen(port, addr_file)?;
         self.control = Some(channel);
+        Ok(addr)
     }
 
     /// Services queued control requests on the simulation thread.
@@ -217,4 +239,116 @@ fn observed(doc: &Value, spec: &Value) -> Value {
         );
     }
     Value::Object(out)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::net::TcpStream;
+
+    /// The names of this process's threads (`/proc/self/task/*/comm`).
+    #[cfg(target_os = "linux")]
+    fn thread_names() -> Vec<String> {
+        std::fs::read_dir("/proc/self/task")
+            .expect("/proc/self/task")
+            .filter_map(|t| std::fs::read_to_string(t.ok()?.path().join("comm")).ok())
+            .map(|n| n.trim().to_owned())
+            .collect()
+    }
+
+    /// Asserts that no control thread runs. Threads are matched by name rather than counted, since the test harness
+    /// runs other tests' threads beside this one; the threaded transport names its own `control-accept` and
+    /// `control-conn-<n>`.
+    #[cfg(target_os = "linux")]
+    fn assert_no_control_thread() {
+        let names = thread_names();
+        assert!(
+            !names.iter().any(|n| n.starts_with("control")),
+            "a control thread runs: {names:?}"
+        );
+    }
+
+    /// The listener `--control` opens accepts, reads and answers from the thread that services it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_control_listener_starts_no_thread() {
+        use std::io::{BufRead, BufReader};
+
+        /// Answers every request, standing in for the server where no game install is needed.
+        struct Pong;
+
+        impl Handler for Pong {
+            fn handle(&mut self, req: &Request) -> Outcome {
+                Outcome::Done(Reply::ok(req.id.clone()).set("pong", true))
+            }
+        }
+
+        let (mut channel, addr) = listen(0, None).expect("control");
+        let c = TcpStream::connect(addr).unwrap();
+        (&c).write_all(b"{\"id\":1,\"cmd\":\"ping\"}\n").unwrap();
+        let end = Instant::now() + Duration::from_secs(5);
+        while channel.answered() == 0 {
+            channel.service(&mut Pong);
+            assert!(Instant::now() < end, "the ping was not answered");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let mut back = String::new();
+        BufReader::new(&c).read_line(&mut back).unwrap();
+        assert!(back.contains(r#""pong":true"#), "{back}");
+        assert_no_control_thread();
+    }
+
+    /// A client that keeps asking for the whole state and never reads a reply: every frame still runs at once, and
+    /// the server drops the client once its untaken replies pass [`devctrl::MAX_PENDING`].
+    ///
+    /// Needs a game install (`COD4_PATH`); skips without one.
+    #[test]
+    fn a_client_that_stops_reading_is_dropped_without_stalling_frames() {
+        let Some(root) = std::env::var_os("COD4_PATH").map(std::path::PathBuf::from) else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let args = [
+            "+set",
+            "net_port",
+            "0",
+            "+set",
+            "g_gametype",
+            "war",
+            "+map",
+            "mp_crash",
+        ]
+        .map(String::from);
+        let mut s = Server::boot(&root, &args, false).expect("boot");
+        let addr = s.listen_control(0, None).expect("control");
+        let mut c = TcpStream::connect(addr).unwrap();
+        c.set_nonblocking(true).unwrap();
+        let ask = "{\"cmd\":\"state\"}\n".repeat(64);
+        let mut dropped = false;
+        for _ in 0..2000 {
+            // Once the server has dropped the client these writes fail; only the server's frames are under test.
+            let _ = c.write_all(ask.as_bytes());
+            let ticks = s.ticks;
+            let started = Instant::now();
+            let ((), events) = logging::capture(|| s.run_frames(1));
+            let took = started.elapsed();
+            assert_eq!(s.ticks, ticks + 1, "the frame did not run");
+            // A blocking writer waits out its write timeout (5 s before this fix) on a client that does not read.
+            assert!(took < Duration::from_secs(4), "a frame took {took:?}");
+            if events
+                .iter()
+                .any(|e| e.message.contains("does not read its replies"))
+            {
+                dropped = true;
+                break;
+            }
+        }
+        assert!(dropped, "the client that does not read was never dropped");
+        let ticks = s.ticks;
+        s.run_frames(10);
+        assert_eq!(s.ticks, ticks + 10);
+        #[cfg(target_os = "linux")]
+        assert_no_control_thread();
+    }
 }
