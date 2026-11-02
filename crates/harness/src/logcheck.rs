@@ -68,8 +68,8 @@ pub const ALLOWED: &[Allow] = &[
         reason: "g_smoothClients is on by default and player entity states are not extrapolated (#514); warned at \
                  each map load (round restarts included), logged at the 1st, 2nd, 4th, 8th, ... time per process",
         stages: &[],
-        // Measured: 1 on client-hud and net-match; 2 on script-builtins (its in-process server and its listen client);
-        // 3 on client-sd-rounds (four loads: the map, two round restarts, the rotation). 4 lines cover up to 15 loads.
+        // Once per server instance. Measured on main 15caa930 (bundle cod4e-run-20261102-204501): 4 on net-info
+        // (its extra dedicated servers), 3 on client-host-console, 2 on script-builtins, 1 on client-hud/net-match.
         max: Some(4),
     },
     // Timing of the harness's own clients and bots.
@@ -166,6 +166,12 @@ pub const ALLOWED: &[Allow] = &[
         reason: "client-error has a connect time out and a player kicked on purpose",
         stages: &["client-error"],
         max: Some(3), // measured 2 on the Linux host, 2026-10-29,
+    },
+    Allow {
+        contains: &["cod4e::voice", "microphone cannot be opened", "#488"],
+        reason: "client-hud holds +talk and shows the record meter on a host with no capture device (#488)",
+        stages: &["client-hud"],
+        max: Some(6), // measured 1 with +talk alone on the Linux host, 2026-11-01; the meter adds an open (5 s retry)
     },
     Allow {
         contains: &["server::server", "unknown client command", "frobnicate"],

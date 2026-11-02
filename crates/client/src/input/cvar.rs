@@ -38,6 +38,10 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     ("cl_voice", "1", true),
     ("cl_allowdownload", "1", true),
     ("cl_freezedemo", "0", false),
+    // `winvoice_mic_scaler` scales the microphone (`win_voice.cpp:601`); `cg_drawTalk` picks the talker icons, an enum
+    // (`NONE`, `ALL`, `FRIENDLY`, `ENEMY`) given by name or index (`cg_newDraw_mp.cpp:72`).
+    ("winvoice_mic_scaler", "1", true),
+    ("cg_drawtalk", "ALL", false),
     ("in_gamepad_deadzone", "0.2", true),
     ("in_gamepad_yawrate", "140", true),
     ("in_gamepad_pitchrate", "100", true),

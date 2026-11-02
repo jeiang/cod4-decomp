@@ -60,6 +60,7 @@ pub mod script_pool;
 pub mod selftest;
 pub mod server;
 pub mod server_control;
+mod voice_speaker;
 pub mod web_client;
 pub mod web_join;
 pub mod web_match;
