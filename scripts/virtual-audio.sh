@@ -28,8 +28,9 @@ ctl_type.pulse { lib "$plugins/libasound_module_ctl_pulse.so" }
 pcm.!default { type pulse; server "unix:$dir/native" }
 ctl.!default { type pulse; server "unix:$dir/native" }
 EOF
-# No session bus (the host's would see a second server's name) and no realtime request (rtkit is on that bus).
-env -u DBUS_SESSION_BUS_ADDRESS HOME="$dir" XDG_RUNTIME_DIR="$dir" \
+# No session bus (the host's would see a second server's name), no realtime request (rtkit is on that bus) and none of
+# the host's pulse runtime dir.
+env -u DBUS_SESSION_BUS_ADDRESS -u PULSE_RUNTIME_PATH HOME="$dir" XDG_RUNTIME_DIR="$dir" \
   pulseaudio -n -F "$dir/slot.pa" --daemonize=no --exit-idle-time=-1 --use-pid-file=no --system=no \
   --realtime=no --high-priority=no --log-target=file:"$dir/pulse.log" &
 pulse=$!
