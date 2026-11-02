@@ -298,10 +298,20 @@ impl Events {
                     etype::GENERAL | etype::MISSILE => 0,
                     _ => e.event_seq,
                 });
-            let count = e.event_seq.wrapping_sub(last).min(4);
+            // `CG_CheckEvents` (cg_event.cpp:1374-1409) on the 8-bit sequence: a sequence of 0 plays nothing; the last
+            // one counts as 256 lower only when more than 64 ahead (a wrap), otherwise one ahead of the new sequence
+            // (a killcam's past behind the live entity at its number) plays nothing; at most the last 4 play.
+            let next = i32::from(e.event_seq);
+            let count = if next == 0 {
+                0
+            } else {
+                let last = i32::from(last);
+                let last = if last > next + 64 { last - 256 } else { last };
+                usize::try_from((next - last).clamp(0, 4)).unwrap_or(0)
+            };
             self.seen.insert(e.number, (e.event_seq, None));
             let recent = e.recent_events();
-            for &(event, parm) in &recent[4 - usize::from(count)..] {
+            for &(event, parm) in &recent[4 - count..] {
                 if event == ev::PLAY_FX_ON_TAG {
                     let mut event_state = e.clone();
                     event_state.event = event;
@@ -541,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn leaving_a_killcam_resets_every_entity_but_entering_one_does_not() {
+    fn a_killcam_plays_a_past_sequence_only_when_ahead_and_leaving_it_resets_every_entity() {
         let mut events = Events::default();
         events.take_commands(&mut vec!["fx 1 bolt".into()]);
         events.set_effect_tags(&[(net::ui::cs::EFFECT_TAGS + 1, "01tag_origin".into())]);
@@ -551,7 +561,6 @@ mod tests {
         live.set_recent_events([(ev::PLAY_FX_ON_TAG, 1); 4]);
         let mut past = live.clone();
         past.etype = etype::PLANE;
-        past.event_seq = 4;
         let killcam = |entities: &[EntityState]| {
             let mut s = snap(entities);
             s.follow = Some(net::snapshot::Follow {
@@ -564,18 +573,30 @@ mod tests {
             s
         };
         assert!(events.scan(&snap(std::slice::from_ref(&live))).is_empty());
-        // Entering, the past's entity under a number the live one held is not reset (`CG_TransitionKillcam` resets
-        // nothing then): its events differ in sequence and play.
+        // Entering resets nothing (`CG_TransitionKillcam`): a past entity whose sequence is ahead of the live one's at
+        // its number plays its last events.
+        past.event_seq = 9;
         assert_eq!(events.scan(&killcam(std::slice::from_ref(&past))).len(), 4);
         assert!(
             events
                 .scan(&killcam(std::slice::from_ref(&past)))
                 .is_empty()
         );
-        // Leaving, every entity starts over as first seen: the live script model replays nothing.
+        // Leaving, every entity starts over as first seen: the live script model, behind the past's sequence, replays
+        // nothing and takes its own.
         assert!(events.scan(&snap(std::slice::from_ref(&live))).is_empty());
         live.event_seq = 6;
         assert_eq!(events.scan(&snap(std::slice::from_ref(&live))).len(), 1);
+        // A past sequence behind the live one (not a wrap: within 64) plays nothing (`CG_CheckEvents`).
+        past.event_seq = 4;
+        assert!(
+            events
+                .scan(&killcam(std::slice::from_ref(&past)))
+                .is_empty()
+        );
+        // Leaving, the live script model, ahead of the past's sequence, replays nothing either.
+        live.event_seq = 7;
+        assert!(events.scan(&snap(std::slice::from_ref(&live))).is_empty());
     }
 
     #[test]
@@ -594,9 +615,18 @@ mod tests {
         target.event = ev::PLAY_FX_ON_TAG;
         target.event_parm = 1;
         assert!(events.scan(&snap(std::slice::from_ref(&target))).is_empty());
+        // Wrapping to sequence 0 plays nothing (`CG_CheckEvents` skips a zero sequence); the next one counts from 0.
         target.event_seq = 0;
+        assert!(events.scan(&snap(std::slice::from_ref(&target))).is_empty());
+        target.event_seq = 1;
         assert_eq!(events.scan(&snap(std::slice::from_ref(&target))).len(), 1);
         assert!(events.scan(&snap(std::slice::from_ref(&target))).is_empty());
+        // A wrap from far behind (more than 64 ahead counts as 256 lower) plays the last four.
+        target.event_seq = 250;
+        assert!(events.scan(&snap(std::slice::from_ref(&target))).is_empty());
+        target.event_seq = 3;
+        target.set_recent_events([(ev::PLAY_FX_ON_TAG, 1); 4]);
+        assert_eq!(events.scan(&snap(std::slice::from_ref(&target))).len(), 4);
         for parm in [0, 2, 3, 4, 255] {
             target.event_seq = target.event_seq.wrapping_add(1);
             target.event_parm = parm;

@@ -869,13 +869,16 @@ const REUSE_PLANE_MODEL: &str = "vehicle_mig29_desert";
 /// drew the old model 100 ms behind, and every plane tag was reported missing. The plane, first seen with those events
 /// already raised, replays none of them (`CG_ResetEntity` for `ET_PLANE`).
 ///
-/// Then a killcam replays the plane's flight after the plane is gone and its number holds a script model with events
-/// of its own. Entering, nothing is reset (`CG_TransitionKillcam`), so the replayed plane's events play on a number the
-/// match still draws as the live script model for `INTERP_DELAY_MS`: the effects wait for the plane to be drawn rather
-/// than report its tags missing on the script model. Leaving, every entity is reset as new, so the live script model
-/// replays none of its events. KisakCOD (GPL-3.0) game_mp/g_utils_mp.cpp:1183–1214, 1287–1341 and
-/// cgame_mp/cg_snapshot_mp.cpp:474–476, 521–560: MP 1.8 reference; the reuse rule was also compared with iw3mp.exe 1.7
-/// `G_Spawn`/`G_FreeEntity` in review, the killcam transition was not checked against 1.7.
+/// Then killcams replay the plane's flight after the plane is gone and its number holds a script model. Entering,
+/// nothing is reset (`CG_TransitionKillcam`), and the past's sequence is compared with the live one's as
+/// `CG_CheckEvents` does on 8 bits: the first killcam, with the script model's sequence behind the plane's, plays the
+/// plane's events on a number the match still draws as the live script model for `INTERP_DELAY_MS`, so the effects
+/// must wait for the plane to be drawn rather than report its tags missing on the script model; the second, after the
+/// script model's own events took its sequence ahead of the plane's, plays none. Leaving, every entity is reset as new,
+/// so the live script model replays none of its events. KisakCOD (GPL-3.0) game_mp/g_utils_mp.cpp:1183–1214,
+/// 1287–1341, cgame_mp/cg_snapshot_mp.cpp:474–476, 521–560 and cgame/cg_event.cpp:1366–1409: MP 1.8 reference; the
+/// reuse rule was also compared with iw3mp.exe 1.7 `G_Spawn`/`G_FreeEntity` in review, the killcam transition and
+/// event comparison were not checked against 1.7.
 #[allow(clippy::too_many_arguments)]
 fn bolted_reuse(
     game: &mut server::game::Game,
@@ -895,7 +898,10 @@ fn bolted_reuse(
     let free_at = start + 200;
     let plane_gone = start + 1000;
     let respawn_at = start + 1600;
-    let (killcam_from, killcam_to) = (start + 2000, start + 2800);
+    // The script model's own events, in two snapshots so all of them play live: 6, ahead of the plane's 4.
+    let own_events = [(start + 3000, 3), (start + 3100, 3)];
+    // Past ahead of the live sequence, then past behind it.
+    let killcams = [(start + 2000, start + 2800), (start + 3400, start + 4200)];
     let model = game
         .ent(freed)
         .map(|e| e.model.to_string())
@@ -923,9 +929,9 @@ fn bolted_reuse(
     let mut history = Vec::new();
     let mut plane = None;
     let mut second = None;
-    let (mut received, mut entry_events, mut exit_events) = (0, 0, 0);
+    let (mut received, mut ahead_events, mut behind_events, mut exit_events) = (0, 0, 0, 0);
     let mut captured = Vec::new();
-    for step in 0..=64 {
+    for step in 0..=92 {
         let now = start + step * 50;
         game.level.time = now;
         if now == free_at {
@@ -943,8 +949,8 @@ fn bolted_reuse(
             game.free_entity(vm, plane.ok_or("no plane")?);
         }
         if now == respawn_at {
-            // The oldest freed number goes first, so the second script model takes the plane's number; it carries
-            // more events than the plane did, so the two sequences differ.
+            // The oldest freed number goes first, so the second script model takes the plane's number, with no events
+            // yet: its sequence is behind the plane's.
             for _ in 0..2 {
                 let mut e = Ent::new(EntKind::Plain, "script_model");
                 e.model = model.clone().into();
@@ -957,8 +963,12 @@ fn bolted_reuse(
                     "the script model took entity {n}, not the plane's {plane:?}"
                 ));
             }
-            for _ in 0..5 {
-                call(game, vm, tag_origin_fx, n)?;
+        }
+        for &(at, count) in &own_events {
+            if now == at {
+                for _ in 0..count {
+                    call(game, vm, tag_origin_fx, second.ok_or("no script model")?)?;
+                }
             }
         }
         let tags = game
@@ -972,12 +982,14 @@ fn bolted_reuse(
             .collect::<Vec<_>>();
         events.set_effect_tags(&tags);
         let live = server::netsv::world_entities(game);
-        let killcam = (killcam_from..killcam_to).contains(&now);
+        let killcam = killcams
+            .iter()
+            .find(|(from, to)| (*from..*to).contains(&now));
         let mut snapshot = net::Snapshot::empty();
         snapshot.num = 100 + step as u32;
         snapshot.server_time = now;
-        if killcam {
-            let i = usize::try_from((now - killcam_from) / 50).unwrap_or(0);
+        if let Some(&(from, _)) = killcam {
+            let i = usize::try_from((now - from) / 50).unwrap_or(0);
             snapshot.entities = history
                 .get(i.min(history.len().saturating_sub(1)))
                 .cloned()
@@ -1004,8 +1016,9 @@ fn bolted_reuse(
             })
             .count();
         match now {
-            _ if now == killcam_from => entry_events += n,
-            _ if now == killcam_to => exit_events += n,
+            _ if now == killcams[0].0 => ahead_events += n,
+            _ if now == killcams[1].0 => behind_events += n,
+            _ if killcams.iter().any(|(_, to)| now == *to) => exit_events += n,
             _ => received += n,
         }
         drawn.push_back(
@@ -1052,8 +1065,12 @@ fn bolted_reuse(
     );
     report.insert("bolted_reuse_events".into(), received.into());
     report.insert(
-        "bolted_reuse_killcam_entry_events".into(),
-        entry_events.into(),
+        "bolted_reuse_killcam_ahead_events".into(),
+        ahead_events.into(),
+    );
+    report.insert(
+        "bolted_reuse_killcam_behind_events".into(),
+        behind_events.into(),
     );
     report.insert(
         "bolted_reuse_killcam_exit_events".into(),
@@ -1069,17 +1086,19 @@ fn bolted_reuse(
     );
     report.insert("bolted_reuse_warnings".into(), warnings.len().into());
     if !new_number
-        || received != 0
-        || entry_events != 4
+        || received != 6
+        || ahead_events != 4
+        || behind_events != 0
         || exit_events != 0
         || stats.resolved_frames == 0
         || stats.missing_tags != 0
         || !warnings.is_empty()
     {
         return Err(format!(
-            "plane spawned as entity {plane:?} in the frame entity {freed} was freed, then replayed by a killcam over \
-             the script model {second:?}: live events {received}, killcam entry events {entry_events} (4 expected), \
-             exit events {exit_events}, resolved frames {}, missing tags {}, warnings {warnings:?}",
+            "plane spawned as entity {plane:?} in the frame entity {freed} was freed, then replayed by killcams over \
+             the script model {second:?}: live events {received} (6 expected), past-ahead entry events \
+             {ahead_events} (4 expected), past-behind entry events {behind_events}, exit events {exit_events}, \
+             resolved frames {}, missing tags {}, warnings {warnings:?}",
             stats.resolved_frames, stats.missing_tags
         ));
     }
