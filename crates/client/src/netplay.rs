@@ -106,6 +106,8 @@ impl Laps {
 
 /// How often the scoreboard asks for fresh rows while it is up (`UpdateScores`).
 const SCORES_INTERVAL: Duration = Duration::from_secs(2);
+/// The least time between two scoreboard requests made by single scores for a missing row (`scoresRequestTime`).
+const SCORES_MISSING_INTERVAL: Duration = Duration::from_secs(10);
 /// How long a player model is kept after the snapshots stop mentioning it.
 const GONE_AFTER: Duration = Duration::from_millis(500);
 
@@ -562,11 +564,17 @@ pub struct NetPlay {
     live_time: i32,
     kill_icons: HashMap<String, crate::hud::KillIcon>,
     scores_asked: Option<Instant>,
+    /// When a missing row last asked for the scoreboard.
+    scores_missing_asked: Option<Instant>,
     server_addr: String,
     effects: Effects,
     tracer_cvars: crate::tracer::Cvars,
     switches: Switches,
     tracer_material: Option<std::sync::Arc<assets::zone::gfx::Material>>,
+    /// `gfx_laser`, which laser sights are drawn with; none, none are drawn.
+    laser_material: Option<std::sync::Arc<assets::zone::gfx::Material>>,
+    /// The laser sights of this frame's script models, drawn with the effects.
+    lasers: Vec<crate::laser::Beam>,
     /// Earthquakes shaking the view.
     shakes: sim::shake::CameraShakes,
     props: Props,
@@ -709,6 +717,8 @@ impl NetPlay {
             tracer_cvars: crate::tracer::Cvars::default(),
             switches: Switches::default(),
             tracer_material: None,
+            laser_material: None,
+            lasers: Vec::new(),
             shakes: Default::default(),
             lib,
             models_warmed: HashSet::new(),
@@ -717,6 +727,7 @@ impl NetPlay {
             live_time: 0,
             kill_icons: HashMap::new(),
             scores_asked: None,
+            scores_missing_asked: None,
             server_addr: server.to_string(),
             fx_demo: None,
             want_flesh_hit: false,
@@ -971,12 +982,31 @@ impl NetPlay {
             self.scores_asked = Some(Instant::now());
             self.net.request_scores();
         }
+        // A single score for a player the scoreboard lacks asks for the scoreboard, at most every 10 s
+        // (`CG_SetSingleClientScore`, KisakCOD `cgame_mp/cg_servercmds_mp.cpp:810-814`).
+        if self
+            .net
+            .ui()
+            .is_some_and(net::ui::ClientUiState::take_scores_missing)
+            && self
+                .scores_missing_asked
+                .is_none_or(|t| t.elapsed() >= SCORES_MISSING_INTERVAL)
+        {
+            self.scores_missing_asked = Some(Instant::now());
+            self.net.request_scores();
+        }
     }
 
-    /// The material the tracers are drawn with (`gfx_tracer`, from the UI zones), kept across levels.
-    pub fn set_tracer_material(&mut self, m: Option<std::sync::Arc<assets::zone::gfx::Material>>) {
-        self.effects.set_tracer_material(m.clone());
-        self.tracer_material = m;
+    /// The materials the tracers (`gfx_tracer`) and laser sights (`gfx_laser`) are drawn with, from the UI zones; kept
+    /// across levels.
+    pub fn set_beam_materials(
+        &mut self,
+        tracer: Option<std::sync::Arc<assets::zone::gfx::Material>>,
+        laser: Option<std::sync::Arc<assets::zone::gfx::Material>>,
+    ) {
+        self.effects.set_tracer_material(tracer.clone());
+        self.tracer_material = tracer;
+        self.laser_material = laser;
     }
 
     /// What the player has set about tracers (`cg_tracerchance` and the like).
@@ -1173,6 +1203,37 @@ impl NetPlay {
         self.net
             .latest()
             .is_some_and(|s| s.ps.other_flags & sim::pm::other::PLAYER != 0)
+    }
+
+    /// `CG_VoiceChat_f`'s test: `None` before the first snapshot (the command does nothing), otherwise whether the
+    /// player may voice chat (in the intermission or in the game, not spectating).
+    pub fn voice_chat_allowed(&self) -> Option<bool> {
+        self.net.latest().map(|s| {
+            s.ps.pm_type == PmType::Intermission || s.ps.other_flags & sim::pm::other::PLAYER != 0
+        })
+    }
+
+    /// The server this client joined, as given to connect (`clientinfo`'s `Server:` line).
+    pub fn server_addr(&self) -> &str {
+        &self.server_addr
+    }
+
+    /// Every configstring the server set, by index (`CL_Configstrings_f`).
+    pub fn configstrings(&self) -> Vec<(u16, String)> {
+        let Some(ui) = self.net.ui_ref() else {
+            return Vec::new();
+        };
+        (0..net::ui::cs::MAX)
+            .filter_map(|i| {
+                let s = ui.config(i);
+                (!s.is_empty()).then(|| (i, s.to_owned()))
+            })
+            .collect()
+    }
+
+    /// The match's sound system, for the sound console commands.
+    pub fn sound_mut(&mut self) -> &mut ClientSound {
+        &mut self.sound
     }
 
     /// `IN_CenterView`: the view levels (the pitch the commands send is the server's `delta_angles` alone), once
@@ -2048,6 +2109,28 @@ impl NetPlay {
         self.props.update(dt, self.boxes.world());
         self.prop_effects();
         let mut drawn = self.effects.draw(eye, yaw, pitch, roll);
+        let lasers = std::mem::take(&mut self.lasers);
+        if !lasers.is_empty() {
+            logging::dedup!(
+                WARN,
+                "laser-light",
+                issue = 516,
+                "laser sights are drawn without their post light (gfx_laser_light), see #516"
+            );
+            if self.laser_material.is_none() {
+                logging::dedup!(
+                    WARN,
+                    "laser-material",
+                    issue = 411,
+                    "laser sights are not drawn: the gfx_laser material is not loaded (#411)"
+                );
+            }
+        }
+        if let Some(m) = &self.laser_material
+            && let Some(mesh) = crate::laser::mesh(m, &lasers, eye)
+        {
+            drawn.meshes.push(mesh);
+        }
         drawn.models.extend(projectiles);
         drawn.sway = self.shakes.sway(st, eye.to_array());
         self.c.shake_max = self
@@ -2681,6 +2764,29 @@ impl NetPlay {
                         &out[before..],
                         &self.lib.content,
                     );
+                    // `CG_Laser_Add` (cg_ents.cpp): a laser the scripts turned on shows through night vision.
+                    if e.eflags & eflags::LASER != 0 && self.look.night_vision() {
+                        let tag = |t: &str| {
+                            crate::effects::model_tag_frame(&out[before..], &self.lib.content, t)
+                        };
+                        if let Some(f) = tag("tag_laser").or_else(|| tag("tag_flash")) {
+                            let forward = f.axis[0];
+                            let reach = f.origin + forward * crate::laser::RANGE;
+                            let tr = self.boxes.world().trace(
+                                f.origin.to_array(),
+                                reach.to_array(),
+                                [0.0; 3],
+                                [0.0; 3],
+                                e.number,
+                                sim::contents::MASK_SHOT,
+                            );
+                            self.lasers.push(crate::laser::Beam::new(
+                                f.origin,
+                                forward,
+                                tr.fraction,
+                            ));
+                        }
+                    }
                     drawn += 1;
                     self.c.script_model_parts_max =
                         self.c.script_model_parts_max.max(out.len() - before);

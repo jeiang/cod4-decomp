@@ -17,6 +17,9 @@ pub enum EqType {
 }
 
 impl EqType {
+    /// `snd_eqTypeStrings`: every type's name, in order.
+    pub const NAMES: [&str; 5] = ["lowpass", "highpass", "lowshelf", "highshelf", "bell"];
+
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s.to_ascii_lowercase().as_str() {
             "lowpass" => Self::LowPass,
@@ -26,6 +29,11 @@ impl EqType {
             "bell" => Self::Bell,
             _ => return None,
         })
+    }
+
+    /// The type's name in `snd_eqTypeStrings`.
+    pub fn name(self) -> &'static str {
+        Self::NAMES[self as usize]
     }
 }
 

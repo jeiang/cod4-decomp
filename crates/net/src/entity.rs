@@ -33,7 +33,7 @@ pub mod etype {
     pub const PLANE: u8 = 10;
     /// A `script_brushmodel`: the map's inline model `model` (`*N`) placed at `origin` and `angles`. `velocity` is its
     /// motion in units per second at the snapshot's time, so a client can carry what stands on it and draw it ahead
-    /// of the snapshot, `pm_flags` the milliseconds left of its move (it is not carried past that); `eflags` is its contents (low 24 bits), which tells the client whether it blocks a player.
+    /// of the snapshot, `pm_flags` the milliseconds left of its move (it is not carried past that); `eflags` is its contents (low 24 bits), which tells the client whether it blocks a player; `pm_type` is [`BRUSH_AIM_ASSIST`](super::BRUSH_AIM_ASSIST) when the melee aim assist may target it.
     pub const BRUSH: u8 = 11;
 }
 
@@ -45,6 +45,10 @@ pub const MAX_ATTACH: usize = 19;
 /// `EntityState::eflags` bit the server flips whenever it moves an entity by fiat (a respawn, a script's `origin`):
 /// the client does not slide the entity from where it was to where it is (`EF_TELEPORT_BIT`).
 pub const TELEPORT_BIT: u32 = 1 << 8;
+
+/// A [`etype::BRUSH`] entity's `pm_type` when a script made it a target of the melee aim assist (`enableaimassist`,
+/// the original's `eFlags & 0x800`); 0 otherwise.
+pub const BRUSH_AIM_ASSIST: u8 = 1;
 
 /// Stock unnamed `0x10000` flag: a GENERAL entity retains an active smoke explosion.
 pub const SMOKE_EXPLODE: u32 = 0x10000;

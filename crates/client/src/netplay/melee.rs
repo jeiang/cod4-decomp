@@ -17,8 +17,8 @@ const CROUCHED: f32 = 50.0;
 const PRONE: f32 = 30.0;
 
 impl NetPlay {
-    /// The enemies in view of the player, nearest the crosshair first. `eye` and `feet` are the player's, `angles`
-    /// (pitch, yaw, degrees) the way the view looks.
+    /// The enemies, and the brush models the scripts made targets (`enableaimassist`), in view of the player, nearest
+    /// the crosshair first. `eye` and `feet` are the player's, `angles` (pitch, yaw, degrees) the way the view looks.
     pub(super) fn screen_targets(
         &self,
         st: i32,
@@ -32,26 +32,42 @@ impl NetPlay {
         };
         let team = |c: u16| ui.client(c).map_or(0, |i| i.team);
         let mine = team(snap.own());
-        let targets: Vec<Target> = self
+        let ents = self
             .net
             .snaps
-            .interpolate(st - net::view::INTERP_DELAY_MS, Some(own))
+            .interpolate(st - net::view::INTERP_DELAY_MS, Some(own));
+        let players = ents
             .iter()
             .filter(|e| e.etype == net::entity::etype::PLAYER && e.eflags & eflags::DEAD == 0)
             // Everyone is an enemy but the player's own team (and everyone is, in free for all).
             .filter(|e| mine == 0 || team(e.client) != mine)
-            .map(|e| Target {
-                number: e.number,
-                origin: Vec3::from(e.origin),
-                height: if e.pm_flags & pmf::PRONE != 0 {
+            .map(|e| {
+                let height = if e.pm_flags & pmf::PRONE != 0 {
                     PRONE
                 } else if e.pm_flags & pmf::DUCKED != 0 {
                     CROUCHED
                 } else {
                     PLAYER_MAXS[2]
-                },
+                };
+                Target::player(e.number, Vec3::from(e.origin), height)
+            });
+        // `AimTarget_IsTargetValid`: a brush model flagged for aim assist, boxed by its inline model's bounds.
+        let collision = self.boxes.world().collision();
+        let brushes = ents
+            .iter()
+            .filter(|e| {
+                e.etype == net::entity::etype::BRUSH && e.pm_type == net::entity::BRUSH_AIM_ASSIST
             })
-            .collect();
+            .filter_map(|e| {
+                let (mins, maxs) = collision.model_bounds(e.model)?;
+                Some(Target::brush(
+                    e.number,
+                    Vec3::from(e.origin),
+                    Vec3::from(mins),
+                    Vec3::from(maxs),
+                ))
+            });
+        let targets: Vec<Target> = players.chain(brushes).collect();
         let view = View {
             eye,
             feet,
@@ -59,20 +75,17 @@ impl NetPlay {
             tan_half_fov: self.tan_half_fov,
         };
         let mut seen = automelee::screen_targets(&view, &targets);
-        // Only what the eye can see (`AimTarget_IsTargetVisible`).
+        // Only what the eye can see (`AimTarget_IsTargetVisible`); a brush model may block the view of itself.
         seen.retain(|s| {
-            self.boxes
-                .world()
-                .trace(
-                    eye.to_array(),
-                    s.aim.to_array(),
-                    [0.0; 3],
-                    [0.0; 3],
-                    ENTITYNUM_NONE,
-                    SIGHT,
-                )
-                .fraction
-                >= 1.0
+            let tr = self.boxes.world().trace(
+                eye.to_array(),
+                s.aim.to_array(),
+                [0.0; 3],
+                [0.0; 3],
+                ENTITYNUM_NONE,
+                SIGHT,
+            );
+            tr.fraction >= 1.0 || tr.hit_id == s.number
         });
         seen
     }

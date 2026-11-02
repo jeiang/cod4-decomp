@@ -18,6 +18,9 @@ pub const ROM: u32 = 64;
 pub const CHEAT: u32 = 128;
 /// `DVAR_CODINFO`: published to the clients as a key/value pair in the `CODINFO` configstrings.
 pub const CODINFO: u32 = 256;
+/// `DVAR_EXTERNAL`: made by a command (`dvar_bool`, `dvar_int`, `dvar_float`), not by the engine; `writedefaults`
+/// leaves it out.
+pub const EXTERNAL: u32 = 0x4000;
 
 /// What a registered variable holds and the values it accepts (`dvarType_t` with its `DvarLimits`). A value is
 /// read as the type (`Dvar_StringToValue`), refused outside the range (`Dvar_ValueInDomain`) and kept as the type
