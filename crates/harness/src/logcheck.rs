@@ -179,6 +179,17 @@ pub const ALLOWED: &[Allow] = &[
     },
     Allow {
         contains: &[
+            "cod4e::console",
+            "stock command not implemented",
+            "command=\"uploadstats\"",
+            "issue=479",
+        ],
+        reason: "the stock Create a Class menus run `uploadstats` when a class is saved, a command we do not implement yet (#479)",
+        stages: &["client-custom-class"],
+        max: Some(1),
+    },
+    Allow {
+        contains: &[
             "server::server",
             "unknown client command",
             "zz_unknown_in_match",
