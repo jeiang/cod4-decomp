@@ -133,7 +133,7 @@ impl NetPlay {
             }
             // A script's `playfxontag` on the body rides its posed bones.
             self.effects
-                .script_model_tags(e.number, &out[before..], &self.lib.content);
+                .script_model_tags(e.number, e.model, &out[before..], &self.lib.content);
         }
         self.c.corpses_max = self.c.corpses_max.max(drawn);
         let world = self.boxes.world();

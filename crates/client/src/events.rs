@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Snapshot reset handling follows KisakCOD (GPL-3.0, KisakCOD contributors and Activision),
-// `cgame_mp/cg_snapshot_mp.cpp:419-426` (CoD4 MP 1.8; native 1.7 unverified).
+// `cgame_mp/cg_snapshot_mp.cpp:419-426` and `CG_TransitionKillcam` (`:521-560`) (CoD4 MP 1.8; native 1.7 unverified).
 // Translated in part from KisakCOD cgame/cg_event.cpp (CG_PlayFxOnTag),
 // GPL-3.0, copyright the KisakCOD contributors and Activision.
 //! What the server tells the client happened: the one-shot events of `server::tempev` turned into [`ClientEvent`]s,
@@ -69,6 +69,9 @@ pub enum ClientEvent {
     /// A script effect following a world-model bone for its authored lifetime.
     PlayFxOnTag {
         entity: u16,
+        /// The entity's model (configstring index) in the snapshot that carried the event. The match draws entities
+        /// `INTERP_DELAY_MS` behind that snapshot, so the number may still be drawn as another entity or model.
+        model: u16,
         name: String,
         tag: String,
     },
@@ -189,6 +192,8 @@ pub struct Events {
     effect_tags: HashMap<u16, String>,
     /// Last sequence and smoke burst time acted on, by entity number.
     seen: HashMap<u16, (u8, Option<i32>)>,
+    /// The last snapshot scanned was a killcam replay of the past.
+    killcam: bool,
 }
 
 impl Events {
@@ -238,6 +243,17 @@ impl Events {
 
     /// The events in `snap` not delivered before. Call once per snapshot, oldest first.
     pub fn scan(&mut self, snap: &Snapshot) -> Vec<ClientEvent> {
+        // Back from a killcam, the live world replaces the replayed past entity by entity: `CG_TransitionKillcam`
+        // (cg_snapshot_mp.cpp:541-560) resets every entity of the snapshot as a new one (`CG_ResetEntity(.., 1)`), so a
+        // number the past and the present gave to different entities replays neither's events. Temporary event
+        // entities keep their own once-only rule.
+        let killcam = snap.killcam();
+        if self.killcam && !killcam {
+            for e in snap.entities.iter().filter(|e| e.etype != etype::EVENT) {
+                self.seen.remove(&e.number);
+            }
+        }
+        self.killcam = killcam;
         let mut out = Vec::new();
         let mut live = Vec::new();
         let entities = &snap.entities;
@@ -282,10 +298,20 @@ impl Events {
                     etype::GENERAL | etype::MISSILE => 0,
                     _ => e.event_seq,
                 });
-            let count = e.event_seq.wrapping_sub(last).min(4);
+            // `CG_CheckEvents` (cg_event.cpp:1374-1409) on the 8-bit sequence: a sequence of 0 plays nothing; the last
+            // one counts as 256 lower only when more than 64 ahead (a wrap), otherwise one ahead of the new sequence
+            // (a killcam's past behind the live entity at its number) plays nothing; at most the last 4 play.
+            let next = i32::from(e.event_seq);
+            let count = if next == 0 {
+                0
+            } else {
+                let last = i32::from(last);
+                let last = if last > next + 64 { last - 256 } else { last };
+                usize::try_from((next - last).clamp(0, 4)).unwrap_or(0)
+            };
             self.seen.insert(e.number, (e.event_seq, None));
             let recent = e.recent_events();
-            for &(event, parm) in &recent[4 - usize::from(count)..] {
+            for &(event, parm) in &recent[4 - count..] {
                 if event == ev::PLAY_FX_ON_TAG {
                     let mut event_state = e.clone();
                     event_state.event = event;
@@ -313,6 +339,7 @@ impl Events {
                 let tag = encoded.get(2..).filter(|s| !s.is_empty())?;
                 ClientEvent::PlayFxOnTag {
                     entity: e.number,
+                    model: e.model,
                     name: self.fx_name(index)?.to_owned(),
                     tag: tag.to_owned(),
                 }
@@ -491,11 +518,13 @@ mod tests {
             vec![
                 ClientEvent::PlayFxOnTag {
                     entity: 20,
+                    model: 0,
                     name: "bolt_a".into(),
                     tag: "tag_flash".into()
                 },
                 ClientEvent::PlayFxOnTag {
                     entity: 20,
+                    model: 0,
                     name: "bolt_b".into(),
                     tag: "tag_brass".into()
                 },
@@ -522,6 +551,55 @@ mod tests {
     }
 
     #[test]
+    fn a_killcam_plays_a_past_sequence_only_when_ahead_and_leaving_it_resets_every_entity() {
+        let mut events = Events::default();
+        events.take_commands(&mut vec!["fx 1 bolt".into()]);
+        events.set_effect_tags(&[(net::ui::cs::EFFECT_TAGS + 1, "01tag_origin".into())]);
+        let mut live = EntityState::new(30);
+        live.etype = etype::SCRIPT_MODEL;
+        live.event_seq = 5;
+        live.set_recent_events([(ev::PLAY_FX_ON_TAG, 1); 4]);
+        let mut past = live.clone();
+        past.etype = etype::PLANE;
+        let killcam = |entities: &[EntityState]| {
+            let mut s = snap(entities);
+            s.follow = Some(net::snapshot::Follow {
+                own: 0,
+                followed: 1,
+                archive_ms: 5000,
+                ps_offset_ms: 0,
+                entity: None,
+            });
+            s
+        };
+        assert!(events.scan(&snap(std::slice::from_ref(&live))).is_empty());
+        // Entering resets nothing (`CG_TransitionKillcam`): a past entity whose sequence is ahead of the live one's at
+        // its number plays its last events.
+        past.event_seq = 9;
+        assert_eq!(events.scan(&killcam(std::slice::from_ref(&past))).len(), 4);
+        assert!(
+            events
+                .scan(&killcam(std::slice::from_ref(&past)))
+                .is_empty()
+        );
+        // Leaving, every entity starts over as first seen: the live script model, behind the past's sequence, replays
+        // nothing and takes its own.
+        assert!(events.scan(&snap(std::slice::from_ref(&live))).is_empty());
+        live.event_seq = 6;
+        assert_eq!(events.scan(&snap(std::slice::from_ref(&live))).len(), 1);
+        // A past sequence behind the live one (not a wrap: within 64) plays nothing (`CG_CheckEvents`).
+        past.event_seq = 4;
+        assert!(
+            events
+                .scan(&killcam(std::slice::from_ref(&past)))
+                .is_empty()
+        );
+        // Leaving, the live script model, ahead of the past's sequence, replays nothing either.
+        live.event_seq = 7;
+        assert!(events.scan(&snap(std::slice::from_ref(&live))).is_empty());
+    }
+
+    #[test]
     fn target_tag_event_sequence_wraps_and_invalid_tag_entries_are_not_played() {
         let mut events = Events::default();
         events.take_commands(&mut vec!["fx 1 bolt".into()]);
@@ -537,9 +615,19 @@ mod tests {
         target.event = ev::PLAY_FX_ON_TAG;
         target.event_parm = 1;
         assert!(events.scan(&snap(std::slice::from_ref(&target))).is_empty());
+        // Wrapping to sequence 0 plays nothing (`CG_CheckEvents` skips a zero sequence); the next one counts from 0.
         target.event_seq = 0;
+        assert!(events.scan(&snap(std::slice::from_ref(&target))).is_empty());
+        target.event_seq = 1;
         assert_eq!(events.scan(&snap(std::slice::from_ref(&target))).len(), 1);
         assert!(events.scan(&snap(std::slice::from_ref(&target))).is_empty());
+        // Far ahead plays the last four; a wrap (the last sequence more than 64 ahead counts as 256 lower) plays the
+        // last four again.
+        target.set_recent_events([(ev::PLAY_FX_ON_TAG, 1); 4]);
+        target.event_seq = 250;
+        assert_eq!(events.scan(&snap(std::slice::from_ref(&target))).len(), 4);
+        target.event_seq = 3;
+        assert_eq!(events.scan(&snap(std::slice::from_ref(&target))).len(), 4);
         for parm in [0, 2, 3, 4, 255] {
             target.event_seq = target.event_seq.wrapping_add(1);
             target.event_parm = parm;
