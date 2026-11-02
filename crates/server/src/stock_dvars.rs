@@ -30,6 +30,7 @@ fn stock() -> Vec<(&'static str, Kind, &'static str, u32)> {
         ("g_speed", Kind::Int(i32::MIN, i32::MAX), "190", 0),
         ("g_mantleBlockTimeBuffer", Kind::Int(0, 60_000), "500", CHEAT), // g_main_mp.cpp:714
         ("g_antilag", Kind::Bool, "1", ARCHIVE | SERVERINFO), // g_main_mp.cpp:614
+        ("g_smoothClients", Kind::Bool, "1", 0), // g_main_mp.cpp:613
         ("g_allowvote", Kind::Bool, "1", ARCHIVE), // ui_mp/ui_main_mp.cpp:4744
         ("g_deadChat", Kind::Bool, "0", ARCHIVE), // g_main_mp.cpp:501
         // sv_init_mp.cpp:704 registers a Bool 1; 1.7: Int 4, 0..INT_MAX, ARCHIVE | SERVERINFO.

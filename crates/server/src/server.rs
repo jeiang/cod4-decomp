@@ -483,6 +483,9 @@ fn core_dvars() -> Vec<(&'static str, Kind, String, u32)> {
         // "Turn on antilag checks for weapon hits" (KisakCOD `game_mp/g_main_mp.cpp:614`): shots and knife swings are
         // judged where the shooter saw the others (`lagcomp`).
         ("g_antilag", Kind::Bool, "1", ARCHIVE | SERVERINFO),
+        // "Enable extrapolation between client states" (KisakCOD `game_mp/g_main_mp.cpp:613`; 1.7 registers it at
+        // 0x4be6cb): which trajectory type a player's entity state carries (`netsv::player_pos_type`).
+        ("g_smoothClients", Kind::Bool, "1", 0),
         ("bot_idle", Kind::Bool, "0", 0),
         // Bots on every map; the listen server's player sets it, and a `bots` command sets it too.
         ("bot_count", Kind::Int(0, 64), "0", 0),
