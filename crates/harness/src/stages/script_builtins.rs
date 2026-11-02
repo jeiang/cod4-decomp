@@ -389,8 +389,6 @@ fn developer_compile_rules(server: &mut Server, failures: &mut Vec<String>) -> O
 /// A UI server command whose arguments do not parse is logged with its word and argument count; a word that is
 /// not a UI command is not.
 fn malformed_server_command(failures: &mut Vec<String>) {
-    // Other stages in this process may have used up the limiter's early hits for `stat`.
-    logging::new_window();
     let (parsed, events) = logging::capture(|| {
         [
             net::ui::ServerCmd::parse("stat harness_index 3"),

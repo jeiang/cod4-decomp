@@ -2124,7 +2124,7 @@ impl Server {
                 };
                 let frames = arg(2).map_or(400, cvar::parse_int);
                 let ps = &self.game.client(n).ok_or("devline: no such client")?.ps;
-                let eye = crate::fire::view_origin(ps);
+                let eye = crate::fire::view_origin(ps, &self.game.pm_params.bob);
                 let (fwd, right, up) = sim::pm::math::angle_vectors(&ps.viewangles);
                 let at = |f: f32, r: f32, u: f32| {
                     Value::Vector(std::array::from_fn(|i| {
