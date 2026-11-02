@@ -2015,11 +2015,11 @@ impl HostCx<'_> {
                 }
                 // `CL_OpenedIWDList_f` (KisakCOD cl_main_mp.cpp:3015).
                 "fs_openedlist" => {
-                    let names = self
-                        .input
-                        .vfs()
-                        .map_or_else(String::new, crate::fscmds::opened_iwds);
-                    self.st.log(&format!("Opened IWD Names: {names}"));
+                    let line = self.input.vfs().map_or_else(
+                        || "Opened IWD Names: ".to_owned(),
+                        crate::fscmds::opened_iwds,
+                    );
+                    self.st.log(&line);
                 }
                 // `CL_LocalServers_f` (KisakCOD cl_main_mp.cpp:3747).
                 "localservers" => {

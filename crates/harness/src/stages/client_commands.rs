@@ -59,7 +59,7 @@ console=setenv ZZ_ENV a b,console=setenv ZZ_ENV,sawreply=ZZ_ENV=a b:5,\
 console=clientinfo,sawreply=Client Information:5,sawreply=state: 0:5,\
 console=configstrings,sawreply=Not connected to a server.:5,\
 console=serverstatus,sawreply=Usage: serverstatus [server]:5,\
-console=fs_openedList,sawreply=Opened IWD Names: :5,\
+console=fs_openedList,sawreply=Opened IWD Names: iw_:5,notsaw=Names: Opened IWD,\
 console=path,sawreply=Current search path::5,\
 console=fdir zz_none*,sawreply=0 files listed:5,\
 console=writedefaults zz_defaults,sawreply=Writing zz_defaults.cfg.:5,\
