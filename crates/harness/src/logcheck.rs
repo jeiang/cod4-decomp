@@ -165,6 +165,12 @@ pub const ALLOWED: &[Allow] = &[
         max: Some(2), // measured 1 on the Linux host, 2026-10-14,
     },
     Allow {
+        contains: &["server::cvar", "cvar set refused", "rcon_ranged"],
+        reason: "net-rcon sets a `dvar_int` dvar out of its range to check that it is refused (#479)",
+        stages: &["net-rcon"],
+        max: Some(2), // one expected
+    },
+    Allow {
         contains: &["cod4e::console", "unknown command", "zz_unknown_at_front"],
         reason: "client-commands types an unknown word at the front end to check `Unknown command`",
         stages: &["client-commands"],

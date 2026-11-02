@@ -77,7 +77,7 @@ console=cmd say line_through_cmd,saw=line_through_cmd:6,\
 console=zz_unknown_in_match,sawreply=zz_unknown_in_match:6,\
 console=viewpos,sawreply=) : :5,\
 console=clientinfo,sawreply=state: 9:5,\
-console=configstrings,sawreply=   0: :5,\
+console=configstrings,sawreply=17: :5,\
 console=serverstatus,sawreply=num: score: ping: name::10,\
 console=snd_setEqQ zz_chan 0 0 1,sawreply=Unknown channel name (zz_chan):5,\
 console=snd_playLocal zz_noalias,sawreply=Couldn't find sound alias \"zz_noalias\".:5,\
