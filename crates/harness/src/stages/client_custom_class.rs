@@ -140,10 +140,72 @@ pub(super) fn until_top(c: &mut Driven, name: &str, limit: Duration) -> Result<(
     }
 }
 
-/// Clicks `item` of the top menu and waits for `menu` to come up on top.
-fn open_by(c: &mut Driven, item: &str, menu: &str) -> Result<(), String> {
-    c.click(item)?;
-    until_top(c, menu, Duration::from_secs(10)).map_err(|e| format!("clicking {item}: {e}"))?;
+/// Clicks the top menu's button labelled `text` (the install's localized label; empty for none) or, wanting that, the
+/// one named `name`: a shown item that is not only decoration, so a locked copy or a preview of the same name is
+/// passed over. Returns what matched, for a failure to name.
+fn press(c: &mut Driven, name: &str, text: &str) -> Result<String, String> {
+    let menu = c.state("menu")?;
+    let top = menu["open"]
+        .as_array()
+        .and_then(|o| o.last())
+        .cloned()
+        .unwrap_or(Value::Null);
+    let shown: Vec<&Value> = menu["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|it| it["menu"] == top && it["visible"] == true)
+        .collect();
+    let label = |it: &Value| {
+        let kind = if it["decoration"] == true {
+            " (decoration)"
+        } else {
+            ""
+        };
+        format!("{}/{}{kind}", it["name"], it["text"])
+    };
+    let by_text = |it: &Value| {
+        !text.is_empty()
+            && it["text"]
+                .as_str()
+                .is_some_and(|t| t.trim().eq_ignore_ascii_case(text))
+    };
+    let by_name = |it: &Value| {
+        !name.is_empty()
+            && it["name"]
+                .as_str()
+                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+    };
+    let live: Vec<&Value> = shown
+        .iter()
+        .copied()
+        .filter(|it| it["decoration"] == false)
+        .collect();
+    let Some(it) = live
+        .iter()
+        .copied()
+        .find(|it| by_text(it))
+        .or_else(|| live.iter().copied().find(|it| by_name(it)))
+    else {
+        return Err(format!(
+            "{top} shows no live button {text:?} or {name:?}; it shows {:?}",
+            shown.iter().map(|it| label(it)).collect::<Vec<_>>()
+        ));
+    };
+    let matched: Vec<String> = shown
+        .iter()
+        .filter(|it| by_text(it) || by_name(it))
+        .map(|it| label(it))
+        .collect();
+    let rect = it["rect"].clone();
+    super::client_frontend::click_rect(c, &rect)?;
+    Ok(format!("{} of {matched:?}", label(it)))
+}
+
+/// Presses the top menu's button (see [`press`]) and waits for `menu` to come up on top.
+fn open_by(c: &mut Driven, name: &str, text: &str, menu: &str) -> Result<(), String> {
+    let hit = press(c, name, text)?;
+    until_top(c, menu, Duration::from_secs(10)).map_err(|e| format!("clicking {hit}: {e}"))?;
     c.pause(Duration::from_millis(500))
 }
 
@@ -171,36 +233,32 @@ fn build_class(c: &mut Driven, text: &HashMap<String, String>) -> Result<(), Str
     })?;
     c.step("Create a Class > custom slot 5", |c| {
         until_top(c, HOME, Duration::from_secs(5))?;
-        open_by(c, "Create a Class", "pc_cac_popup")?;
-        open_by(c, "P90", "menu_cac_sniper")
+        open_by(c, "", "Create a Class", "pc_cac_popup")?;
+        open_by(c, "", "P90", "menu_cac_sniper")
     })?;
     c.step("primary weapon: P90, no attachment, no camouflage", |c| {
-        open_by(c, "primary_weapon_selection", "sniper_popup_cac_primary")?;
         open_by(
             c,
-            &format!("SMG|{}", t("MPUI_SUB_MACHINE_GUNS")),
-            "sniper_popup_cac_smg",
+            "primary_weapon_selection",
+            "",
+            "sniper_popup_cac_primary",
         )?;
-        open_by(
-            c,
-            &format!("p90|{}", t("WEAPON_P90")),
-            "sniper_attachment_popup_smg",
-        )?;
-        open_by(
-            c,
-            &format!("none|{}", t("MPUI_NONE")),
-            "sniper_popup_cac_camo",
-        )?;
-        c.click(&format!("camo_none|{}", t("MPUI_NONE")))?;
+        open_by(c, "SMG", t("MPUI_SUB_MACHINE_GUNS"), "sniper_popup_cac_smg")?;
+        open_by(c, "p90", t("WEAPON_P90"), "sniper_attachment_popup_smg")?;
+        open_by(c, "none", t("MPUI_NONE"), "sniper_popup_cac_camo")?;
+        let hit = press(c, "camo_none", t("MPUI_NONE"))?;
         until_top(c, "menu_cac_sniper", Duration::from_secs(5))
+            .map_err(|e| format!("clicking {hit}: {e}"))
     })?;
     c.step("perk 1: special grenades", |c| {
-        open_by(c, t("MPUI_PERK_1"), "sniper_popup_cac_perk1")?;
-        c.click(&format!(
-            "specialty_specialgrenade|{}",
-            t("PERKS_SPECIAL_GRENADES_X_3")
-        ))?;
+        open_by(c, "", t("MPUI_PERK_1"), "sniper_popup_cac_perk1")?;
+        let hit = press(
+            c,
+            "specialty_specialgrenade",
+            t("PERKS_SPECIAL_GRENADES_X_3"),
+        )?;
         until_top(c, "menu_cac_sniper", Duration::from_secs(5))
+            .map_err(|e| format!("clicking {hit}: {e}"))
     })?;
     c.step("the menus wrote custom class 5", |c| {
         stat_is(c, PRIMARY, "the primary weapon")?;

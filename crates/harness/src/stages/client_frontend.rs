@@ -233,32 +233,32 @@ fn locked(c: &mut Driven, text: &str, opens: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Every setting `menu` shows has a value: no shown control whose value reads blank.
+/// Every choice `menu` shows (yes/no, multiple choice, dvar enum: `choice` in the menu state) shows the setting it
+/// holds: none whose value is missing or reads blank.
 fn values(c: &mut Driven, menu: &str) -> Result<(), String> {
     let (top, items) = top_items(c)?;
     if !top.eq_ignore_ascii_case(menu) {
         return Err(format!("{menu} is not the top menu ({top} is)"));
     }
-    let blank: Vec<String> = items
+    let choices: Vec<&Value> = items
         .iter()
-        .filter(|it| {
-            it["visible"] == true && it["value"].as_str().is_some_and(|v| v.trim().is_empty())
-        })
+        .filter(|it| it["visible"] == true && it["choice"] == true)
+        .collect();
+    let blank: Vec<String> = choices
+        .iter()
+        .filter(|it| it["value"].as_str().is_none_or(|v| v.trim().is_empty()))
         .map(|it| format!("{} {}", it["name"], it["text"]))
         .collect();
-    let set = items.iter().filter(|it| it["value"].is_string()).count();
-    if !blank.is_empty() {
-        Err(format!("{menu} shows settings without a value: {blank:?}"))
-    } else if set == 0 {
-        Err(format!("{menu} shows no setting at all"))
-    } else {
+    if blank.is_empty() {
         Ok(())
+    } else {
+        Err(format!("{menu} shows choices without a setting: {blank:?}"))
     }
 }
 
 /// The pointer moved to the middle of `rect` (`[x, y, w, h]` in window pixels) and the left button pressed there, as
 /// [`Driven::click`] does for a named item.
-fn click_rect(c: &mut Driven, rect: &Value) -> Result<(), String> {
+pub(super) fn click_rect(c: &mut Driven, rect: &Value) -> Result<(), String> {
     let r: Vec<f64> = rect
         .as_array()
         .map(|r| r.iter().filter_map(Value::as_f64).collect())

@@ -590,6 +590,9 @@ pub struct ItemReport {
     pub decoration: bool,
     /// The setting a dvar-bound control shows now (`Yes`, a list's label, a bind's keys); `None` for other items.
     pub value: Option<String>,
+    /// Whether the item is a choice of a dvar's setting (yes/no, multiple choice, dvar enum): one that always shows
+    /// the setting it holds.
+    pub choice: bool,
     /// The owner-draw id of an item the engine draws itself (the join menu's source, the mode chooser), `0` for none:
     /// what names an item that has no name or text of its own.
     pub owner_draw: i32,
@@ -1657,6 +1660,7 @@ impl Ui {
                     visible,
                     decoration: d.window.static_flags & statf::DECORATION != 0,
                     value: self.item_value(&*host, m, i, d),
+                    choice: matches!(d.ty, ity::YESNO | ity::MULTI | ity::DVARENUM),
                     owner_draw: d.window.owner_draw,
                     rect: [p.x, p.y, p.w, p.h],
                 }

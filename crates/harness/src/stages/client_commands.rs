@@ -93,9 +93,11 @@ fn typed(c: &mut Driven, line: &str, text: &str) -> Result<(), String> {
     says(c, |c| c.console(line), text, false, 5)
 }
 
-/// `key` bound to `command` at the console and pressed: the command runs as a bind does it.
+/// `key` bound to `command` at the console and pressed: the command runs as a bind does it. Binds run only with no
+/// menu up (the menus take the keys), and the press waits a frame for the console to have closed.
 fn bound(c: &mut Driven, key: &str, command: &str) -> Result<(), String> {
     c.console(&format!("bind {key} \"{command}\""))?;
+    c.frames(2)?;
     c.key(key, "tap")
 }
 
@@ -174,13 +176,6 @@ fn front_end(c: &mut Driven) -> Result<(), String> {
         typed(c, "bind zz_nokey x", "\"zz_nokey\" isn't a valid key")?;
         typed(c, "unbind", "unbind <key> : remove commands from a key")?;
         typed(c, "set", "USAGE: set <variable> <value>")?;
-        says(
-            c,
-            |c| bound(c, "f8", "seta zz_x"),
-            "USAGE: seta <variable> <value>",
-            false,
-            5,
-        )?;
         typed(c, "set zz.bad 1", "invalid variable name: zz.bad")?;
         typed(c, "reset", "USAGE: reset <variable>")?;
         typed(
@@ -335,6 +330,16 @@ fn in_match(c: &mut Driven, custom3: &str) -> Result<(), String> {
             6,
         )?;
         says(c, |c| c.console("viewpos"), ") : ", true, 5)
+    })?;
+    // A bound key runs its command only with no menu up: at the front end the menus take the keys.
+    c.step("seta through a bind prints its usage", |c| {
+        says(
+            c,
+            |c| bound(c, "f8", "seta zz_x"),
+            "USAGE: seta <variable> <value>",
+            false,
+            5,
+        )
     })?;
     c.step("a dvar named give, typed and bound", |c| {
         c.console("set give sentinel")?;

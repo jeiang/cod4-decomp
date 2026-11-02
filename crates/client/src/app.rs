@@ -4864,6 +4864,7 @@ fn menu_state(st: &mut State) -> Value {
                 "visible": it.visible,
                 "decoration": it.decoration,
                 "value": it.value,
+                "choice": it.choice,
                 "owner_draw": it.owner_draw,
                 "rect": it.rect,
             }));
