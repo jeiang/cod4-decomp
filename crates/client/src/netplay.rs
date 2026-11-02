@@ -380,8 +380,8 @@ struct Counters {
     /// The most other players drawn in one frame, and why the others could not be built (a model or animation the
     /// zones lack): a player the snapshot has but the picture does not.
     max_players_drawn: usize,
-    /// Every client announced and every client actually drawn, so deaths and joins at different frames cannot make
-    /// the per-frame maxima disagree for a player who was drawn.
+    /// Every living client the picture should hold and every client actually drawn, so deaths and joins at different
+    /// frames cannot make the per-frame maxima disagree for a player who was drawn.
     players_seen: std::collections::BTreeSet<u16>,
     players_drawn: std::collections::BTreeSet<u16>,
     player_faults: std::collections::BTreeSet<String>,
@@ -2811,7 +2811,6 @@ impl NetPlay {
         let mut guns = HashMap::new();
         for e in ents.iter().filter(|e| e.etype == etype::PLAYER) {
             players += 1;
-            self.c.players_seen.insert(e.client);
             let def = self
                 .weapons
                 .get(e.weapon)
@@ -2836,6 +2835,11 @@ impl NetPlay {
             // pose the player was last seen in.
             if e.eflags & eflags::DEAD != 0 {
                 continue;
+            }
+            if e.client != own || show_own {
+                // A living player the picture should hold; a dead one is only its corpse, and the own body bolted
+                // to a script model without third person is in the snapshot but never drawn.
+                self.c.players_seen.insert(e.client);
             }
             let weapon = self
                 .weapons
