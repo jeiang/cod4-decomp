@@ -140,6 +140,16 @@ impl Gpu {
         })
     }
 
+    /// Destroys the device and records the loss at once. wgpu's callback arrives at a later poll, but the next
+    /// surface acquisition can already fail; recovery must not mistake that for an independent surface failure.
+    pub fn destroy(&self) {
+        self.device.destroy();
+        let mut lost = self.health.lost.lock().unwrap_or_else(|e| e.into_inner());
+        if lost.is_none() {
+            *lost = Some("Destroyed: ".to_owned());
+        }
+    }
+
     /// Why the device was lost, once it is: every call on it fails from then on and nothing can be recovered
     /// without a new device and new resources. wgpu reports the loss from a device poll, so this polls.
     pub fn lost(&self) -> Option<String> {

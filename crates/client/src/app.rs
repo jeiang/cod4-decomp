@@ -3450,7 +3450,7 @@ fn script_step(st: &mut State) -> bool {
         // The graphics device is destroyed under the client, as a driver reset does it: the next frame must find it lost
         // and make a new one (`losedevice`); `renderer=secs` then waits for the world to be drawable again.
         "losedevice" => {
-            st.gpu.device.destroy();
+            st.gpu.destroy();
             done(true, sc, String::new());
         }
         "renderer" => {
