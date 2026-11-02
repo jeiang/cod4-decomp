@@ -153,6 +153,21 @@ impl NetPlay {
         h.live = true;
         h.now = now;
         h.own_client = own;
+        h.local_talking = self.talk_down
+            && info_value(ui.config(cs::SERVERINFO), "sv_voice").is_some_and(|v| v != "0");
+        h.talkers.clear();
+        for client in self.hearing.talking(web_time::Instant::now()) {
+            if client == own || !self.voice_on || self.muted.contains(&client) {
+                continue;
+            }
+            // A speaker who just left lingers its 300 ms with no client info; stock skips it (`CG_DrawTalkerNum`
+            // draws only `infoValid` clients, KisakCOD `cgame_mp/cg_newDraw_mp.cpp:2319-2320`).
+            if let Some(info) = ui.client(client) {
+                h.talkers
+                    .push((client, info.name.clone(), team != 0 && team != info.team));
+            }
+        }
+        h.talkers.sort_unstable_by_key(|t| t.0);
         h.team_known = matches!(team, 1 | 2);
         h.team_spectator = team == 3;
         // Nothing says what team the player is on yet: not even "no team", so nobody is an enemy.

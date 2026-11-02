@@ -963,8 +963,8 @@ impl Renderer {
     /// its bind-group layout. Returns how many entries still wait.
     ///
     /// The original registers the server's models in one go under the load screen (`CG_RegisterGraphics`,
-    /// `cgame_mp/cg_main_mp.cpp` in KisakCOD, from `CL_InitCGame` while the state is `CA_LOADING`); here the
-    /// list arrives while frames are presented, so the work is spread across them instead.
+    /// `cgame_mp/cg_main_mp.cpp` in KisakCOD, from `CL_InitCGame` while the state is `CA_LOADING`); the client calls
+    /// this under its load screen too, in pieces so the screen keeps presenting.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn warm_late(&mut self, format: wgpu::TextureFormat, budget: Duration) -> usize {
         let start = Instant::now();
@@ -985,6 +985,12 @@ impl Renderer {
         for (p, target) in &jobs {
             self.materials.request(p, *target, false);
         }
+        self.warm_queue.len()
+    }
+
+    /// Entries [`Renderer::warm_late`] has yet to prepare.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn warm_pending(&self) -> usize {
         self.warm_queue.len()
     }
 

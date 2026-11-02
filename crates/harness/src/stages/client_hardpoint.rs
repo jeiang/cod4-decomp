@@ -4,7 +4,8 @@
 //! as a killstreak reward (`devhardpoint`, typed at the host's console: a streak of kills is not something a stage can
 //! arrange), and the server must hold it. The player presses the key bound to `+actionslot 4` (the d-pad slot selects
 //! the weapon), which must put the full-screen map pick (owner-draw 186) up, and confirms the point with the attack
-//! button. The d-pad pieces (166, 168, 169) and the map pick must have drawn, and the server must have run the strike.
+//! button. The d-pad pieces (166, 168, 169) and the map pick must have drawn, the server must have run the strike,
+//! and the active strike must have drawn its plane on the minimap (owner-draw 156, #371).
 //! Needs a display and the install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
@@ -179,6 +180,17 @@ fn drive(c: &mut Driven, out: &mut StageReport) -> Result<Vec<String>, String> {
     })?;
     out.metrics.insert("airstrikes".into(), strikes as f64);
     let mut problems = Vec::new();
+    // The plane flies in after the call; the HUD's minimap draws its mark while the strike is active.
+    let planes = c.until(
+        json!({"hud.report.plane_marks": {"ge": 1}}),
+        secs(6),
+        "an active airstrike never drew a minimap plane icon (156)",
+    );
+    let marks = c.lookup("hud.report.plane_marks")?.as_u64().unwrap_or(0);
+    out.metrics.insert("plane_marks".into(), marks as f64);
+    if let Err(e) = planes {
+        problems.push(e);
+    }
     for id in ["166", "168", "169", "186"] {
         let n = drawn(c, id)?;
         out.metrics.insert(format!("drawn.{id}"), n as f64);
