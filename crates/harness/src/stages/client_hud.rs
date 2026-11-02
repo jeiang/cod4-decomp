@@ -1423,10 +1423,11 @@ fn play(
         let sent = c.until(
             json!({"voice.mic_open": true, "voice.sent": {"ge": before + 25}}),
             secs(10),
-            "holding +talk sent no voice frames from the test microphone",
+            &format!("holding +talk sent no voice frames from the test microphone (sent before: {before})"),
         );
+        let held = c.state("voice")?;
         c.bind("+talk", "up")?;
-        sent?;
+        sent.map_err(|e| format!("{e}; voice {held}"))?;
         // Released, nothing more is sent (the microphone stays open for a while, its audio thrown away).
         c.pause(Duration::from_millis(300))?;
         let up = stat(c, "voice.sent")?;

@@ -29,6 +29,8 @@ pub struct Talker {
     /// `voice_current_voicelevel`: the mean sample size (16-bit units) of the last block the microphone gave, 0 while
     /// it is closed (`Voice_GetVoiceLevel` reads 0 before voice is up).
     pub current_level: f32,
+    /// Frames read from the microphone so far, sent or thrown away.
+    pub heard: u64,
 }
 
 impl Talker {
@@ -86,6 +88,7 @@ impl Talker {
                 *i = (s * scale).clamp(-32768.0, 32767.0) as i16;
             }
             self.current_level = mean_size(&ints);
+            self.heard += 1;
             if talking {
                 out.push(self.enc.encode(&ints));
             }
