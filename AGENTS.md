@@ -11,6 +11,7 @@ Read first: `README.md` (what the engine does, feature by feature),
 
 ## Environment
 
+- Host, run, bundle and known-flake facts: `docs/host-notes.md`.
 - Run every repository command through the flake: `nix develop -c <cmd>`.
   `rust-toolchain.toml` is the one toolchain pin.
 - Repository tools are `just` recipes (`just --list`); run them as
