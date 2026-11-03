@@ -178,9 +178,9 @@ pub fn alpha(r: &Reticle) -> f32 {
     alpha_of(r.spread_scale, r.ads, (r.alpha_scale, r.alpha_min))
 }
 
-/// What the crosshair came to on screen, as `cgis=crosshair_alpha` reports it: the drawn opacity to two places, or
-/// `hidden` when there was no reticle to draw (refused by [`allowed`], such as fully aimed with the gun drawn, or
-/// dead, flashbanged, `cg_drawCrosshair 0`).
+/// What the crosshair came to on screen, as the `cgame.crosshair_alpha` state fact reports it: the drawn opacity to
+/// two places, or `hidden` when there was no reticle to draw (refused by [`allowed`], such as fully aimed with the gun
+/// drawn, or dead, flashbanged, `cg_drawCrosshair 0`).
 pub fn shown(alpha: Option<f32>) -> String {
     alpha.map_or_else(|| "hidden".to_owned(), |a| format!("{a:.2}"))
 }

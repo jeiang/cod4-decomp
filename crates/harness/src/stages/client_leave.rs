@@ -3,19 +3,17 @@
 //! open the in-game menu, confirm Leave Game: the client must be back at the front end (no connection, no world,
 //! the main menu open and drawn, not a black screen). Then Quit from the main menu must end the process with
 //! status 0. Needs a display and the install; skips without.
+use super::client_custom_class::session_report;
 use super::client_flythrough::locate_client;
-use super::client_models::no_display;
-use super::client_session::{run_client, steps_problem};
+use super::client_models::{decode, no_display};
+use super::client_session::steps_problem;
+use crate::control::Driven;
 use crate::stage::{StageCtx, StageReport, Status};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::io;
+use std::time::Duration;
 
 const NAME: &str = "client-leave";
-
-const STEPS: &str = "set=set ui_netGametypeName war,click=Start New Server,menu=createserver:20,click=Start,menu=team_marinesopfor:90,\
-click=auto_assign,menu=changeclass:30,wait=1,click=Assault,ingame=120,wait=2,togglemenu,wait=1,\
-shot=ingame,click=Leave Game,menu=popup_leavegame:5,click=Yes,home=20,wait=2,shot=home,\
-click=Quit,menu=quit_popmenu:5,click=Yes,wait=5";
 
 /// The least share of the frame the front end lights up (a black screen is 0).
 const MIN_LIT: f64 = 0.02;
@@ -57,6 +55,120 @@ fn verdict(report: &Value) -> Option<String> {
     None
 }
 
+fn spawn(c: &mut Driven) -> Result<(), String> {
+    c.until(
+        json!({"net.spawned": true, "player.alive": true}),
+        Duration::from_secs(120),
+        "the player did not spawn",
+    )?;
+    Ok(())
+}
+
+fn lit_fraction(path: &std::path::Path) -> Result<f64, String> {
+    let (w, h, rgb) = decode(path)?;
+    let lit = rgb
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .filter(|p| p.iter().map(|v| u32::from(*v)).sum::<u32>() > 24)
+        .count();
+    Ok(lit as f64 / (w * h) as f64)
+}
+
+/// Plays through Leave Game and the return to the front end. Quit is separate: its real click closes the channel.
+fn leave(c: &mut Driven) -> Result<(), String> {
+    c.step("stock menu spawn", |c| {
+        c.console("set ui_netGametypeName war")?;
+        c.click("Start New Server")?;
+        c.until(
+            json!({"menu.open": {"contains": "createserver"}}),
+            Duration::from_secs(20),
+            "Start New Server did not open the create-server menu",
+        )?;
+        c.click("Start")?;
+        c.until(
+            json!({"menu.open": {"contains": "team_marinesopfor"}}),
+            Duration::from_secs(90),
+            "the listen server's team menu did not open",
+        )?;
+        c.click("auto_assign")?;
+        c.until(
+            json!({"menu.open": {"contains": "changeclass"}}),
+            Duration::from_secs(30),
+            "the class menu did not open after the team was picked",
+        )?;
+        c.pause(Duration::from_secs(1))?;
+        c.click("Assault")?;
+        spawn(c)
+    })?;
+    c.pause(Duration::from_secs(2))?;
+    c.step("ingame", |c| {
+        c.bind("togglemenu", "tap")?;
+        c.until(
+            json!({"menu.open.0": {"exists": true}}),
+            Duration::from_secs(5),
+            "the in-game menu did not open on the menu key",
+        )?;
+        c.pause(Duration::from_secs(1))?;
+        c.capture("ingame")?;
+        Ok(())
+    })?;
+    c.step("click=Leave Game", |c| c.click("Leave Game").map(|_| ()))?;
+    c.step("menu=popup_leavegame:5", |c| {
+        c.until(
+            json!({"menu.open": {"contains": "popup_leavegame"}}),
+            Duration::from_secs(5),
+            "Leave Game did not open its confirmation popup",
+        )?;
+        c.click("Yes")?;
+        Ok(())
+    })?;
+    c.step("home=20", |c| {
+        c.until(
+            json!({"net": null, "client.in_world": false, "menu.open": {"contains": "main"}}),
+            Duration::from_secs(20),
+            "Leave Game did not return to the main menu with no connection and no world",
+        )?;
+        c.pause(Duration::from_secs(2))?;
+        Ok(())
+    })?;
+    let lit = c.step("shot=home", |c| {
+        let path = c.capture("home")?;
+        lit_fraction(&path)
+    })?;
+    if let Some(step) = c.steps.last_mut() {
+        step["lit_fraction"] = json!(lit);
+    }
+    Ok(())
+}
+
+/// Whether a request failed because the client's channel went away: what the confirmed Quit is meant to do.
+fn channel_gone(e: &str) -> bool {
+    let e = e.to_ascii_lowercase();
+    e.contains("the channel closed")
+        || e.contains("connection reset")
+        || e.contains("broken pipe")
+        || e.contains("connection aborted")
+}
+
+/// Clicks Quit and confirms it. The confirmation ends the client, so its channel closing during that click is the
+/// expected outcome; the caller then waits for the process to exit on its own, with status 0.
+fn quit(c: &mut Driven) -> Result<(), String> {
+    c.step("click=Quit", |c| {
+        c.click("Quit")?;
+        c.until(
+            json!({"menu.open": {"contains": "quit_popmenu"}}),
+            Duration::from_secs(5),
+            "Quit did not open its confirmation popup",
+        )?;
+        match c.click("Yes") {
+            Ok(_) => Ok(()),
+            Err(e) if channel_gone(&e) => Ok(()),
+            Err(e) => Err(e),
+        }
+    })
+}
+
 pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let Some(client) = locate_client() else {
         return Ok(StageReport::new(NAME, Status::Skipped)
@@ -69,31 +181,80 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         return Ok(r);
     }
     let mut out = StageReport::new(NAME, Status::Passed);
-    match run_client(
-        &client,
-        install,
-        &ctx.dir,
-        &ctx.dir.join("config"),
-        &["--bots", "9"],
-        STEPS,
-        std::time::Duration::from_secs(240),
-    ) {
-        Ok(report) => {
-            out.files.push("ui-script.json".into());
-            out.files.push("ingame.png".into());
-            out.files.push("home.png".into());
-            if let Some(w) = verdict(&report) {
-                out.status = Status::Failed;
-                out.reason = Some(w);
-            }
-        }
+    let dir = ctx.dir.join("control");
+    let mut c = match Driven::start(&client, install, &dir, &["--bots", "9"]) {
+        Ok(c) => c,
         Err(e) => {
             out.status = Status::Failed;
             out.reason = Some(e);
+            return Ok(out);
+        }
+    };
+    let left = leave(&mut c);
+    let report = session_report(&mut c, "control-run.json");
+    let quit = if left.is_ok() && report.is_ok() {
+        Some(quit(&mut c))
+    } else {
+        None
+    };
+    let steps = c.steps.clone();
+    // A confirmed Quit must end the process by itself: nothing more is sent to it. Any other run is ended by the
+    // channel's `quit`, and does not count as Quit reaching the exit.
+    let confirmed = quit.as_ref().is_some_and(|r| r.is_ok());
+    let status = if confirmed {
+        c.wait_exit(Duration::from_secs(30))
+    } else {
+        c.finish(Duration::from_secs(30))
+    };
+    let exited = confirmed && status.is_some_and(|s| s.success());
+    out.files.push("control/control-run.json".into());
+    for f in ["ingame", "home"] {
+        if dir.join(format!("{f}.png")).is_file() {
+            out.files.push(format!("control/{f}.png"));
         }
     }
-    out.notes
-        .push("Leave Game returned to the drawn main menu; Quit exited with status 0".into());
+    let mut problem = left.err();
+    if let Some(Err(e)) = quit {
+        problem = Some(e);
+    }
+    match report {
+        Err(e) if problem.is_none() => {
+            problem = Some(format!("the run's report could not be read: {e}"));
+        }
+        Err(_) => {}
+        Ok(mut report) => {
+            report["steps"] = json!(steps);
+            report["quit"] = json!(exited);
+            if let Some(step) = report["steps"]
+                .as_array()
+                .and_then(|steps| steps.iter().find(|step| step["step"] == "shot=home"))
+            {
+                out.metrics.insert(
+                    "home.lit_fraction".into(),
+                    step["lit_fraction"].as_f64().unwrap_or(0.0),
+                );
+            }
+            if let Err(e) = std::fs::write(
+                dir.join("control-run.json"),
+                serde_json::to_vec_pretty(&report).unwrap_or_default(),
+            ) {
+                if problem.is_none() {
+                    problem = Some(format!("could not finish the run report: {e}"));
+                }
+            } else if let Some(w) = verdict(&report)
+                && problem.is_none()
+            {
+                problem = Some(w);
+            }
+        }
+    }
+    if let Some(w) = problem {
+        out.status = Status::Failed;
+        out.reason = Some(w);
+    } else {
+        out.notes
+            .push("Leave Game returned to the drawn main menu; Quit exited with status 0".into());
+    }
     Ok(out)
 }
 

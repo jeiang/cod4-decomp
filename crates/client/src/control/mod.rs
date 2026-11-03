@@ -3,7 +3,7 @@
 //!
 //! [`Control`] is all the game state and input the requests need, so the request handling ([`handle`]) can be read
 //! and tested without a window: it names the player's own paths (the menus' pointer, the console's field, the input
-//! layer's binds) rather than the internals the `--ui-script` steps reach for.
+//! layer's binds) rather than reaching into the game's internals.
 //!
 //! A request that cannot be answered yet (a wait, a capture, a step) returns [`devctrl::Outcome::Wait`] and is offered
 //! again next frame; the frame count and the wait clock are the host's.

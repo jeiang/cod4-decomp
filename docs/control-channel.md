@@ -37,7 +37,7 @@ Every request is an object with an optional `id` (echoed back) and a `cmd`:
 | `cmd` | what it does |
 |---|---|
 | `ping` | the client's name and frames drawn |
-| `state [what]` | the state document, or one of its sections: `client menu player entities scoreboard hud draw sound fx events net console cvars binds view server watch` (`events`: `world` by kind, `own` by `sim::pm::ev` number; `menu.items` carry each item's `name`, shown `text`, `visible` and `rect`) |
+| `state [what]` | the state document, or one of its sections: `client menu player entities scoreboard hud draw render sound fx events net console cvars binds view look server watch` (`events`: `world` by kind, `own` by `sim::pm::ev` number; `menu.items` carry each item's `name`, shown `text`, `visible` and `rect`); `report`, `gfx` and `cgame`, named only, are the match's counters and the graphics and cgame facts (below) |
 | `cvar name [value]` | read a variable, or set it |
 | `cvars [filter]` | every variable, or those whose name contains `filter` |
 | `binds command` | the keys bound to a command |
@@ -45,8 +45,9 @@ Every request is an object with an optional `id` (echoed back) and a `cmd`:
 | `text text` | type into the console's field (the client must have it open) |
 | `mouse {x,y}` / `{dx,dy}` / `button` / `wheel` | move the pointer, look, click, scroll |
 | `exec line` | run a console line as Enter does |
+| `dev {op, arg}` | run one of the client's dev hooks (below): scenario setup no key or menu of the player's reaches |
 | `viewpos {origin,angles}` | place the camera (`setviewpos`) |
-| `capture [dir] [base64]` | save the frame on screen as a PNG, after it is drawn |
+| `capture [dir] [base64] [after]` | save the frame on screen as a PNG, after it is drawn; `"after":"distortion"` saves the first frame from now that copied the scene for a distortion material, or fails after 10 s |
 | `wait {state, timeout_ms}` | answer when the state document matches (or the clock runs out: `ok` false with `observed`) |
 | `assert {state}` | one look: `ok` false unless the state matches now |
 | `step frames` | answer after that many frames |
@@ -81,8 +82,11 @@ the GPU to outpace the server. It neither injects usercmds nor changes their sel
 without polling new traffic to check retained input. Ordinary listen-server scheduling is unchanged outside
 this explicit request.
 
-Paths a stage leans on: `menu.open` (the stack), `menu.items[]` (`menu`, `name`, `text` as shown, `visible`, and
-`rect` `[x, y, w, h]` in window pixels, the rectangle a click is tested against: a static text item's is its text's),
+Paths a stage leans on: `menu.open` (the stack), `menu.server_rows` (the join menu's server list rows, counted from
+the answers already in without polling the network, so reading it changes nothing),
+`menu.items[]` (`menu`, `name`, `text` as shown, `visible`, `owner_draw` (its owner-draw number, 0 for none),
+`choice` (a yes/no, multiple-choice or dvar-enum setting), and `rect` `[x, y, w, h]` in window pixels, the rectangle a
+click is tested against: a static text item's is its text's),
 `console.open` and `console.text` (the console's lines as one text, for `contains`), `player.alive|dead|origin|angles|
 team|client|snapshot|teleport`, `entities.list[]` (`kind`, `origin`, `team`, `dead`, `client`, `actor`, `model`,
 `model_name`), `watch` (`first`, `last`, `received`, `present`, `matched`, `breaks`), `hud.report` (what the HUD shows
@@ -90,8 +94,38 @@ now: `live`, `health`, `frag`, `second`, `overlay_alpha`, `unresolved_text`), `h
 `messages`, `chat`, `window_lines`, `scoreboard_frames`, `killcam_frames`, `names_max`, `unresolved`, `debug_lines`
 and `debug_strings` (the listen server's `line`/`print3d` drawings on screen last frame), ...),
 `hud.live` (`killcam`, `dead`, `intermission`, `following`, `feed`, `players_listed`), `hud.scoreboard_shown`, and
-`net.spawned` with `net.view` (`death_view_frames`, `death_view_range_max`, `dof_frames`), and `look` (`naked`,
+`net.spawned` with `net.levels` (the levels the client has begun: each map load and each `map_restart`'s new game
+state) and `net.view` (`death_view_frames`, `death_view_range_max`, `dof_frames`), and `look` (`naked`,
 `night`, `goggles`, `night_vision`, `channel`, `blend` with `ms`, `missing`, `applied`, the last goggles `switch`).
+
+`client.gpu_health` is what the graphics device went through (`device_losses`, `errors`) and `client.load` what the
+last map load measured until the player spawned (`map`, `load_ms`, `to_spawn_ms`, `frames`, `max_frame_gap_ms`,
+`slow_gaps_ms`); `gpu_health` is the object `client.json` reports under that name. A look at `gpu_health` leaves
+the device's errors where they are, so a lost device's own noise, which may show between the loss and the recovery,
+is still dropped when the client records the loss. `gfx` is what the graphics
+settings came to in the renderer and on the surface, by name (`aa`, `aa_max`,
+`specular`, `dof`, `blur`, `blur_radius`, `blur_shape`, `glow`, `shadows`, `aniso`, `mipmode`, `dlights`, `postlights`, `aspect`,
+`fullscreen`, `uncapped`, `zfeather`, `nearfar`, `depthhack_near`, `outdoor`, `sun_tweak`, `film_tweak`,
+`glow_tweak`, `sun_flare`, `sun_fx_position`, `water`, `picmip`, `pace`), and `cgame` what the cgame drew last
+frame, by name (`gun`, `hud2d`, `fps`, `fpstext`, `fullbright`, `shock`, `centertime`,
+`heli_camera`, `air_camera`, `brightness`, `film_sample`, `crosshair_alpha`, `window_position`, `levelfade`,
+`eyebob`, `subtitle`). Each fact is text (numbers separated by spaces), `null` where it needs what is
+not up (a world renderer, a match). Like `report`, both are built only when named (`state gfx`): a bare `state`, a
+`wait` and an `assert` leave them out rather than query the surface and the adapter every frame, so a stage reads
+them. Effect counts are `fx.played.<kind>`.
+
+`report` is what the match saw so far, the `net` object of `client.json`: the run's counters,
+such as `vehicles_max_drawn` and `vehicles_unloaded`, `projectiles_max_drawn`, `missiles_seen` (by weapon name),
+`brush_models_seen` and `brush_models_max`, `spawned`, `players_seen` and `players_drawn`. It is built only when
+named (`state report`): a bare `state`, a `wait` and an `assert` leave it out, so a stage polls it.
+
+The dev hooks of `dev` are for what a scenario sets up that the player has
+no key for: `losedevice` (destroys the graphics device, as a driver reset does), `dlight` (`arg` `1` puts a bright
+test light in front of the camera, `0` removes it), `pacereset` (counts frames from now for `gfx.pace`), and in a
+match `laser` (`arg` `1` draws a laser sight from just below the eye along the view each frame, `0` removes it),
+`fxdemo` (`arg` an effect played in front of the player every 1.5 s, `off`), `bobmark` (starts `cgame.eyebob`
+over), `hitflesh` (a bullet of the weapon in hand strikes a player 64 units ahead), `shock` (`arg` ms of the default
+shellshock) and `subtitle` (`arg` a string key shown as a started sound's subtitle).
 
 `net.motd` is the server's message of the day as the client holds it (`CS_MOTD`, configstring 10).
 
@@ -152,8 +186,9 @@ ownerdraw differences.
 server the stage already owns, asks, waits, presses binds and keys, types, clicks a menu item by name or text where
 the state document put it, and captures;
 `Walker` is a stage's own player in a match, turning toward the nearest living enemy with the mouse (or the arrow
-keys when the pointer could not be locked), walking with the forward key and firing with the attack button. The
-match stages move onto it one by one (#376): `client-hud` plays its whole match through the channel.
+keys when the pointer could not be locked), walking with the forward key and firing with the attack button. No stage
+uses the removed `--ui-script` runner any more (#376); the dev hooks the driven stages still use set up what no key
+or menu of the player's reaches, and each is followed by a check of what the player sees.
 
 Mouse look needs what a person's does: the window focused and the pointer locked (`client.focused`,
 `client.pointer_locked`, and `client.look_gate` names what drops the motion). A headless wlroots backend supplies
