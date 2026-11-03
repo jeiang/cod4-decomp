@@ -110,6 +110,8 @@ const SCORES_INTERVAL: Duration = Duration::from_secs(2);
 const SCORES_MISSING_INTERVAL: Duration = Duration::from_secs(10);
 /// How long a player model is kept after the snapshots stop mentioning it.
 const GONE_AFTER: Duration = Duration::from_millis(500);
+/// How far below the eye the test laser (`laser=`) starts, so its beam shows as a line to what it strikes.
+const TEST_LASER_DROP: f32 = 6.0;
 
 /// Whether `spawn` starts a life the client has not seen yet (the first snapshot counts), remembering it in `last`.
 fn new_life(last: &mut Option<u16>, spawn: u16) -> bool {
@@ -150,8 +152,8 @@ fn fixed_fov(ps: &PlayerState) -> Option<f32> {
 }
 
 /// The settings of the client that change what it makes of the match: the on/off ones (`cg_drawCrosshair`,
-/// `ragdoll_enable`, `fx_marks`, `cg_blood`, `cg_brass`, `cg_drawGun`; all on, as the stock defaults have them) and
-/// the physics tunables.
+/// `ragdoll_enable`, `fx_marks`, `cg_blood`, `cg_brass`, `cg_drawGun`, `cg_laserLight`; all on, as the stock defaults
+/// have them) and the physics tunables.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Switches {
     /// The weapon's crosshair is drawn.
@@ -180,6 +182,8 @@ pub struct Switches {
     pub bullet: fx::BulletTune,
     /// `nightVisionDisableEffects` is off: the goggles' vision set and overlay apply (`CG_LookingThroughNightVision`).
     pub night_vision_effects: bool,
+    /// `cg_laserLight`: laser sights cast their post light on what they strike.
+    pub laser_light: bool,
 }
 
 impl Default for Switches {
@@ -198,6 +202,7 @@ impl Default for Switches {
             killcam: crate::camera::KillCamTune::default(),
             bullet: fx::BulletTune::default(),
             night_vision_effects: true,
+            laser_light: true,
         }
     }
 }
@@ -231,6 +236,7 @@ impl Switches {
             killcam: crate::camera::KillCamTune::read(c),
             bullet: bullet_tune(c),
             night_vision_effects: !c.bool("nightVisionDisableEffects"),
+            laser_light: on("cg_laserLight"),
         }
     }
 }
@@ -399,6 +405,9 @@ struct Counters {
     /// Frames in which another player was reloading, swinging the knife or throwing a grenade: weapon handling that
     /// always has a torso clip, so a run with some must have shown one.
     remote_weapon_frames: u64,
+    /// Levels this client has begun (a map load or a `map_restart`'s new game state), each one through
+    /// [`NetPlay::new_level`]: a harness waits on it to see a round restart reach the client.
+    levels: u64,
     spawned: bool,
     start: Option<[f32; 3]>,
     end: [f32; 3],
@@ -431,8 +440,6 @@ struct Counters {
     projectiles_max: usize,
     /// Missiles seen, one entry per entity and weapon: a weapon's count is how many projectiles of it appeared.
     missiles_seen: std::collections::BTreeSet<(u16, u16)>,
-    /// The missile entities the local player launched (`client` is the owner), by entity number.
-    own_missiles: std::collections::BTreeSet<u16>,
     /// Events received, by kind.
     events: std::collections::BTreeMap<&'static str, u64>,
     /// The own player's events the prediction delivered (`EV_FIRE_WEAPON`, `EV_RELOAD`, ...), by event number: what
@@ -574,8 +581,12 @@ pub struct NetPlay {
     tracer_material: Option<std::sync::Arc<assets::zone::gfx::Material>>,
     /// `gfx_laser`, which laser sights are drawn with; none, none are drawn.
     laser_material: Option<std::sync::Arc<assets::zone::gfx::Material>>,
+    /// `gfx_laser_light`, the post light laser sights cast; none, none is drawn.
+    laser_light_material: Option<std::sync::Arc<assets::zone::gfx::Material>>,
     /// The laser sights of this frame's script models, drawn with the effects.
     lasers: Vec<crate::laser::Beam>,
+    /// A test laser from below the eye along the view is drawn each frame (the `laser=` script step).
+    test_laser: bool,
     /// Earthquakes shaking the view.
     shakes: sim::shake::CameraShakes,
     props: Props,
@@ -587,14 +598,12 @@ pub struct NetPlay {
     max_turn: [f32; 2],
     /// The effect `--fx-demo` plays, and when it last did.
     fx_demo: Option<(String, Option<i32>)>,
-    /// A bullet hit on a player 64 units ahead, asked for by the `hitflesh` script step, played by the next frame.
+    /// A bullet hit on a player 64 units ahead, asked for by the `hitflesh` dev hook, played by the next frame.
     want_flesh_hit: bool,
-    /// Subtitles a `subtitle=` script step injected, taken with the sound engine's.
+    /// Subtitles the `subtitle` dev hook injected, taken with the sound engine's.
     injected_subtitles: Vec<audio::engine::Subtitle>,
     /// The server announced a level the app has not acted on yet.
     new_level: Option<String>,
-    /// Levels begun since the join: each map change or round restart ([`Self::new_level`]) counts one.
-    levels: u32,
     /// `clientSideEffects`, from the cvar store each frame; read when a level starts.
     client_side_effects: bool,
     /// `snd_levelFadeTime`, from the cvar store each frame; read when a level starts.
@@ -719,7 +728,9 @@ impl NetPlay {
             switches: Switches::default(),
             tracer_material: None,
             laser_material: None,
+            laser_light_material: None,
             lasers: Vec::new(),
+            test_laser: false,
             shakes: Default::default(),
             lib,
             models_warmed: HashSet::new(),
@@ -734,7 +745,6 @@ impl NetPlay {
             want_flesh_hit: false,
             injected_subtitles: Vec::new(),
             new_level: None,
-            levels: 0,
             client_side_effects: true,
             level_fade_ms: crate::sound::LEVEL_FADE_MS,
             stat_sync: crate::profile::StatSync::default(),
@@ -753,13 +763,13 @@ impl NetPlay {
     }
 
     /// Plays, on the next frame, what a bullet of the weapon in hand striking a player 64 units ahead shows: the
-    /// flesh row of the impact table, or the no-blood effect with `cg_blood` off (for the `hitflesh` script step).
+    /// flesh row of the impact table, or the no-blood effect with `cg_blood` off (for the `hitflesh` dev hook).
     pub fn inject_flesh_hit(&mut self) {
         self.want_flesh_hit = true;
     }
 
     /// A `shellshock` server command for the player, `ms` of the default shock, as the server sends one for a
-    /// nearby explosion (for the `shock=` script step).
+    /// nearby explosion (for the `shock` dev hook).
     pub fn inject_shock(&mut self, ms: i32) {
         self.net.commands.push(
             net::ui::ServerCmd::ShellShock {
@@ -770,19 +780,13 @@ impl NetPlay {
         );
     }
 
-    /// A sound's subtitle `key` of `ms`, as the sound engine reports one of a started sound (for the `subtitle=`
-    /// script step).
+    /// A sound's subtitle `key` of `ms`, as the sound engine reports one of a started sound (for the `subtitle` dev
+    /// hook).
     pub fn inject_subtitle(&mut self, key: &str, ms: u32) {
         self.injected_subtitles.push(audio::engine::Subtitle {
             key: key.into(),
             ms,
         });
-    }
-
-    /// How often an effect kind was played this level (`fx.played` of the report; `shell_eject`, `bullet_impact`,
-    /// `bullet_impact_noblood`, ...).
-    pub fn fx_played(&self, kind: &str) -> u64 {
-        self.effects.played.get(kind).copied().unwrap_or(0)
     }
 
     /// A deterministic view through the same camera/DOF builders the killcam uses. Console-driven harness checks
@@ -810,14 +814,6 @@ impl NetPlay {
             "{position} {fov:.0} {:.0} {:.0} {:.0} {:.0} {:.0} {:.0}",
             dof.near_start, dof.near_end, dof.far_start, dof.far_end, dof.near_blur, dof.far_blur
         )
-    }
-    /// A copy of every effect count, for a script's `fxmark` step.
-    pub fn fx_counts(&self) -> HashMap<String, u64> {
-        self.effects
-            .played
-            .iter()
-            .map(|(k, v)| ((*k).to_owned(), *v))
-            .collect()
     }
 
     pub fn refused(&self) -> Option<&str> {
@@ -847,30 +843,6 @@ impl NetPlay {
     /// Whether the last frame drew the view model (`cg_drawGun` on and no scope up).
     pub fn gun_drawn(&self) -> bool {
         self.gun_drawn
-    }
-
-    /// The `MISSILE` entities of the newest snapshot: the grenades, rockets and packs in flight or at rest.
-    pub fn missiles(&self) -> usize {
-        self.net
-            .latest()
-            .map(|s| {
-                s.entities
-                    .iter()
-                    .filter(|e| e.etype == etype::MISSILE)
-                    .count()
-            })
-            .unwrap_or(0)
-    }
-
-    /// How many distinct missile entities the local player launched have been drawn so far (a grenade thrown, a
-    /// rocket fired): grows by one per own projectile that appeared, never for another player's.
-    pub fn missiles_appeared(&self) -> usize {
-        self.c.own_missiles.len()
-    }
-
-    /// Explosions received so far.
-    pub fn explosions(&self) -> u64 {
-        self.c.events.get("explosion").copied().unwrap_or(0)
     }
 
     /// Where the join stands, for the browser overlay: "connecting", "connected" (snapshots arrive) or "spawned".
@@ -998,16 +970,23 @@ impl NetPlay {
         }
     }
 
-    /// The materials the tracers (`gfx_tracer`) and laser sights (`gfx_laser`) are drawn with, from the UI zones; kept
-    /// across levels.
+    /// The materials the tracers (`gfx_tracer`), laser sights (`gfx_laser`) and their post lights (`gfx_laser_light`)
+    /// are drawn with, from the UI zones; kept across levels.
     pub fn set_beam_materials(
         &mut self,
         tracer: Option<std::sync::Arc<assets::zone::gfx::Material>>,
         laser: Option<std::sync::Arc<assets::zone::gfx::Material>>,
+        laser_light: Option<std::sync::Arc<assets::zone::gfx::Material>>,
     ) {
         self.effects.set_tracer_material(tracer.clone());
         self.tracer_material = tracer;
         self.laser_material = laser;
+        self.laser_light_material = laser_light;
+    }
+
+    /// Draws a test laser from just below the eye along the view each frame, or stops.
+    pub fn set_test_laser(&mut self, on: bool) {
+        self.test_laser = on;
     }
 
     /// What the player has set about tracers (`cg_tracerchance` and the like).
@@ -1029,11 +1008,6 @@ impl NetPlay {
     /// The map the server announced since the last call: the app then calls [`Self::new_level`].
     pub fn take_new_level(&mut self) -> Option<String> {
         self.new_level.take()
-    }
-
-    /// How many levels the client has begun since the join (a round restart counts).
-    pub fn levels(&self) -> u32 {
-        self.levels
     }
 
     /// Starts over for a new level: the old one's prediction, models, events and clock are meaningless. With `world`
@@ -1091,8 +1065,8 @@ impl NetPlay {
         self.fog.reset();
         self.scan = crate::hud::NameScan::default();
         self.c.spawned = false;
+        self.c.levels += 1;
         self.c.start = None;
-        self.levels += 1;
         Ok(())
     }
 
@@ -1284,7 +1258,7 @@ impl NetPlay {
         self.sound.set_volume(volume);
     }
 
-    /// The subtitles of the sounds the server had played since the last call, and any a script step injected.
+    /// The subtitles of the sounds the server had played since the last call, and any a dev hook injected.
     pub fn take_subtitles(&mut self) -> Vec<audio::engine::Subtitle> {
         let mut v = self.sound.take_subtitles();
         v.append(&mut self.injected_subtitles);
@@ -2115,14 +2089,31 @@ impl NetPlay {
         self.props.update(dt, self.boxes.world());
         self.prop_effects();
         let mut drawn = self.effects.draw(eye, yaw, pitch, roll);
-        let lasers = std::mem::take(&mut self.lasers);
-        if !lasers.is_empty() {
-            logging::dedup!(
-                WARN,
-                "laser-light",
-                issue = 516,
-                "laser sights are drawn without their post light (gfx_laser_light), see #516"
+        let mut lasers = std::mem::take(&mut self.lasers);
+        if self.test_laser {
+            let forward = Vec3::new(
+                yaw.cos() * pitch.cos(),
+                yaw.sin() * pitch.cos(),
+                pitch.sin(),
             );
+            let origin = eye - Vec3::Z * TEST_LASER_DROP;
+            let reach = origin + forward * crate::laser::RANGE;
+            let tr = self.boxes.world().trace(
+                origin.to_array(),
+                reach.to_array(),
+                [0.0; 3],
+                [0.0; 3],
+                own,
+                sim::contents::MASK_SHOT,
+            );
+            lasers.push(crate::laser::Beam::new(
+                origin,
+                forward,
+                tr.fraction,
+                tr.contents,
+            ));
+        }
+        if !lasers.is_empty() {
             if self.laser_material.is_none() {
                 logging::dedup!(
                     WARN,
@@ -2131,11 +2122,27 @@ impl NetPlay {
                     "laser sights are not drawn: the gfx_laser material is not loaded (#411)"
                 );
             }
+            if self.switches.laser_light && self.laser_light_material.is_none() {
+                logging::dedup!(
+                    WARN,
+                    "laser-light-material",
+                    issue = 516,
+                    "laser sights cast no post light: the gfx_laser_light material is not loaded (#516)"
+                );
+            }
         }
         if let Some(m) = &self.laser_material
             && let Some(mesh) = crate::laser::mesh(m, &lasers, eye)
         {
             drawn.meshes.push(mesh);
+        }
+        // `CG_Laser_Add_Core`: with `cg_laserLight` on, each laser lights what it strikes.
+        if self.switches.laser_light
+            && let Some(m) = &self.laser_light_material
+        {
+            drawn
+                .meshes
+                .extend(crate::laser::light_meshes(m, &lasers, eye));
         }
         drawn.models.extend(projectiles);
         drawn.sway = self.shakes.sway(st, eye.to_array());
@@ -2790,6 +2797,7 @@ impl NetPlay {
                                 f.origin,
                                 forward,
                                 tr.fraction,
+                                tr.contents,
                             ));
                         }
                     }
@@ -2891,13 +2899,6 @@ impl NetPlay {
         let mut looping = Vec::new();
         for e in flying {
             self.c.missiles_seen.insert((e.number, e.weapon));
-            if self
-                .net
-                .latest()
-                .is_some_and(|s| e.client == s.ps.client_num)
-            {
-                self.c.own_missiles.insert(e.number);
-            }
             let Some(def) = self.lib.content.weapon(self.weapons.name(e.weapon)) else {
                 logging::dedup!(
                     WARN,

@@ -869,6 +869,9 @@ impl Game {
         });
         self.set_configstring(cs::AMBIENT, &ambient);
         self.set_configstring(cs::MESSAGE, get(world, "message").unwrap_or(""));
+        // `SP_worldspawn` (KisakCOD `game_mp/g_spawn_mp.cpp:646`): the message of the day, read at each level spawn.
+        let motd = self.cvars.string("g_motd").to_owned();
+        self.set_configstring(cs::MOTD, &motd);
         self.cvars
             .force("g_gravity", get(world, "gravity").unwrap_or("800"));
         let north = get(world, "northyaw").unwrap_or("");

@@ -114,6 +114,9 @@ pub const GLOW_APPLY: u32 = 0x2C;
 pub const GAMETIME: u32 = 0x12;
 pub const PARTICLE_CLOUD_COLOR: u32 = 0x11;
 pub const PARTICLE_CLOUD_MATRIX: u32 = 0x35;
+/// A code mesh's two arguments (`codeMeshArgs`): a post light's start and span (`FX_PostLight_GenerateVerts`).
+pub const CODE_MESH_ARG_0: u32 = 0x37;
+pub const CODE_MESH_ARG_1: u32 = 0x38;
 pub const ZNEAR: u32 = 0x22;
 pub const SUN_POSITION: u32 = 0x23;
 pub const SUN_DIFFUSE: u32 = 0x24;
@@ -251,6 +254,8 @@ pub struct Object {
     /// A particle cloud's `PARTICLE_CLOUD_MATRIX` (the 2x2 that takes a corner's offset to view space) and
     /// `PARTICLE_CLOUD_COLOR`.
     pub particle: [[f32; 4]; 2],
+    /// `CODE_MESH_ARG_0` and `CODE_MESH_ARG_1`.
+    pub code_mesh: [[f32; 4]; 2],
 }
 
 impl Default for Object {
@@ -259,6 +264,7 @@ impl Default for Object {
             world: Mat4::IDENTITY,
             base_lighting: [0.0, 0.0, 0.5, 1.0],
             particle: [[0.0; 4]; 2],
+            code_mesh: [[0.0; 4]; 2],
         }
     }
 }
@@ -375,6 +381,8 @@ impl FrameConsts {
                 BASE_LIGHTING_COORDS => obj.base_lighting,
                 PARTICLE_CLOUD_MATRIX => obj.particle[0],
                 PARTICLE_CLOUD_COLOR => obj.particle[1],
+                CODE_MESH_ARG_0 => obj.code_mesh[0],
+                CODE_MESH_ARG_1 => obj.code_mesh[1],
                 _ => self.vec[id as usize],
             };
         }
@@ -470,5 +478,18 @@ mod tests {
         };
         assert_eq!(f.value(PARTICLE_CLOUD_MATRIX, 0, &o), [1., 2., 3., 4.]);
         assert_eq!(f.value(PARTICLE_CLOUD_COLOR, 0, &o), [0.5; 4]);
+    }
+
+    #[test]
+    fn a_code_meshs_arguments_come_from_the_object() {
+        assert_eq!(NAMES[CODE_MESH_ARG_0 as usize], "CODE_MESH_ARG_0");
+        assert_eq!(NAMES[CODE_MESH_ARG_1 as usize], "CODE_MESH_ARG_1");
+        let f = FrameConsts::new(Mat4::IDENTITY, Mat4::IDENTITY, Vec3::ZERO);
+        let o = Object {
+            code_mesh: [[1., 2., 3., 0.5], [4., 5., 6., 0.25]],
+            ..Object::default()
+        };
+        assert_eq!(f.value(CODE_MESH_ARG_0, 0, &o), [1., 2., 3., 0.5]);
+        assert_eq!(f.value(CODE_MESH_ARG_1, 0, &o), [4., 5., 6., 0.25]);
     }
 }

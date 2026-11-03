@@ -3,7 +3,7 @@
 //!
 //! [`Control`] is all the game state and input the requests need, so the request handling ([`handle`]) can be read
 //! and tested without a window: it names the player's own paths (the menus' pointer, the console's field, the input
-//! layer's binds) rather than the internals the `--ui-script` steps reach for.
+//! layer's binds) rather than reaching into the game's internals.
 //!
 //! A request that cannot be answered yet (a wait, a capture, a step) returns [`devctrl::Outcome::Wait`] and is offered
 //! again next frame; the frame count and the wait clock are the host's.
@@ -12,8 +12,9 @@ pub mod host;
 
 pub use host::{Control, handle};
 
-/// The state document's sections: what `{"cmd":"state"}` without a `what` returns, and what a `wait` or an `assert`
-/// builds for the paths it names.
+/// The client-side state document's sections: what `{"cmd":"state"}` without a `what` returns, and what a `wait`
+/// or an `assert` builds for the paths it names. `state what=server` is separate because the listen server answers
+/// asynchronously between its own frames.
 pub const PARTS: &[&str] = &[
     "client",
     "menu",
@@ -33,7 +34,6 @@ pub const PARTS: &[&str] = &[
     "binds",
     "view",
     "look",
-    "server",
     "watch",
 ];
 

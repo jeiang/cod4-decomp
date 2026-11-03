@@ -53,17 +53,8 @@ pub fn free_standard_port() -> u16 {
         .unwrap_or(0)
 }
 
-/// Console lines for the running listen server (the harness's `server=` steps), run between its frames.
+/// Console lines for the running listen server (the `bots` command, the saved `bot_count`), run between its frames.
 static CONSOLE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-
-/// The objective counters of the running listen server, as of its last frame batch.
-static OBJECTIVES: std::sync::Mutex<(u64, u64, u64, u64, u64)> =
-    std::sync::Mutex::new((0, 0, 0, 0, 0));
-
-/// Bombs planted, bombs defused, airstrikes called in, helicopters called in and helicopter shots so far.
-pub fn objectives() -> (u64, u64, u64, u64, u64) {
-    OBJECTIVES.lock().map_or((0, 0, 0, 0, 0), |o| *o)
-}
 
 /// The running listen server's `line`/`print3d` drawings as of its last frame (`cls.debug.svLinesBuffer`,
 /// `svStringsBuffer`): the original draws them only in the hosting process, never over the network.
@@ -103,52 +94,6 @@ pub fn request(seq: u64, req: &serde_json::Map<String, Value>) -> Option<Result<
         return Some(Err("the listen server's request queue is gone".to_owned()));
     }
     None
-}
-
-/// Answers one request against the running server.
-fn answer(s: &mut Server, req: &serde_json::Map<String, Value>) -> Result<Value, String> {
-    let op = req.get("op").and_then(Value::as_str).unwrap_or("state");
-    match op {
-        "state" => {
-            let what = req.get("what").and_then(Value::as_str);
-            Ok(s.control_state(what))
-        }
-        "exec" => {
-            let line = req
-                .get("line")
-                .and_then(Value::as_str)
-                .ok_or("exec needs the line")?;
-            s.exec_line(line)?;
-            Ok(json!({"ok": true, "line": line}))
-        }
-        "cvar" => {
-            let name = req
-                .get("name")
-                .and_then(Value::as_str)
-                .ok_or("cvar needs a name")?;
-            match req.get("value").and_then(Value::as_str) {
-                None => Ok(json!({"name": name, "value": s.control_cvar(name)})),
-                // `"force": true` writes as the engine does (`devmap` sets the init-protected `sv_cheats` so).
-                Some(v) if req.get("force").and_then(Value::as_bool) == Some(true) => {
-                    s.game.cvars.force(name, v);
-                    Ok(json!({"name": name, "value": s.control_cvar(name)}))
-                }
-                Some(v) => {
-                    s.exec_line(&format!("set {name} \"{}\"", v.replace('"', "'")))?;
-                    Ok(json!({"name": name, "value": s.control_cvar(name)}))
-                }
-            }
-        }
-        "command_frame" => {
-            let ms = req.get("collect_ms").and_then(Value::as_u64).unwrap_or(0);
-            // 24 usercmds per tick (`MAX_CMDS_PER_FRAME`) at the 125 Hz send cap: about 190 ms fits one tick.
-            if ms > 190 {
-                return Err("command_frame collect_ms must be at most 190".to_owned());
-            }
-            Ok(s.control_command_frame(Duration::from_millis(ms)))
-        }
-        other => Err(format!("no such server request: {other}")),
-    }
 }
 
 /// Queues `line` for the listen server's console.
@@ -349,7 +294,7 @@ fn run(
             .map(|mut q| std::mem::take(&mut *q))
             .unwrap_or_default();
         for (seq, req) in asked {
-            let reply = answer(&mut server, &req);
+            let reply = server.control_request(&req);
             if let Ok(mut replies) = REPLIES.lock() {
                 replies.push((seq, reply));
             }
@@ -384,15 +329,6 @@ fn run(
             tracing::warn!(%map, cause, at, error = %text, "script error on the listen server");
         }
         reported_errors = server.all_script_errors.len();
-        if let Ok(mut o) = OBJECTIVES.lock() {
-            *o = (
-                server.game.stats.plants,
-                server.game.stats.defuses,
-                server.game.stats.airstrikes,
-                server.game.stats.helicopters,
-                server.game.stats.heli_shots,
-            );
-        }
         if let Ok(mut d) = DEBUG_DRAW.lock() {
             d.shown_lines
                 .clone_from(&server.game.debug_draw.shown_lines);

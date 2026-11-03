@@ -14,6 +14,7 @@ pub mod client;
 pub mod cmd;
 pub mod combat;
 pub mod content;
+mod control;
 pub mod cvar;
 pub mod debugdraw;
 pub mod delta;
