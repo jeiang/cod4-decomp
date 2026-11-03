@@ -159,7 +159,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         }
 
         // #523: the server's message of the day, read at the level spawn `map_restart` runs, reaches the client in
-        // `CS_MOTD` (10), which the stock `configstrings` console command lists.
+        // `CS_MOTD` (10), which it holds (`net.motd`) and its stock `configstrings` console command lists.
         c.ask(json!({"cmd": "server", "op": "exec", "line": format!("set g_motd \"{MOTD}\"")}))?;
         let loads = c.ask(json!({"cmd": "server", "op": "state", "what": "map"}))?["level_loads"]
             .as_u64()
@@ -183,13 +183,14 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             Duration::from_secs(120),
             "the player did not spawn after map_restart",
         )?;
-        exec(c, "configstrings")?;
-        console_until(
-            c,
-            &format!("  10: {MOTD}"),
-            1,
-            "g_motd in the client's configstrings after map_restart",
-        )?;
+        if let Err(e) = c.until(
+            json!({"net.motd": MOTD}),
+            Duration::from_secs(10),
+            "g_motd never reached the client's CS_MOTD after map_restart",
+        ) {
+            let server = c.ask(json!({"cmd": "server", "op": "cvar", "name": "g_motd"}))?;
+            return Err(format!("{e}; the server's g_motd: {server}"));
+        }
 
         // #370 without cheats: each verb is refused in the player's language, never as the raw key.
         let seen = console_count(c, REFUSAL)?;
