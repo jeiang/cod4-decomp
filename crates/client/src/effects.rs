@@ -14,7 +14,7 @@
 
 use crate::ambient::Ambient;
 use crate::decal::{self, Placement};
-use crate::events::{ClientEvent, Events, Shooter};
+use crate::events::{ClientEvent, Events, ImpactSource, Shooter};
 use crate::tracer::{self, Tracers};
 use crate::viewmodel::ViewTags;
 use assets::zone::fx::{FxEffectDef, FxImpactTable};
@@ -206,6 +206,8 @@ pub struct Effects {
     /// bounces, blasts and duds on flesh. Stock draws at most one blood effect for each, and nothing else draws one
     /// (`CG_BulletHitEvent`; a player's pain is player state, not an effect).
     pub flesh_hits: u64,
+    /// Every bullet impact received, including exits and blood-limited hits; never drained by reporting.
+    pub impacts: Vec<ImpactRecord>,
     /// The last `impact_effect` lookup took the flesh column; `play` takes it to count blood.
     flesh_lookup: bool,
     /// Total draws (sprite quads, clouds, models, trail strips) that passed the camera's cull, by the lower-case name
@@ -213,6 +215,19 @@ pub struct Effects {
     pub effect_quads: BTreeMap<String, u64>,
     /// Names of effects an event asked for that the content lacks.
     pub missing: HashSet<String>,
+}
+
+/// Attribution for a bullet impact at the effects clock, before any visual suppression.
+pub struct ImpactRecord {
+    pub source: ImpactSource,
+    pub time_ms: i32,
+    pub weapon: u16,
+    pub shooter: u16,
+    pub surface: u8,
+    pub exit: bool,
+    pub head: bool,
+    pub blood_enabled: bool,
+    pub origin: [f32; 3],
 }
 
 /// A tag of a gun an effect is bolted to.
@@ -438,6 +453,7 @@ impl Effects {
             tracer_material: None,
             played: BTreeMap::new(),
             flesh_hits: 0,
+            impacts: Vec::new(),
             flesh_lookup: false,
             effect_quads: BTreeMap::new(),
             missing: HashSet::new(),
@@ -536,14 +552,27 @@ impl Effects {
     pub fn event(&mut self, ev: &ClientEvent, weapon: &dyn Fn(u16) -> Option<Arc<WeaponDef>>) {
         match ev {
             ClientEvent::BulletImpact {
+                source,
                 origin,
                 normal,
                 surface,
                 weapon: w,
+                shooter,
                 exit,
                 head,
                 ..
             } => {
+                self.impacts.push(ImpactRecord {
+                    source: *source,
+                    time_ms: self.clock,
+                    weapon: *w,
+                    shooter: *shooter,
+                    surface: *surface,
+                    exit: *exit,
+                    head: *head,
+                    blood_enabled: self.blood_on,
+                    origin: *origin,
+                });
                 // The exit wound's marks are not drawn (only its sound is played).
                 if *exit {
                     return;

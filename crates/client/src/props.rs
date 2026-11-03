@@ -537,6 +537,7 @@ impl Props {
         }
         let at = eye + f * t;
         self.out.impacts.push(ClientEvent::BulletImpact {
+            source: crate::events::ImpactSource::Prop,
             origin: at.to_array(),
             normal: normal.to_array(),
             surface: self.props[i].surface,
