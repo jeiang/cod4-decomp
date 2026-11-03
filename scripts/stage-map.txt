@@ -1,0 +1,107 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Which harness stages a changed path can affect, read by scripts/stages-for.py (`just stages-for <base> <head>`).
+#
+# Each rule is `<path pattern> <selection>...`; the first rule whose pattern matches a changed path decides it, and a
+# path no rule matches selects the full default suite. Patterns are repository paths: `*` and `?` stay inside one
+# directory, `**` spans any number of them (`a/**/b` includes `a/b`).
+# Selections:
+#   <stage> or <stage glob>  that stage, or the default stages the glob names (`client-*`)
+#   @full                    the whole default suite
+#   @none                    no stage (docs, tooling, unit and integration tests that cargo test runs)
+#   @module                  the stages whose code includes this file: a stage's module in crates/harness/src/stages,
+#                            the modules it names (`super::m`, `crate::stages::m`) and their own, its scenario
+#                            (crates/harness/scenarios/*.cfg); a server scenario stage includes stages/server.rs
+#   @client                  every default stage except those on the `no-client:` line, so a new stage is in it
+#   @web                     the stages whose code starts the browser client (`browser_cdp`, `COD4E_WEB_DIR`)
+#   @uses:<crate>            the stages whose code calls <crate>:: in the harness process
+#   +timing                  also the timing set below (every engine change: the crates the binaries build from)
+# Stage facts are read from the head ref (crates/harness/src/stage.rs and stages/*.rs), so new stages and helper
+# modules are picked up without editing this file.
+
+timing: client-load client-match client-flythrough headless-bots-32
+
+# Default stages that never start the native client: their code has no `locate_client`, `crate::control`,
+# `COD4E_CLIENT` or `browser_cdp` (scripts/stages-for.test.py checks it at HEAD). Every other default stage is @client.
+no-client: asset-load headless-bots net-loopback net-match net-mantle net-objective net-hardening net-rcon net-master
+no-client: net-info net-items net-turret net-triggers net-vote script-pool net-ui net-killcam net-perks net-antilag
+no-client: net-mover headless-bots-sd headless-sd-objective headless-sab-objective headless-hardpoint
+no-client: headless-airstrike headless-helicopter
+
+# Shared: every stage goes through these.
+crates/harness/src/logcheck.rs          @full
+crates/harness/src/stage.rs             @full
+crates/harness/src/stages/mod.rs        @full
+crates/harness/src/control.rs           @full
+crates/harness/src/control/**           @full
+crates/client/src/control/**            @full +timing
+crates/client/src/control.rs            @full +timing
+crates/devctrl/**                       @full +timing
+crates/client/src/netplay.rs            @full +timing
+crates/client/src/netplay/**            @full +timing
+crates/net/**                           @full +timing
+crates/server/src/netsv*                @full +timing
+scripts/host-run.sh                     @full
+scripts/remote-linux.sh                 @full
+scripts/netns.sh                        @full
+scripts/virtual-display.sh              @full
+scripts/headless-seat.py                @full
+flake.nix                               @full +timing
+flake.lock                              @full +timing
+Cargo.lock                              @full +timing
+Cargo.toml                              @full +timing
+rust-toolchain.toml                     @full +timing
+.cargo/**                               @full +timing
+
+# Tests, examples and text the binaries do not build from (cargo test and the windows check cover the tests).
+crates/*/tests/**                       @none
+crates/*/examples/**                    @none
+crates/*/benches/**                     @none
+**/*.md                                 @none
+crates/harness/PORTABLE-README.txt      @none
+
+# The harness: a stage's own module, helper or scenario selects the stages that include it; the rest is the runner.
+crates/harness/src/stages/*.rs          @module
+crates/harness/scenarios/*.cfg          @module
+crates/harness/**                       @full
+
+# Engine crates.
+crates/client/**                        @client @web +timing
+crates/render/**                        @client @web +timing
+crates/audio/**                         @client @web +timing
+crates/fx/**                            @client @web +timing
+crates/sm3/**                           @client @web +timing
+crates/master/**                        @uses:master +timing
+crates/server/**                        @full +timing
+crates/sim/**                           @full +timing
+crates/gsc/**                           @full +timing
+crates/assets/**                        @full +timing
+crates/logging/**                       @full +timing
+crates/install/**                       @full +timing
+
+# The browser client's page and server.
+web/test_*.py                           @none
+web/*.test.mjs                          @none
+web/.gitignore                          @none
+web/**                                  @web
+scripts/find-chromium.sh                @web
+
+# Tooling and text. Any other script is unmapped (full suite) until it is named here or above.
+scripts/*.test.py                       @none
+scripts/test_*.py                       @none
+scripts/stage-map.txt                   @none
+scripts/stages-for.py                   @none
+scripts/slot-guard.py                   @none
+scripts/evidence-report.py              @none
+scripts/footage-review.py               @none
+scripts/budget.sh                       @none
+scripts/budget-table.py                 @none
+scripts/map-sweep.sh                    @none
+scripts/build-crosscheck-tools.sh       @none
+scripts/gen-wavelet-tables.py           @none
+tools/**                                @none
+docs/**                                 @none
+.github/**                              @none
+.omp/**                                 @none
+justfile                                @none
+LICENSE                                 @none
+.gitignore                              @none
