@@ -91,6 +91,7 @@ class HostQueue(unittest.TestCase):
         os.makedirs(os.path.join(c, "scripts"))
         shutil.copy(HOST_RUN, os.path.join(c, "scripts", "host-run.sh"))
         executable(os.path.join(c, "scripts", "virtual-display.sh"), PASS_THROUGH)
+        executable(os.path.join(c, "scripts", "virtual-audio.sh"), PASS_THROUGH)
         executable(os.path.join(c, "scripts", "netns.sh"), PASS_THROUGH)
         shutil.copy(FIND_CHROMIUM, os.path.join(c, "scripts", "find-chromium.sh"))
         executable(os.path.join(c, "web", "build.sh"), '#!/usr/bin/env bash\necho "$FAKE_ID" >> "$FAKE_DIR/web"\n')
