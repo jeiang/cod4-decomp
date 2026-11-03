@@ -168,18 +168,26 @@ fn client_level_after(c: &mut Driven, before: u64, round: &str) -> Result<u64, S
     client_levels(c)
 }
 
-/// Waits for the final intermission of round three's level with player rows on the scoreboard and the player still on
-/// `team`, all in one reading. The end-of-game popups the stock scripts open cover the `scoreboard` menu for most of the
-/// intermission (its rows stay drawn behind them), and the level rotates a few seconds after they close: a team read
-/// after a separate scoreboard wait could see the next map's spectator instead (the #542 serial run did).
+/// Waits for the final intermission of round three's level with the `scoreboard` menu open, player rows on it and the
+/// player still on `team`, all in one reading. The end-of-game popups the stock scripts open hold the `scoreboard` menu
+/// back for most of the intermission, and the level rotates a few seconds after they close: a team read after a
+/// separate scoreboard wait could see the next map's spectator instead (the #542 serial run did). The matched state is
+/// written to `end-scoreboard.json`.
 fn end_scoreboard(c: &mut Driven, team: u64, levels: u64) -> Result<(), String> {
-    c.until(
-        json!({"hud.intermission": true, "net.levels": levels, "scoreboard.rows.0": {"exists": true},
-            "hud.live.own_team": team}),
+    let state = json!({"hud.intermission": true, "net.levels": levels,
+        "menu.open": {"contains": "scoreboard"}, "scoreboard.rows.0": {"exists": true},
+        "hud.live.own_team": team});
+    let reply = c.until(
+        state.clone(),
         Duration::from_secs(150),
-        "the final intermission did not come with player rows and the player's team",
+        "the final intermission of round three's level did not show the scoreboard with player rows and the player's team",
     )?;
-    Ok(())
+    let evidence = json!({"matched": state, "reply": reply});
+    std::fs::write(
+        c.dir.join("end-scoreboard.json"),
+        serde_json::to_vec_pretty(&evidence).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Plays all three rounds and returns the persistent team and the three objective roles observed.
@@ -269,7 +277,6 @@ fn play(c: &mut Driven) -> Result<(u64, String, String, String), String> {
     c.capture("round3")?;
 
     c.step("menu=scoreboard:150", |c| end_scoreboard(c, team, levels))?;
-    c.pause(Duration::from_secs(1))?;
     c.capture("end")?;
     Ok((team, first, second, third))
 }
@@ -352,6 +359,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     out.files.extend(
         [
             "control-run.json",
+            "end-scoreboard.json",
             "round1.png",
             "round2.png",
             "round3.png",
