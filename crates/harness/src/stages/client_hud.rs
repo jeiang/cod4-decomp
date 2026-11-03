@@ -1241,7 +1241,7 @@ fn play(
     c.step("record level ownerdraw", |c| {
         // UI_DrawRecordLevel in the stock voice options. With the slot's test-tone microphone (#488, half-scale sine:
         // a mean sample size of about 0.32 of full scale) the meter must rise; without one only its drawing is checked.
-        let mic = std::env::var_os("COD4E_TEST_MIC").is_some();
+        let mic = crate::logcheck::test_mic_provided();
         let before = c.lookup("menu.open")?;
         c.console("openmenu options_voice")?;
         let result = c.until(
@@ -1252,7 +1252,7 @@ fn play(
         let result = result.and_then(|_| {
             if !mic {
                 notes.push(
-                    "record level untested: no test microphone (COD4E_TEST_MIC unset; #488)".into(),
+                    "record level not run: no test microphone (COD4E_TEST_MIC unset; #488)".into(),
                 );
                 return Ok(());
             }
@@ -1429,9 +1429,9 @@ fn play(
     // Holding `+talk` sends the microphone (`CL_VoiceFrame`): on the Linux test host's slots scripts/virtual-audio.sh
     // gives the client a 440 Hz test-tone microphone (#488) and says so with COD4E_TEST_MIC.
     c.step("voice capture", |c| {
-        if std::env::var_os("COD4E_TEST_MIC").is_none() {
+        if !crate::logcheck::test_mic_provided() {
             notes.push(
-                "voice capture untested: no test microphone (COD4E_TEST_MIC unset; #488)".into(),
+                "voice capture not run: no test microphone (COD4E_TEST_MIC unset; #488)".into(),
             );
             return Ok(());
         }
