@@ -7,6 +7,7 @@ with stand-in display, network and web scripts), `cargo` is a stand-in that reco
 harness prints `started <FAKE_ID>` and runs until the test creates release-<FAKE_ID>. PATH keeps no directory that
 holds a real Chromium."""
 
+import importlib.util
 import os
 import re
 import shutil
@@ -22,6 +23,9 @@ HOST_RUN = os.path.join(SCRIPTS, "host-run.sh")
 FIND_CHROMIUM = os.path.join(SCRIPTS, "find-chromium.sh")
 CHROMIUM_NAMES = ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable")
 WEB_STAGES = "web-client web-join web-download web-match"
+STAGE_SPEC = importlib.util.spec_from_file_location("stages_for", os.path.join(SCRIPTS, "stages-for.py"))
+STAGES_FOR = importlib.util.module_from_spec(STAGE_SPEC)
+STAGE_SPEC.loader.exec_module(STAGES_FOR)
 
 PASS_THROUGH = """#!/usr/bin/env bash
 shift
@@ -302,6 +306,41 @@ class HostQueue(unittest.TestCase):
         # An unsupported equals-form allow-skip must not authorize a real web selection.
         p = self.finish("skip-equals", "--", "--stage", "web-client", "--allow-skip=web-client")
         self.assertEqual(p.returncode, 78, self.stderr(p))
+
+    def test_preflight_web_stages_match_the_real_head(self):
+        shutil.rmtree(os.path.join(self.root, "bin"))
+        repo = os.path.dirname(SCRIPTS)
+
+        def assert_contract(cwd, name):
+            expected = [s.name for s in STAGES_FOR.stage_facts("HEAD", cwd=cwd)
+                        if s.default and STAGES_FOR.matches_stage("@web", s, None)]
+            p = self.finish(name, "--")
+            self.assertEqual(p.returncode, 78, self.stderr(p))
+            self.assertIn(f"no Chromium for {' '.join(expected)} on this host;", self.stderr(p))
+            for i, stage in enumerate(expected):
+                p = self.finish(f"{name}-{i}", "--", "--stage", stage)
+                self.assertEqual(p.returncode, 78, self.stderr(p))
+                self.assertIn(f"no Chromium for {stage} on this host;", self.stderr(p))
+
+        assert_contract(repo, "real-head")
+        # Negative control: a fifth default stage using the existing browser implementation must break the same
+        # contract. Build a temporary git snapshot so stage_facts reads it exactly as it reads the real HEAD.
+        scratch = os.path.join(self.dir, "fifth-web-stage")
+        stage_dir = os.path.join(scratch, "crates", "harness", "src")
+        shutil.copytree(os.path.join(repo, "crates", "harness", "src", "stages"),
+                        os.path.join(stage_dir, "stages"))
+        stage_rs = STAGES_FOR.git("show", "HEAD:" + STAGES_FOR.STAGE_RS, cwd=repo)
+        extra = ('    StageDef {\n        name: "web-fifth",\n        default: true,\n'
+                 '        kind: Kind::Builtin(crate::stages::web_client::run),\n    },\n')
+        end = stage_rs.index("\n];", stage_rs.index("pub static STAGES"))
+        with open(os.path.join(stage_dir, "stage.rs"), "w") as f:
+            f.write(stage_rs[:end] + "\n" + extra + stage_rs[end:])
+        STAGES_FOR.git("init", "-q", cwd=scratch)
+        STAGES_FOR.git("add", ".", cwd=scratch)
+        STAGES_FOR.git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                       "-c", "commit.gpgsign=false", "commit", "-qm", "Add fifth browser stage", cwd=scratch)
+        with self.assertRaisesRegex(AssertionError, "web-fifth"):
+            assert_contract(scratch, "negative-control")
 
 
 if __name__ == "__main__":
