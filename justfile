@@ -67,6 +67,10 @@ budget-table *args:
 evidence-report *args:
     python3 scripts/evidence-report.py "$@"
 
+# Print the stages a diff can affect (scripts/stage-map.txt), e.g. `just slot 1 HEAD "$(just stages-for)"`
+stages-for base="origin/main" head="HEAD":
+    @python3 scripts/stages-for.py "$1" "$2"
+
 # Fetch and build the SM3 cross-check drivers
 crosscheck-tools *args:
     scripts/build-crosscheck-tools.sh "$@"
@@ -75,10 +79,11 @@ crosscheck-tools *args:
 wavelet-tables exe:
     python3 scripts/gen-wavelet-tables.py "$@"
 
-# Test scripts/slot-guard.py and scripts/remote-linux.sh's logs locally (no host needed)
+# Test scripts/slot-guard.py, scripts/remote-linux.sh's logs and scripts/stages-for.py locally (no host needed)
 script-tests:
     python3 scripts/slot-guard.test.py
     python3 scripts/remote-linux.test.py
+    python3 scripts/stages-for.test.py
 
 # Linux test host
 
