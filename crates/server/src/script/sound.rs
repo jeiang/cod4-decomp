@@ -10,7 +10,6 @@
 //! | `stoplsnd <alias>` | cuts a local sound short |
 //! | `soundfade <volume> <ms>` | scales all sound |
 //! | `stopsounds` | a restarted level: every sound of the old one ends |
-//! | `sndname <i> <alias>` | names the alias index of an entity's `loop_sound` (see `net::entity`) |
 //! | `ambient <fade ms> <alias>` / `ambientstop <fade ms>` | the map's ambience |
 //! | `music <alias>` / `musicstop <fade ms>` | the music, its own stream beside the ambience |
 //! | `chanvol <priority> <shock> <fade ms>` / `chanvoloff <priority> <fade ms>` | `setChannelVolumes`: duck the channels |
@@ -21,6 +20,7 @@ use gsc::{EntRef, Value, Vm};
 use super::Args;
 use crate::client::Team;
 use crate::game::{Game, SoundTo};
+use crate::ui::Table;
 
 type R = Result<Value, String>;
 
@@ -126,16 +126,13 @@ pub fn stop_local_sound(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
     Ok(Value::Undefined)
 }
 
-/// `playLoopSound(alias)`: the entity loops the alias for as long as it lives or until `stopLoopSound`. The alias
-/// is part of the entity's state, which is what lets a late joiner hear it.
+/// `playLoopSound(alias)`: `ScrCmd_PlayLoopSound` (KisakCOD `game_mp/g_scr_main_mp.cpp:1788`). The entity loops the
+/// alias for as long as it lives or until `stopLoopSound`. The alias is part of the entity's state, which is what
+/// lets a late joiner hear it, and its name is a `cs::SOUND_ALIASES` configstring (`G_SoundAliasIndex`).
 pub fn play_loop_sound(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
-    let index = g.sounds.index(a.string(0)?);
-    // The wire carries ten bits of it.
-    if index > 1023 {
-        return Err("too many looped sound aliases".into());
-    }
+    let index = g.precache(Table::Sound, a.string(0)?)?;
     if let Some(ent) = g.ent_mut(e.num) {
-        ent.loop_sound = u16::try_from(index).unwrap_or(0);
+        ent.loop_sound = index;
     }
     Ok(Value::Undefined)
 }
@@ -330,6 +327,21 @@ mod tests {
             crate::netsv::world_entities(&g)
                 .iter()
                 .all(|s| s.loop_sound == 0)
+        );
+    }
+
+    #[test]
+    fn a_looped_alias_is_named_in_its_configstring() {
+        let (mut g, mut vm, ann, ..) = setup();
+        let v = [Value::str("hum")];
+        play_loop_sound(&mut g, &mut vm, me(ann), Args::new("playloopsound", &v)).unwrap();
+        let index = g.ent(ann).unwrap().loop_sound;
+        assert_eq!(index, 1);
+        assert_eq!(
+            g.configstrings
+                .get(&u32::from(net::ui::cs::SOUND_ALIASES + index))
+                .map(String::as_str),
+            Some("hum")
         );
     }
 }

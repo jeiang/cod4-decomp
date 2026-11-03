@@ -121,7 +121,7 @@ pub struct ClientSound {
     missile_loops: HashSet<u16>,
     /// How many of the createfx sounds ([`Self::client_ent_sounds`]) are playing.
     client_ents: usize,
-    /// The names of the alias indices entities loop (`sndname` commands), 1-based.
+    /// The names of the alias indices entities loop (`cs::SOUND_ALIASES` configstrings), 1-based.
     names: Vec<String>,
     /// The entities looping a sound now, and the alias index each plays.
     entity_loops: HashMap<u16, u16>,
@@ -1166,6 +1166,22 @@ impl ClientSound {
         self.client_ents = sounds.len();
     }
 
+    /// Mirrors the `cs::SOUND_ALIASES` configstrings: `name(i)` is looped alias `i`'s (empty when unset). Only
+    /// changed names are copied.
+    pub fn sync_alias_names<'a>(&mut self, name: impl Fn(u16) -> &'a str) {
+        self.names.resize(
+            usize::from(net::ui::cs::SOUND_ALIASES_COUNT - 1),
+            String::new(),
+        );
+        for (index, slot) in (1..).zip(self.names.iter_mut()) {
+            let value = name(index);
+            if *slot != value {
+                slot.clear();
+                slot.push_str(value);
+            }
+        }
+    }
+
     /// `CG_AddEntityLoopSound`: the entities that loop a sound this frame, as (entity, alias index, origin). Each
     /// plays from where it is; one not listed any more (freed, or its loop stopped) falls silent.
     pub fn entity_loops(&mut self, now: &[(u16, u16, [f32; 3])]) {
@@ -1216,7 +1232,6 @@ impl ClientSound {
                     | "stoplsnd"
                     | "soundfade"
                     | "stopsounds"
-                    | "sndname"
                     | "ambient"
                     | "ambientstop"
                     | "music"
@@ -1229,21 +1244,6 @@ impl ClientSound {
 
     /// A console command from the server (see `server::script::sound`). Ambience and music wait for the tables.
     pub fn command(&mut self, line: &str) {
-        // The names of looped aliases are needed whenever the entities arrive, ready or not.
-        if let Some(rest) = line.strip_prefix("sndname ") {
-            if let Some((i, name)) = rest.split_once(' ')
-                && let Ok(i) = i.parse::<usize>()
-                && i >= 1
-            {
-                if self.names.len() < i {
-                    self.names.resize(i, String::new());
-                }
-                self.names[i - 1] = name.to_owned();
-            } else {
-                logging::dedup!(WARN, "sndname", "malformed sndname command dropped");
-            }
-            return;
-        }
         if self.ready().is_none() {
             if self.pending.len() < 64 {
                 self.pending.push(line.to_owned());
@@ -1888,7 +1888,7 @@ fn loop_selftest(cs: &mut ClientSound) -> Vec<(String, bool)> {
     };
     // The movement sounds before this one are still ringing: start from silence.
     cs.stop_all();
-    cs.command(&format!("sndname 1 {name}"));
+    cs.sync_alias_names(|i| if i == 1 { name.as_str() } else { "" });
     let here = [(5u16, 1u16, [10.0f32, 0.0, 0.0])];
     cs.entity_loops(&here);
     cs.entity_loops(&here);
@@ -2313,16 +2313,26 @@ mod tests {
     #[test]
     fn malformed_server_sound_commands_warn() {
         let mut s = failed();
-        let (_, events) = logging::capture(|| {
-            s.command("sndname notanumber");
-            s.run("snd 1");
-        });
+        let (_, events) = logging::capture(|| s.run("snd 1"));
         let warns: Vec<_> = events
             .iter()
             .filter(|e| e.level == tracing::Level::WARN)
             .collect();
-        assert_eq!(warns.len(), 2, "{events:?}");
-        assert_eq!(warns[1].field("command"), Some("snd"));
+        assert_eq!(warns.len(), 1, "{events:?}");
+        assert_eq!(warns[0].field("command"), Some("snd"));
+    }
+
+    #[test]
+    fn looped_alias_names_mirror_their_configstrings() {
+        let mut s = failed();
+        s.sync_alias_names(|i| match i {
+            1 => "amb_hum",
+            3 => "amb_wind",
+            _ => "",
+        });
+        assert_eq!(&s.names[..3], ["amb_hum", "", "amb_wind"]);
+        s.sync_alias_names(|i| if i == 3 { "amb_wind" } else { "" });
+        assert_eq!(&s.names[..3], ["", "", "amb_wind"]);
     }
 
     fn first(groups: &[Vec<String>], i: usize) -> &str {

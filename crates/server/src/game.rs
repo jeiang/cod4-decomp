@@ -437,8 +437,9 @@ pub struct Game {
     pub models: Precache,
     pub shaders: Precache,
     pub strings: Precache,
+    /// Effects `loadfx` registered; clients learn the names from the `cs::EFFECT_NAMES` configstrings.
     pub fx: Precache,
-    /// Sound aliases named by `playloopsound`; clients learn the names in `sndname` commands.
+    /// Sound aliases named by `playloopsound`; clients learn the names from the `cs::SOUND_ALIASES` configstrings.
     pub sounds: Precache,
     pub items: Precache,
     pub menus: Precache,

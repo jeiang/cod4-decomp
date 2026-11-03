@@ -6,9 +6,9 @@
 //! What the server tells the client happened: the one-shot events of `server::tempev` turned into [`ClientEvent`]s,
 //! each delivered once however many snapshots repeat it.
 //!
-//! Effects, sound and the interface all consume the same list ([`crate::netplay::NetFrame::events`]). The server
-//! announces effect names with `fx <index> <name>` reliable commands; [`Events::take_commands`] swallows those and
-//! hands every other command on.
+//! Effects, sound and the interface all consume the same list ([`crate::netplay::NetFrame::events`]). Effect names
+//! are the `cs::EFFECT_NAMES` configstrings, which the gamestate carries before any snapshot
+//! ([`Events::sync_fx_names`]).
 
 use net::Snapshot;
 use net::entity::{EntityState, etype};
@@ -187,7 +187,7 @@ pub fn start_shakes(
 
 #[derive(Default)]
 pub struct Events {
-    /// Effect names by index - 1.
+    /// Effect names by index - 1, mirrored from the `cs::EFFECT_NAMES` configstrings.
     fx: Vec<String>,
     effect_tags: HashMap<u16, String>,
     /// Last sequence and smoke burst time acted on, by entity number.
@@ -210,30 +210,29 @@ impl Events {
         }
     }
 
-    /// Takes the `fx` commands out of `cmds`, returning the rest in order.
-    pub fn take_commands(&mut self, cmds: &mut Vec<String>) -> Vec<String> {
-        let mut rest = Vec::new();
-        for c in cmds.drain(..) {
-            let Some(r) = c.strip_prefix("fx ") else {
-                rest.push(c);
-                continue;
-            };
-            if let Some((i, name)) = r.split_once(' ')
-                && let Ok(i) = i.parse::<usize>()
-                && i >= 1
-            {
-                if self.fx.len() < i {
-                    self.fx.resize(i, String::new());
-                }
-                self.fx[i - 1] = name.to_owned();
-            } else {
-                logging::dedup!(WARN, "fx", "malformed fx announcement dropped");
+    /// Mirrors the `cs::EFFECT_NAMES` configstrings: `name(i)` is effect `i`'s (empty when unset). Stock registers
+    /// them all from the gamestate (`CG_RegisterGraphics`, KisakCOD `cgame_mp/cg_main_mp.cpp:1914`) and each later
+    /// update as it arrives (`cg_servercmds_mp.cpp:955`). Only changed names are copied.
+    pub fn sync_fx_names<'a>(&mut self, name: impl Fn(u16) -> &'a str) {
+        self.fx.resize(
+            usize::from(net::ui::cs::EFFECT_NAMES_COUNT - 1),
+            String::new(),
+        );
+        for (index, slot) in (1..).zip(self.fx.iter_mut()) {
+            let value = name(index);
+            if *slot != value {
+                slot.clear();
+                slot.push_str(value);
             }
         }
-        rest
     }
 
-    /// The name of effect `index` (1-based), if announced.
+    /// How many effects have a name.
+    pub fn fx_names(&self) -> usize {
+        self.fx.iter().filter(|n| !n.is_empty()).count()
+    }
+
+    /// The name of effect `index` (1-based), if the configstrings name it.
     pub fn fx_name(&self, index: usize) -> Option<&str> {
         self.fx
             .get(index.checked_sub(1)?)
@@ -387,7 +386,7 @@ impl Events {
                             DEBUG,
                             "playfx",
                             fx_index = e.model,
-                            "effect played before its name was announced"
+                            "effect index has no name in the configstrings"
                         );
                         ""
                     })
@@ -491,10 +490,15 @@ fn direction(angles: [f32; 3]) -> [f32; 3] {
 mod tests {
     use super::*;
 
+    /// Configstrings naming effects 1, 2, ... in order.
+    fn named(names: &'static [&'static str]) -> impl Fn(u16) -> &'static str {
+        move |i| names.get(usize::from(i) - 1).copied().unwrap_or("")
+    }
+
     #[test]
     fn target_tag_events_decode_configstrings_and_deduplicate_ring_history() {
         let mut events = Events::default();
-        events.take_commands(&mut vec!["fx 1 bolt_a".into(), "fx 2 bolt_b".into()]);
+        events.sync_fx_names(named(&["bolt_a", "bolt_b"]));
         events.set_effect_tags(&[
             (net::ui::cs::EFFECT_TAGS + 1, "01tag_flash".into()),
             (net::ui::cs::EFFECT_TAGS + 2, "02tag_brass".into()),
@@ -553,7 +557,7 @@ mod tests {
     #[test]
     fn a_killcam_plays_a_past_sequence_only_when_ahead_and_leaving_it_resets_every_entity() {
         let mut events = Events::default();
-        events.take_commands(&mut vec!["fx 1 bolt".into()]);
+        events.sync_fx_names(named(&["bolt"]));
         events.set_effect_tags(&[(net::ui::cs::EFFECT_TAGS + 1, "01tag_origin".into())]);
         let mut live = EntityState::new(30);
         live.etype = etype::SCRIPT_MODEL;
@@ -602,7 +606,7 @@ mod tests {
     #[test]
     fn target_tag_event_sequence_wraps_and_invalid_tag_entries_are_not_played() {
         let mut events = Events::default();
-        events.take_commands(&mut vec!["fx 1 bolt".into()]);
+        events.sync_fx_names(named(&["bolt"]));
         events.set_effect_tags(&[
             (net::ui::cs::EFFECT_TAGS + 1, "01tag_origin".into()),
             (net::ui::cs::EFFECT_TAGS + 2, "00tag_origin".into()),
@@ -764,25 +768,23 @@ mod tests {
     }
 
     #[test]
-    fn fx_commands_name_effects_and_other_commands_pass_through() {
+    fn effect_names_mirror_their_configstrings() {
         let mut ev = Events::default();
-        let mut cmds = vec![
-            "fx 2 fx/explosions/grenadeexp_dirt".to_owned(),
-            "d 3".to_owned(),
-            "fx 1 fx/misc/a b".to_owned(),
-        ];
-        let rest = ev.take_commands(&mut cmds);
-        assert_eq!(rest, ["d 3"]);
-        assert!(cmds.is_empty());
+        ev.sync_fx_names(named(&["fx/misc/a b", "explosions/grenadeexp_dirt"]));
         assert_eq!(ev.fx_name(1), Some("fx/misc/a b"));
-        assert_eq!(ev.fx_name(2), Some("fx/explosions/grenadeexp_dirt"));
+        assert_eq!(ev.fx_name(2), Some("explosions/grenadeexp_dirt"));
         assert_eq!(ev.fx_name(3), None);
         assert_eq!(ev.fx_name(0), None);
+        assert_eq!(ev.fx_names(), 2);
+        // A later level's table replaces the old names.
+        ev.sync_fx_names(named(&["", "explosions/grenadeexp_dirt"]));
+        assert_eq!(ev.fx_name(1), None);
+        assert_eq!(ev.fx_names(), 1);
 
         let mut e = event(962, super::ev::PLAY_FX, 1);
         e.model = 2;
         match &ev.scan(&snap(&[e]))[0] {
-            ClientEvent::PlayFx { name, .. } => assert_eq!(name, "fx/explosions/grenadeexp_dirt"),
+            ClientEvent::PlayFx { name, .. } => assert_eq!(name, "explosions/grenadeexp_dirt"),
             o => panic!("{o:?}"),
         }
     }
@@ -993,17 +995,16 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_event_type_and_a_malformed_fx_announcement_warn() {
+    fn an_unknown_event_type_warns() {
         let (_, events) = logging::capture(|| {
             let mut ev = Events::default();
             ev.scan(&snap(&[event(965, 0x7e, 1)]));
-            ev.take_commands(&mut vec!["fx notanumber".to_owned()]);
         });
         let warns: Vec<_> = events
             .iter()
             .filter(|e| e.level == tracing::Level::WARN)
             .collect();
-        assert_eq!(warns.len(), 2, "{events:?}");
+        assert_eq!(warns.len(), 1, "{events:?}");
         assert_eq!(warns[0].field("event"), Some("126"));
     }
 
