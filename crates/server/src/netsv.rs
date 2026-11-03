@@ -1465,6 +1465,21 @@ fn clusters_around(game: &Game, origin: [f32; 3], reach: f32) -> Option<Vec<i16>
     (!c.is_empty()).then_some(c)
 }
 
+/// The trajectory type of a player's entity state (`ClientThink` after `Pmove`, `ClientEndFrame`: KisakCOD
+/// `game_mp/g_active_mp.cpp:716,1227`, 1.7 0x4a8b2b and 0x4a9a3b). With `g_smoothClients` on the stock game builds it
+/// with `G_PlayerStateToEntityStateExtrapolate` (`g_active_mp.cpp:754`, 1.7 0x4a83b0), which sets a 50 ms
+/// `TR_LINEAR_STOP` trajectory from the velocity at the command time and then calls `BG_PlayerStateToEntityState`;
+/// that one's `BG_PlayerToEntitySetTrajectory` (`bgame/bg_misc.cpp:1789`, 1.7 0x40c600) clears the time, duration and
+/// delta again, so only the type is left of it. Off, the state is `BG_PlayerStateToEntityState`'s `TR_INTERPOLATE`.
+/// The client interpolates a player for either (`cgame_mp/cg_ents_mp.cpp:872`).
+pub fn player_pos_type(smooth: bool) -> u8 {
+    if smooth {
+        net::entity::tr::LINEAR_STOP
+    } else {
+        net::entity::tr::INTERPOLATE
+    }
+}
+
 /// Everything in the world as [`Sent`], in entity-number order, already rounded as the wire rounds it.
 pub fn world_snapshot(game: &Game) -> Vec<Sent> {
     let mut out = Vec::new();
@@ -1490,6 +1505,7 @@ pub fn world_snapshot(game: &Game) -> Vec<Sent> {
                 s.origin = c.ps.origin;
                 s.angles = [c.ps.viewangles[0], c.ps.viewangles[1], c.ps.leanf * 45.0];
                 s.velocity = c.ps.velocity;
+                s.pos_type = player_pos_type(game.cvars.bool("g_smoothClients"));
                 s.weapon = c.ps.weapon as u16;
                 s.weapon_model = c.inv.model(s.weapon);
                 s.pm_type = c.ps.pm_type as u8;

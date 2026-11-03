@@ -625,6 +625,9 @@ pub struct ServerList {
     status_req: Option<(SocketAddr, Instant, u32)>,
     /// An answer that arrived and has not been taken yet.
     status: Option<Status>,
+    /// The console's `serverstatus` asked for the answer: it is printed, not only shown in the Server Info popup
+    /// (`serverStatus_s.print`, KisakCOD cl_main_pc_mp.cpp:651).
+    status_print: bool,
     /// Where the favorites are kept (`None`: nowhere, they last until the client exits). A browser has no files.
     #[cfg(not(target_arch = "wasm32"))]
     store: Option<std::path::PathBuf>,
@@ -793,6 +796,27 @@ impl ServerList {
     /// The status answer that arrived since the last call.
     pub fn take_status(&mut self) -> Option<Status> {
         self.status.take()
+    }
+
+    /// `CL_ServerStatus_f`: as [`ServerList::request_status`], with the answer printed to the console.
+    pub fn request_status_console(&mut self, addr: SocketAddr) {
+        self.status_print = true;
+        self.request_status(addr);
+    }
+
+    /// Whether the pending status answer is the console's, clearing the flag.
+    pub fn take_status_print(&mut self) -> bool {
+        std::mem::take(&mut self.status_print)
+    }
+
+    /// `CL_Ping_f`: asks one server for its info, which refreshes its row (KisakCOD cl_main_mp.cpp:2879).
+    pub fn ping(&mut self, addr: SocketAddr) {
+        if self.browser.is_none() {
+            self.browser = self.open_browser();
+        }
+        if let Some(b) = self.browser.as_mut() {
+            b.ask(addr);
+        }
     }
 
     /// Adds a favorite (once) and asks it.

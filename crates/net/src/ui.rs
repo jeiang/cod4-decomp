@@ -53,6 +53,9 @@ pub mod cs {
     pub const MESSAGE: u16 = 3;
     /// The scene's fog, `<start> <density> <r> <g> <b> <transition ms>` (`setExpFog`); empty or `0` for none.
     pub const FOGVARS: u16 = 9;
+    /// The server's message of the day (`g_motd`), set at each level spawn (stock `CS_MOTD`, KisakCOD
+    /// `universal/q_shared.h:144`, `game_mp/g_spawn_mp.cpp:646`).
+    pub const MOTD: u16 = 10;
     pub const SCORES_ALLIES: u16 = 4;
     pub const SCORES_AXIS: u16 = 5;
     pub const GAMEENDTIME: u16 = 11;
@@ -1322,6 +1325,8 @@ pub struct ClientUiState {
     events: Vec<UiEvent>,
     dvars: HashMap<String, String>,
     receiving_gamestate: bool,
+    /// The current level's gamestate has ended (`gamestate_end` after its `map`).
+    gamestate_done: bool,
     hud: Vec<HudElem>,
     objectives: [Objective; MAX_OBJECTIVES],
     server_time: i32,
@@ -1341,6 +1346,7 @@ impl Default for ClientUiState {
             events: Vec::new(),
             dvars: HashMap::new(),
             receiving_gamestate: false,
+            gamestate_done: false,
             hud: Vec::new(),
             objectives: [Objective::default(); MAX_OBJECTIVES],
             server_time: 0,
@@ -1355,6 +1361,12 @@ impl Default for ClientUiState {
 impl ClientUiState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether the current level's whole gamestate is in: every configstring it began with, the precache lists
+    /// among them (stock's `CA_LOADING` follows the complete gamestate, `CL_ParseGamestate`).
+    pub fn gamestate_complete(&self) -> bool {
+        self.gamestate_done
     }
 
     /// Events kept for a client that never drains them.
@@ -1372,6 +1384,7 @@ impl ClientUiState {
         match cmd {
             ServerCmd::Map { name } => {
                 self.receiving_gamestate = true;
+                self.gamestate_done = false;
                 self.scores = Scoreboard::default();
                 self.stats.clear();
                 self.cs.iter_mut().for_each(String::clear);
@@ -1381,6 +1394,7 @@ impl ClientUiState {
             }
             ServerCmd::GameStateEnd => {
                 self.receiving_gamestate = false;
+                self.gamestate_done = true;
                 for k in 0..cs::CODINFO_COUNT {
                     self.apply_codinfo(k);
                 }
@@ -1699,7 +1713,9 @@ mod tests {
             "usmc".into(),
         )]));
         assert!(set(&mut ui).is_empty(), "wait for the complete gamestate");
+        assert!(!ui.gamestate_complete());
         ui.apply(ServerCmd::GameStateEnd);
+        assert!(ui.gamestate_complete());
         assert_eq!(
             set(&mut ui),
             [

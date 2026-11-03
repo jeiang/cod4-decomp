@@ -30,6 +30,7 @@ fn stock() -> Vec<(&'static str, Kind, &'static str, u32)> {
         ("g_speed", Kind::Int(i32::MIN, i32::MAX), "190", 0),
         ("g_mantleBlockTimeBuffer", Kind::Int(0, 60_000), "500", CHEAT), // g_main_mp.cpp:714
         ("g_antilag", Kind::Bool, "1", ARCHIVE | SERVERINFO), // g_main_mp.cpp:614
+        ("g_smoothClients", Kind::Bool, "1", 0), // g_main_mp.cpp:613
         ("g_allowvote", Kind::Bool, "1", ARCHIVE), // ui_mp/ui_main_mp.cpp:4744
         ("g_deadChat", Kind::Bool, "0", ARCHIVE), // g_main_mp.cpp:501
         // sv_init_mp.cpp:704 registers a Bool 1; 1.7: Int 4, 0..INT_MAX, ARCHIVE | SERVERINFO.
@@ -62,7 +63,6 @@ fn stock() -> Vec<(&'static str, Kind, &'static str, u32)> {
         ("g_redCrosshairs", Kind::Bool, "1", LATCH | ARCHIVE),
         ("g_banIPs", Kind::String, "", ARCHIVE),
         ("g_motd", Kind::String, "", 0), // g_main_mp.cpp:454
-        ("g_smoothClients", Kind::Bool, "1", 0), // g_main_mp.cpp:613
         ("g_no_script_spam", Kind::Bool, "0", 0), // g_main_mp.cpp:624
         ("sv_paused", Kind::Int(0, 2), "0", ROM), // qcommon/common.cpp:1584
         ("sv_botsPressAttackBtn", Kind::Bool, "1", 0), // sv_init_mp.cpp:784

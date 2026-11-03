@@ -95,6 +95,8 @@ pub struct ShellState {
     /// The menu `soundLoop`s playing now.
     pub menu_loops: Vec<String>,
     pub in_game: bool,
+    /// The server being played on, as `connect` named it: what a bare `serverstatus` asks (`cls.servername`).
+    pub server_addr: String,
     /// The GPU's name, for `setRecommended`'s match against `configure_mp.csv`.
     pub gpu_description: String,
     /// The languages the install has files for (`g_languages[].bPresent`), for the language menu.
@@ -317,6 +319,7 @@ impl ShellState {
             actions: Vec::new(),
             menu_loops: Vec::new(),
             in_game: false,
+            server_addr: String::new(),
             gpu_description: String::new(),
             languages_present: vec![0],
             started: Instant::now(),
@@ -507,6 +510,8 @@ const OPTION_DEFAULTS: &[(&str, &str)] = &[
     // equalizer pass).
     ("cg_blood", "1"),
     ("cg_brass", "1"),
+    // Laser sights light what they strike (`cg_laserLight`, archived and on in stock).
+    ("cg_laserLight", "1"),
     ("cg_subtitles", "1"),
     ("snd_khz", "44"),
     ("snd_enableEq", "1"),
@@ -1143,6 +1148,8 @@ impl Shell {
             let mut h = Self::host(&mut self.st, input);
             self.ui.check_waiting_menu(&mut h);
         }
+        // A console `serverstatus` has no menu polling for it: take its answer here, once a frame.
+        Self::host(&mut self.st, input).poll_servers();
         for (old, new) in std::mem::take(&mut self.st.live.renamed) {
             let verb = hud::localize(&self.ui.assets, "&CGAME_PLAYERRENAMES");
             let verb = if verb == "CGAME_PLAYERRENAMES" {
@@ -1703,9 +1710,12 @@ impl HostCx<'_> {
     }
 
     /// Takes in what the network brought: server answers and a status answer, which becomes the Server Info lines.
+    /// A status the console's `serverstatus` asked for is printed too (`CL_ServerStatusResponse`,
+    /// KisakCOD cl_main_pc_mp.cpp:466).
     fn poll_servers(&mut self) {
         self.st.servers.poll();
         if let Some(status) = self.st.servers.take_status() {
+            let print = self.st.servers.take_status_print();
             let st = &*self.st;
             let mode = |id: &str| {
                 st.gametypes
@@ -1720,6 +1730,20 @@ impl HostCx<'_> {
                     .map_or_else(|| id.to_owned(), |m| m.title.clone())
             };
             self.st.status_rows = crate::serverlist::status_rows(&status, &mode, &map);
+            if print {
+                self.st.log("Server settings:");
+                for (k, v) in &status.info {
+                    self.st.log(&format!("{k:<24}{v}"));
+                }
+                self.st.log("\nPlayers:");
+                self.st.log("num: score: ping: name:");
+                for (i, p) in status.players.iter().enumerate() {
+                    self.st.log(&format!(
+                        "{i:<2}   {:<3}    {:<3}   {}",
+                        p.score, p.ping, p.name
+                    ));
+                }
+            }
         }
     }
 
@@ -1929,6 +1953,114 @@ impl HostCx<'_> {
                         }
                     }
                 }
+                // `Com_WriteDefaults_f`: every registered dvar's reset value, as `set` lines in `main`.
+                "writedefaults" => {
+                    if cmd.len() != 2 {
+                        self.input.say("Usage: writedefaults <filename>");
+                    } else {
+                        let file = crate::input::config::exec_name(a(1));
+                        self.input.say(format!("Writing {file}."));
+                        match self.input.write_defaults(&file) {
+                            Ok(Some(_)) => {}
+                            Ok(None) | Err(_) => {
+                                self.input.say(format!("Couldn't write {file}."))
+                            }
+                        }
+                    }
+                }
+                // `FS_Dir_f` and `FS_NewDir_f` (KisakCOD universal/com_files.cpp:1765, 1855).
+                "dir" | "fdir" => {
+                    let args: Vec<&str> = cmd[1..].iter().map(String::as_str).collect();
+                    let lines = self.input.vfs().map_or_else(Vec::new, |vfs| {
+                        if name == "dir" {
+                            crate::fscmds::dir(vfs, &args)
+                        } else {
+                            crate::fscmds::fdir(vfs, &args)
+                        }
+                    });
+                    for l in lines {
+                        self.st.log(&l);
+                    }
+                }
+                // `FS_Path_f` and `FS_FullPath_f`: the search path, `path` only the current language's nodes.
+                "path" | "fullpath" => {
+                    let lines = self
+                        .input
+                        .vfs()
+                        .map_or_else(Vec::new, |vfs| crate::fscmds::path(vfs, name == "path"));
+                    for l in lines {
+                        self.st.log(&l);
+                    }
+                }
+                // `CL_OpenedIWDList_f` (KisakCOD cl_main_mp.cpp:3015).
+                "fs_openedlist" => {
+                    let line = self.input.vfs().map_or_else(
+                        || "Opened IWD Names: ".to_owned(),
+                        crate::fscmds::opened_iwds,
+                    );
+                    self.st.log(&line);
+                }
+                // `CL_LocalServers_f` (KisakCOD cl_main_mp.cpp:3747).
+                "localservers" => {
+                    self.st.log("Scanning for servers on the local network...");
+                    let _ = self.st.servers.refresh(crate::serverlist::Source::Lan, true, "");
+                }
+                // `CL_GlobalServers_f` (KisakCOD cl_main_pc_mp.cpp:422): the Internet list from the masters.
+                "globalservers" => {
+                    if cmd.len() < 3 {
+                        self.st.log("usage: globalservers <master# 0-1> <protocol> [keywords]");
+                    } else {
+                        self.st.log("Requesting servers from the master...");
+                        let masters = self.dvar_get("cl_masters");
+                        let _ = self
+                            .st
+                            .servers
+                            .refresh(crate::serverlist::Source::Internet, true, &masters);
+                    }
+                }
+                // `CL_Ping_f` (KisakCOD cl_main_mp.cpp:2879).
+                "ping" => {
+                    if cmd.len() != 2 {
+                        self.st.log("usage: ping [server]");
+                    } else if let Ok(addr) = crate::serverlist::resolve(a(1)) {
+                        self.st.servers.ping(addr);
+                    }
+                }
+                // `CL_ServerStatus_f` (KisakCOD cl_main_mp.cpp:3362): without an argument the server being
+                // played on; the answer prints when it arrives (see `poll_servers`).
+                "serverstatus" => {
+                    let server = if cmd.len() == 2 {
+                        Some(a(1).to_owned())
+                    } else if self.st.in_game && !self.st.server_addr.is_empty() {
+                        Some(self.st.server_addr.clone())
+                    } else {
+                        self.st.log("Not connected to a server.");
+                        self.st.log("Usage: serverstatus [server]");
+                        None
+                    };
+                    if let Some(server) = server
+                        && let Ok(addr) = crate::serverlist::resolve(&server)
+                    {
+                        self.st.servers.request_status_console(addr);
+                    }
+                }
+                // `LiveStorage_ReadStatsCmd` (KisakCOD win_storage.cpp:809).
+                "readstats" => {
+                    self.st.stats = self.st.profiles.reload_stats();
+                }
+                // `LiveStorage_UploadStatsCmd` (win_storage.cpp:802): only stats that changed are written.
+                "uploadstats" => {
+                    match self.st.profiles.save_if_changed(&self.st.stats) {
+                        Ok(true) => self.st.log("Successfully wrote stats data"),
+                        Ok(false) => {}
+                        Err(_) => {
+                            let path = self.st.profiles.active_mpdata();
+                            self.st.log(&format!("Unable to write stats: {path}."));
+                        }
+                    }
+                }
+                // `resetStats` has no body in 1.7 (iw3mp.exe 0x4d74b0 is a bare `ret`).
+                "resetstats" => {}
                 // `vstr` and `exec` run their commands in place, in this buffer.
                 "vstr" | "exec" => {
                     inserted += 1;

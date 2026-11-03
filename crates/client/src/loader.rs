@@ -73,6 +73,9 @@ pub struct Load {
     pub level_change: bool,
     /// A join of someone else's match, not one this client hosts.
     pub joining: bool,
+    /// The level is loaded and the session connected: the load screen stays while the server's gamestate comes in
+    /// and the passes of the models it precached are prepared (stock's `CG_RegisterGraphics` in `CA_LOADING`).
+    pub precaching: bool,
     #[cfg(not(target_arch = "wasm32"))]
     rx: mpsc::Receiver<Result<Loaded, String>>,
     state: Arc<Progress>,
@@ -147,6 +150,7 @@ impl Load {
             map,
             level_change,
             joining,
+            precaching: false,
             #[cfg(not(target_arch = "wasm32"))]
             rx,
             state,
@@ -156,8 +160,18 @@ impl Load {
         }
     }
 
-    /// The result, once the load has finished.
+    /// The handed-over load, kept for its load screen while the precache list is prepared.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn precache(mut self) -> Load {
+        self.precaching = true;
+        self
+    }
+
+    /// The result, once the load has finished; nothing more once it was handed over ([`Self::precaching`]).
     pub fn poll(&mut self) -> Option<Result<Loaded, String>> {
+        if self.precaching {
+            return None;
+        }
         #[cfg(target_arch = "wasm32")]
         return self.step();
         #[cfg(not(target_arch = "wasm32"))]

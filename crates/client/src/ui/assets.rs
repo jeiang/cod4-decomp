@@ -63,7 +63,8 @@ fn parse_arenas(text: &str) -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
-/// The asset kinds the UI keeps from a zone.
+/// The asset kinds the UI keeps from a zone. Technique sets are kept so a material whose techset the same zone
+/// defines (`gfx_laser`, `gfx_laser_light` in `localized_common_mp`) carries its shaders rather than an empty stub.
 struct UiFilter;
 
 impl assets::zone::DecodeFilter for UiFilter {
@@ -71,7 +72,7 @@ impl assets::zone::DecodeFilter for UiFilter {
         use XAssetType::*;
         matches!(
             ty,
-            MenuList | Font | Localize | StringTable | Material | RawFile
+            MenuList | Font | Localize | StringTable | Material | RawFile | TechniqueSet
         )
     }
 }

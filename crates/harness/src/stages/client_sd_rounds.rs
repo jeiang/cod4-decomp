@@ -168,14 +168,26 @@ fn client_level_after(c: &mut Driven, before: u64, round: &str) -> Result<u64, S
     client_levels(c)
 }
 
-fn end_scoreboard(c: &mut Driven) -> Result<(), String> {
-    c.until(
-        json!({"hud.intermission": true, "menu.open": {"contains": "scoreboard"},
-            "scoreboard.rows.0": {"exists": true}}),
+/// Waits for the final intermission of round three's level with the `scoreboard` menu open, player rows on it and the
+/// player still on `team`, all in one reading. The end-of-game popups the stock scripts open hold the `scoreboard` menu
+/// back for most of the intermission, and the level rotates a few seconds after they close: a team read after a
+/// separate scoreboard wait could see the next map's spectator instead (the #542 serial run did). The matched state is
+/// written to `end-scoreboard.json`.
+fn end_scoreboard(c: &mut Driven, team: u64, levels: u64) -> Result<(), String> {
+    let state = json!({"hud.intermission": true, "net.levels": levels,
+        "menu.open": {"contains": "scoreboard"}, "scoreboard.rows.0": {"exists": true},
+        "hud.live.own_team": team});
+    let reply = c.until(
+        state.clone(),
         Duration::from_secs(150),
-        "the final scoreboard did not open with player rows",
+        "the final intermission of round three's level did not show the scoreboard with player rows and the player's team",
     )?;
-    Ok(())
+    let evidence = json!({"matched": state, "reply": reply});
+    std::fs::write(
+        c.dir.join("end-scoreboard.json"),
+        serde_json::to_vec_pretty(&evidence).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Plays all three rounds and returns the persistent team and the three objective roles observed.
@@ -240,14 +252,14 @@ fn play(c: &mut Driven) -> Result<(u64, String, String, String), String> {
         }
         Ok(())
     })?;
-    c.step("ingame=120", |c| {
-        client_level_after(c, levels, "three")?;
+    let levels = c.step("ingame=120", |c| {
+        let now = client_level_after(c, levels, "three")?;
         c.until(
             json!({"net.spawned": true, "player.alive": true}),
             Duration::from_secs(120),
             "the player did not spawn in round three",
         )?;
-        Ok(())
+        Ok(now)
     })?;
     c.step("nomenu=5", |c| {
         c.until(
@@ -264,16 +276,15 @@ fn play(c: &mut Driven) -> Result<(u64, String, String, String), String> {
     c.pause(Duration::from_secs(2))?;
     c.capture("round3")?;
 
-    c.step("menu=scoreboard:150", end_scoreboard)?;
-    c.step("team=same:5", |c| same_team(c, team))?;
-    c.pause(Duration::from_secs(1))?;
+    c.step("menu=scoreboard:150", |c| end_scoreboard(c, team, levels))?;
     c.capture("end")?;
     Ok((team, first, second, third))
 }
 
 /// Why the run failed, or `None`: rendering stayed healthy, every Driven step passed, the player spawned, and the
 /// steps that make the check were all there (two restarts, the role swapped once and back once, the team checked after
-/// each). The run ends at the final scoreboard, where no weapon is held, so the HUD is not judged here.
+/// each restart and at the final intermission, which `menu=scoreboard` reads with it). The run ends at the final
+/// scoreboard, where no weapon is held, so the HUD is not judged here.
 fn rounds_verdict(report: &Value) -> Option<String> {
     if let Some(w) = gpu_problem(&report["client"]["gpu_health"]) {
         return Some(w);
@@ -299,7 +310,7 @@ fn rounds_verdict(report: &Value) -> Option<String> {
         ("round=next", 2),
         ("cvar=other cg_objectiveText", 1),
         ("cvar=same cg_objectiveText", 1),
-        ("team=same", 3),
+        ("team=same", 2),
         ("menu=scoreboard", 1),
     ] {
         let have = count(prefix);
@@ -348,6 +359,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     out.files.extend(
         [
             "control-run.json",
+            "end-scoreboard.json",
             "round1.png",
             "round2.png",
             "round3.png",
@@ -419,8 +431,7 @@ mod tests {
                 true,
                 "OBJECTIVES_SD_ATTACKER",
             ),
-            ("menu=scoreboard:150", true, ""),
-            ("team=same:5", true, "team 2"),
+            ("menu=scoreboard:150", true, "team 2"),
         ]
     }
 

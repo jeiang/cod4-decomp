@@ -63,14 +63,6 @@ pub const ALLOWED: &[Allow] = &[
         stages: &[],
         max: Some(2), // once per client process
     },
-    Allow {
-        contains: &["server::server", "not extrapolated", "issue=514"],
-        reason: "g_smoothClients is on by default and player entity states are not extrapolated (#514); warned once \
-                 per server process",
-        stages: &[],
-        // Measured: 1 on client-hud and net-match; 2 on script-builtins (its in-process server and its listen client).
-        max: Some(2),
-    },
     // Timing of the harness's own clients and bots.
     Allow {
         contains: &["server::netsv", "packet from an address with no client"],
@@ -167,10 +159,23 @@ pub const ALLOWED: &[Allow] = &[
         max: Some(3), // measured 2 on the Linux host, 2026-10-29,
     },
     Allow {
+        contains: &["cod4e::voice", "microphone cannot be opened", "#488"],
+        reason: "client-hud holds +talk and shows the record meter, and client-frontend opens Options > Voice Chat (the \
+                 record meter), on a host with no capture device (#488)",
+        stages: &["client-hud", "client-frontend"],
+        max: Some(6), // measured 1 with +talk alone on the Linux host, 2026-11-01; the meter adds an open (5 s retry)
+    },
+    Allow {
         contains: &["server::server", "unknown client command", "frobnicate"],
         reason: "net-vote sends an unknown client command to check the answer",
         stages: &["net-vote"],
         max: Some(2), // measured 1 on the Linux host, 2026-10-14,
+    },
+    Allow {
+        contains: &["server::cvar", "cvar set refused", "rcon_ranged"],
+        reason: "net-rcon sets a `dvar_int` dvar out of its range to check that it is refused (#479)",
+        stages: &["net-rcon"],
+        max: Some(2), // one expected
     },
     Allow {
         contains: &["cod4e::console", "unknown command", "zz_unknown_at_front"],
@@ -188,22 +193,11 @@ pub const ALLOWED: &[Allow] = &[
         contains: &[
             "cod4e::console",
             "stock command not implemented",
-            "issue=479",
+            "issue=527",
         ],
-        reason: "client-commands runs two stock commands we do not implement (imagelist, gfx_stats) to check the #479 warning and the error channel",
+        reason: "client-commands runs two stock renderer commands we do not implement (imagelist, r_smc_stats; #527) to check the not-implemented warning and the error channel",
         stages: &["client-commands"],
         max: Some(3), // two expected
-    },
-    Allow {
-        contains: &[
-            "cod4e::console",
-            "stock command not implemented",
-            "command=\"uploadstats\"",
-            "issue=479",
-        ],
-        reason: "the stock Create a Class menus run `uploadstats` when a class is saved, a command we do not implement yet (#479)",
-        stages: &["client-custom-class"],
-        max: Some(1),
     },
     Allow {
         contains: &[

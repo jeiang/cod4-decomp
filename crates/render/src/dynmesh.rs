@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Translated in part from KisakCOD (gfx_d3d/rb_tess.cpp: R_SetParticleCloudConstants, RB_CreateParticleCloud2dAxis; r_buffers.cpp: R_CreateParticleCloudBuffer; GPL-3.0, copyright the KisakCOD contributors and Activision).
+// Translated in part from KisakCOD (gfx_d3d/rb_tess.cpp: R_SetParticleCloudConstants, RB_CreateParticleCloud2dAxis; r_buffers.cpp: R_CreateParticleCloudBuffer; EffectsCore/fx_postlight.cpp: FX_PostLight_GenerateVerts, FX_PostLight_Add; universal/com_math.cpp: PerpendicularVector; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! Triangles the client builds every frame: effect sprites, decals clipped to the world. They are drawn with the same
 //! `VertexKind::Model` pipelines as a skinned model surface, from the frame's dynamic vertex buffer, which is how the
 //! original draws particles and marks of models (`GfxPackedVertex`).
@@ -29,6 +29,9 @@ pub struct DynMesh {
     pub light_origin: Option<[f32; 3]>,
     /// Set for a particle cloud, which has no `verts`: its sprites come from [`cloud_vertices`].
     pub cloud: Option<Cloud>,
+    /// Set for a post light: the prism of `verts` around it is shaded by what the scene's depth puts inside it, with
+    /// the light's span as the code mesh arguments.
+    pub post_light: Option<PostLight>,
 }
 
 impl DynMesh {
@@ -38,6 +41,7 @@ impl DynMesh {
             verts: Vec::new(),
             light_origin: None,
             cloud: None,
+            post_light: None,
         }
     }
 
@@ -47,6 +51,16 @@ impl DynMesh {
             cloud: Some(cloud),
             ..Self::new(material)
         }
+    }
+
+    /// The prism a post light draws (`FX_PostLight_GenerateVerts`); `None` for a light with no length.
+    pub fn post_light(material: Arc<Material>, light: PostLight) -> Option<Self> {
+        let verts = light.verts()?;
+        Some(Self {
+            verts,
+            post_light: Some(light),
+            ..Self::new(material)
+        })
     }
 
     /// Appends the quad `corners` (in order around it) as two triangles.
@@ -105,6 +119,88 @@ impl Cloud {
     pub fn color_const(&self) -> [f32; 4] {
         self.color.map(|c| f32::from(c) / 255.0)
     }
+}
+
+/// Most post lights one frame draws (`FX_PostLight_Add`): later ones are dropped.
+pub const MAX_POST_LIGHTS: usize = 96;
+
+/// A light along a segment that brightens the surfaces the scene's depth puts within `radius` of it (`FxPostLight`),
+/// such as the glow a laser sight casts where it strikes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PostLight {
+    pub begin: Vec3,
+    pub end: Vec3,
+    pub radius: f32,
+    /// RGBA.
+    pub color: [u8; 4],
+}
+
+impl PostLight {
+    /// `CODE_MESH_ARG_0` and `CODE_MESH_ARG_1` seen from `eye`: the start relative to the eye with the inverse radius,
+    /// and the span with its inverse squared length.
+    pub fn args(&self, eye: Vec3) -> [[f32; 4]; 2] {
+        let delta = self.end - self.begin;
+        [
+            (self.begin - eye).extend(1.0 / self.radius).to_array(),
+            delta.extend(1.0 / delta.length_squared()).to_array(),
+        ]
+    }
+
+    /// The 28 triangles of an octagonal prism around the segment, pushed out by `radius` past each end and grown so
+    /// its flat sides clear the round light; `None` when the light has no length.
+    fn verts(&self) -> Option<Vec<DynVertex>> {
+        let delta = self.end - self.begin;
+        if delta.length_squared() < 1e-4 || self.radius < 0.001 {
+            return None;
+        }
+        let dir = delta.normalize();
+        let ortho0 = perpendicular(dir);
+        let ortho1 = dir.cross(ortho0);
+        let grow = self.radius * std::f32::consts::SQRT_2;
+        let ring: [Vec3; 8] = std::array::from_fn(|i| {
+            let a = i as f32 * std::f32::consts::PI / 4.0;
+            (a.sin() * ortho0 + a.cos() * ortho1) * grow
+        });
+        let at = |i: usize| {
+            let pos = if i < 8 {
+                self.begin - dir * self.radius + ring[i]
+            } else {
+                self.end + dir * self.radius + ring[i - 8]
+            };
+            DynVertex {
+                pos: pos.to_array(),
+                color: self.color,
+                uv: [0.0; 2],
+                normal: [0.0; 3],
+                tangent: [0.0; 3],
+            }
+        };
+        let mut idx = Vec::with_capacity(84);
+        for a in 0..8 {
+            let n = (a + 1) % 8;
+            idx.extend([a, n, a + 8, a + 8, n, n + 8]);
+        }
+        for a in [0, 2, 4] {
+            idx.extend([a + 2, a + 1, 0, a + 3, a + 2, 0]);
+        }
+        for a in [0, 2, 4] {
+            idx.extend([8, a + 9, a + 10, 8, a + 10, a + 11]);
+        }
+        Some(idx.into_iter().map(at).collect())
+    }
+}
+
+/// A unit vector at right angles to the unit vector `v` (`PerpendicularVector`): `v`'s smallest axis with `v`'s part
+/// along it taken away.
+fn perpendicular(v: Vec3) -> Vec3 {
+    let sq = v * v;
+    let mut pos = usize::from(sq.x > sq.y);
+    if sq[pos] > sq.z {
+        pos = 2;
+    }
+    let mut d = v * -v[pos];
+    d[pos] += 1.0;
+    d.normalize()
 }
 
 /// Sprites in a cloud: a grid of 8 x 8 x 16 cells, one sprite in each at a random place.
@@ -281,5 +377,54 @@ mod tests {
         let m = c.matrix(&Mat4::IDENTITY);
         assert!((m[0] - 10.0).abs() < 1e-4 && m[1].abs() < 1e-4, "{m:?}");
         assert!(m[2].abs() < 1e-4 && (m[3] - 30.0).abs() < 1e-4, "{m:?}");
+    }
+
+    #[test]
+    fn a_post_light_is_an_octagonal_prism_past_both_ends_with_its_span_as_arguments() {
+        let light = PostLight {
+            begin: Vec3::new(10.0, 0.0, 0.0),
+            end: Vec3::new(110.0, 0.0, 0.0),
+            radius: 2.0,
+            color: [255; 4],
+        };
+        let verts = light.verts().unwrap();
+        assert_eq!(verts.len(), 84);
+        assert!(
+            verts
+                .iter()
+                .all(|v| v.color == [255; 4] && v.uv == [0.0; 2])
+        );
+        let xs: Vec<f32> = verts.iter().map(|v| v.pos[0]).collect();
+        assert_eq!(xs.iter().copied().fold(f32::MAX, f32::min), 8.0);
+        assert_eq!(xs.iter().copied().fold(f32::MIN, f32::max), 112.0);
+        // Every corner sits radius times root two off the axis.
+        for v in &verts {
+            let off = Vec2::new(v.pos[1], v.pos[2]).length();
+            assert!((off - 2.0 * std::f32::consts::SQRT_2).abs() < 1e-4, "{off}");
+        }
+        let [a0, a1] = light.args(Vec3::new(0.0, 0.0, 10.0));
+        assert_eq!(a0, [10.0, 0.0, -10.0, 0.5]);
+        assert_eq!(a1, [100.0, 0.0, 0.0, 1e-4]);
+        let point = PostLight {
+            end: light.begin,
+            ..light
+        };
+        assert!(point.verts().is_none());
+    }
+
+    #[test]
+    fn a_perpendicular_is_unit_and_square_to_the_vector() {
+        for v in [
+            Vec3::X,
+            Vec3::Y,
+            Vec3::Z,
+            Vec3::new(1.0, 2.0, -3.0).normalize(),
+        ] {
+            let p = perpendicular(v);
+            assert!(
+                (p.length() - 1.0).abs() < 1e-5 && p.dot(v).abs() < 1e-5,
+                "{v} {p}"
+            );
+        }
     }
 }

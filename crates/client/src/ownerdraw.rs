@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// HUD vehicle and talker behavior follows KisakCOD (GPL-3.0), Infinity Ward:
+// cgame_mp/cg_compassfriendlies_mp.cpp:978 and cg_newDraw_mp.cpp:2287;
+// ui_mp/ui_main_mp.cpp:1495,1909. MP 1.8 reference; native 1.7 voice uses our codec.
 // Compass firing fades follow KisakCOD cgame_mp/cg_compassfriendlies_mp.cpp and cgame/cg_compass.cpp (GPL-3.0; copyright Activision and KisakCOD contributors).
 //! The HUD pieces the stock menus ask the client to draw (`ownerdraw` items): health, ammunition and weapon,
 //! grenades, stance, sprint, hints, the corner compass and the full-screen map.
@@ -26,6 +29,7 @@ const NIGHT_VISION_ICON: &str = "hud_icon_nvg";
 /// The dvars the pieces read, with the original's defaults.
 struct Cfg {
     enable: bool,
+    draw_talk: i32,
     draw_health: bool,
     breath_hint: bool,
     mantle_hint: bool,
@@ -56,6 +60,7 @@ impl Cfg {
         let b = |n: &str, d: bool| f(n, f32::from(u8::from(d))) != 0.0;
         Self {
             enable: b("hud_enable", true),
+            draw_talk: draw_talk(c.get("cg_drawTalk")),
             draw_health: b("cg_drawHealth", false),
             breath_hint: b("cg_drawBreathHint", true),
             mantle_hint: b("cg_drawMantleHint", true),
@@ -85,6 +90,30 @@ impl Cfg {
             sound_ping_fade: f("compassSoundPingFadeTime", 2.0).clamp(0.01, 60.0),
             radar_line_thickness: f("compassRadarLineThickness", 0.4).clamp(0.01, 10.0),
             map_radar_line_thickness: f("cg_hudMapRadarLineThickness", 0.15).clamp(0.01, 10.0),
+        }
+    }
+}
+
+/// `cg_drawTalk`, a stock enum dvar (`cg_drawTalkNames`, KisakCOD `cgame_mp/cg_newDraw_mp.cpp:43,72`): a name
+/// (any case) or its index, default `ALL`.
+fn draw_talk(v: Option<&str>) -> i32 {
+    const NAMES: [&str; 4] = ["NONE", "ALL", "FRIENDLY", "ENEMY"];
+    let Some(v) = v.map(str::trim) else {
+        return 1;
+    };
+    if let Some(i) = NAMES.iter().position(|n| n.eq_ignore_ascii_case(v)) {
+        return i as i32;
+    }
+    match v.parse::<f32>() {
+        Ok(n) if (0.0..4.0).contains(&n) => n as i32,
+        _ => {
+            logging::dedup!(
+                WARN,
+                "draw-talk",
+                value = v,
+                "cg_drawTalk is not NONE, ALL, FRIENDLY or ENEMY; drawing ALL"
+            );
+            1
         }
     }
 }
@@ -239,6 +268,8 @@ pub fn draw(
             | 150
             | 151
             | 152
+            | 155
+            | 156
             | 158
             | 159
             | 170
@@ -248,10 +279,58 @@ pub fn draw(
             | 185
             | 187
             | 188
+            | 193..=196
+            | 265..=270
     ) {
         return false;
     }
     let cfg = Cfg::read(&cx.input.cvars);
+    if id == 265 {
+        // UI_DrawRecordLevel: the level of the app's microphone, which stays open while this draws.
+        let unit = ui.place.unit();
+        let h = &mut cx.st.game.hud;
+        h.meter_shown = true;
+        let level =
+            crate::voice::meter_level(&mut h.meter_slots, &mut h.meter_count, h.voice_level);
+        h.record_level = level;
+        h.record_meter_marks += 1;
+        h.record_meter_rect = [r.x, r.y, r.w, r.h];
+        let width = r.w * level - 4.0 * unit;
+        if level > 0.0 && width > 0.0 {
+            p.fill(
+                Px {
+                    x: r.x + 2.0 * unit,
+                    y: r.y + 2.0 * unit,
+                    w: width,
+                    h: (r.h - 4.0 * unit).max(0.0),
+                },
+                WHITE,
+            );
+        }
+        for edge in [
+            Px { h: unit, ..r },
+            Px {
+                y: r.y + r.h - unit,
+                h: unit,
+                ..r
+            },
+            Px {
+                y: r.y + unit,
+                w: unit,
+                h: (r.h - 2.0 * unit).max(0.0),
+                ..r
+            },
+            Px {
+                x: r.x + r.w - unit,
+                y: r.y + unit,
+                w: unit,
+                h: (r.h - 2.0 * unit).max(0.0),
+            },
+        ] {
+            p.fill(edge, WHITE);
+        }
+        return true;
+    }
     if !cx.st.game.hud.live || !cfg.enable {
         return true;
     }
@@ -312,6 +391,14 @@ pub fn draw(
         155 => compass_vehicles(&mut dc, h, false),
         156 => compass_vehicles(&mut dc, h, true),
         158 => compass_friendlies(&mut dc, h, false),
+        193..=196 => talker(&mut dc, h, (id - 193) as usize, true),
+        267..=270 => talker(&mut dc, h, (id - 267) as usize, false),
+        266 => {
+            if h.local_talking {
+                dc.pic("voice_on", dc.r, dc.color);
+                h.local_talker_marks += 1;
+            }
+        }
         170 => compass_enemies(&mut dc, h, false),
         183 => compass_player(&mut dc, h, true),
         181 => map_image(&mut dc, h),
@@ -327,6 +414,29 @@ pub fn draw(
         _ => {}
     }
     true
+}
+
+/// The numbered slots are assigned before the friendly/enemy filter, as in UI_GetTalkerClientNum.
+fn talker(dc: &mut Dc, h: &mut HudFacts, slot: usize, filter: bool) {
+    let Some((_, name, enemy)) = h.talkers.get(slot) else {
+        return;
+    };
+    let mode = dc.cfg.draw_talk;
+    if filter && (mode == 0 || (mode == 2 && *enemy) || (mode == 3 && !*enemy)) {
+        return;
+    }
+    dc.pic("voice_on", dc.r, dc.color);
+    dc.text(
+        dc.r.x + dc.r.w + 2.0 * dc.u(),
+        dc.r.y + (dc.r.h + dc.text_h()) * 0.5,
+        dc.color,
+        name,
+    );
+    if filter {
+        h.talker_marks += 1;
+    } else {
+        h.ui_talker_marks += 1;
+    }
 }
 
 // ---- health -----------------------------------------------------------------------------------------------
@@ -1501,6 +1611,11 @@ fn compass_vehicles(dc: &mut Dc, h: &mut HudFacts, planes: bool) {
             })
             .collect();
         h.vehicle_marks += marks.len() as u32;
+        if planes {
+            h.plane_marks += marks.len() as u32;
+        } else {
+            h.helicopter_marks += marks.len() as u32;
+        }
         draw_marks_sized(dc, h, &map, false, icon, &marks, size);
     }
 }
@@ -1572,6 +1687,18 @@ fn map_border(dc: &mut Dc, h: &mut HudFacts) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cg_draw_talk_takes_the_stock_names_and_indices() {
+        assert_eq!(draw_talk(None), 1);
+        assert_eq!(draw_talk(Some("enemy")), 3);
+        assert_eq!(draw_talk(Some("FRIENDLY")), 2);
+        assert_eq!(draw_talk(Some("None")), 0);
+        assert_eq!(draw_talk(Some("3")), 3);
+        let (n, events) = logging::capture(|| draw_talk(Some("loud")));
+        assert_eq!(n, 1);
+        assert!(events.iter().any(|e| e.level == tracing::Level::WARN));
+    }
 
     #[test]
     fn the_ammunition_display_pads_and_hides_what_the_weapon_lacks() {

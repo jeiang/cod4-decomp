@@ -27,6 +27,7 @@ mod effects;
 mod events;
 mod flythrough;
 mod fog;
+mod fscmds;
 #[cfg(not(target_arch = "wasm32"))]
 mod fx_selftest;
 mod gfx;

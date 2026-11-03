@@ -1,8 +1,8 @@
 # The dev control channel
 
-A running client (and, for the server's half, the listen server it started) answers one line of JSON per request on a
-socket, so an agent can drive the game and read its state without a screen recorder or an OS-level tool. It is off
-unless `--control` asks for it; a play run never opens one.
+A running client (and, for the server's half, the listen server it started) or a dedicated headless server answers
+one line of JSON per request on a socket, so an agent can drive the game and read its state without a screen
+recorder or an OS-level tool. It is off unless `--control` asks for it; a play run never opens one.
 
 ## Starting it
 
@@ -13,6 +13,22 @@ cod4e --install ./COD4 --listen --bots 0 --control 0 --control-file /tmp/control
 `--control <port>` binds loopback (`127.0.0.1`); `0` takes a free port and writes `host:port` to `--control-file`.
 `--control-stdio` speaks the same protocol on stdin/stdout instead (one request per line). Outside the harness the
 channel is a development tool: it injects input and reads state, so it stays behind the flag.
+
+The dedicated server takes the same TCP flags (TCP only: its stdin is the player-facing console and its stdout is
+the console log):
+
+```sh
+cod4e-server --install ./COD4 +map mp_crash --control 0 --control-file /tmp/server-control.addr
+```
+
+Its requests are `ping`, `state`, `cvar`, `cvars`, `exec`, `wait`, `assert` and `quit`. `exec` runs the line at the
+server's own console. A section query is wrapped under its name (`state what=clients` answers with `clients`), so
+`wait` and `assert` predicates use paths such as `clients.clients.2` and `script.errors`.
+
+The server stays on its one thread: the listener and its connections are nonblocking and serviced between ticks,
+and replies a client has not read yet wait in a per-connection buffer. A client that leaves more than 8 MiB
+(`devctrl::MAX_PENDING`, two of the longest replies) unread has stopped reading; the server drops it with a `warn`
+rather than hold up a frame.
 
 ## Requests
 
@@ -41,6 +57,12 @@ Every request is an object with an optional `id` (echoed back) and a `cmd`:
 
 The injected events enter the same queue the window's events do (`crates/client/src/input/event.rs`), so a key
 request goes through the console field, the menus and the bind table exactly as the player's key does.
+
+On a client with a listen server, `state what=server` waits for that server's next frame and returns its full
+authoritative document under `server` (the client list is `server.clients.clients`). A connected-only client returns
+`null`; ask the dedicated server's own channel instead. The whole client state document and its synchronous
+`wait`/`assert` predicates contain client-side sections only; use the `server` request below or the dedicated
+channel for authoritative predicates.
 
 A state predicate is a map from dotted path to expected value; an expectation is a literal, or `{"gt": 99}`,
 `{"ge": 4}`, `{"contains": "word"}`, `{"exists": true}`, `{"len": 3}`. `wait` is what timing-sensitive checks use:
@@ -82,7 +104,7 @@ last map load measured until the player spawned (`map`, `load_ms`, `to_spawn_ms`
 the device's errors where they are, so a lost device's own noise, which may show between the loss and the recovery,
 is still dropped when the client records the loss. `gfx` is what the graphics
 settings came to in the renderer and on the surface, by name (`aa`, `aa_max`,
-`specular`, `dof`, `blur`, `blur_radius`, `blur_shape`, `glow`, `shadows`, `aniso`, `mipmode`, `dlights`, `aspect`,
+`specular`, `dof`, `blur`, `blur_radius`, `blur_shape`, `glow`, `shadows`, `aniso`, `mipmode`, `dlights`, `postlights`, `aspect`,
 `fullscreen`, `uncapped`, `zfeather`, `nearfar`, `depthhack_near`, `outdoor`, `sun_tweak`, `film_tweak`,
 `glow_tweak`, `sun_flare`, `sun_fx_position`, `water`, `picmip`, `pace`), and `cgame` what the cgame drew last
 frame, by name (`gun`, `hud2d`, `fps`, `fpstext`, `fullbright`, `shock`, `centertime`,
@@ -100,9 +122,12 @@ named (`state report`): a bare `state`, a `wait` and an `assert` leave it out, s
 The dev hooks of `dev` are for what a scenario sets up that the player has
 no key for: `losedevice` (destroys the graphics device, as a driver reset does), `dlight` (`arg` `1` puts a bright
 test light in front of the camera, `0` removes it), `pacereset` (counts frames from now for `gfx.pace`), and in a
-match `fxdemo` (`arg` an effect played in front of the player every 1.5 s, `off`), `bobmark` (starts `cgame.eyebob`
+match `laser` (`arg` `1` draws a laser sight from just below the eye along the view each frame, `0` removes it),
+`fxdemo` (`arg` an effect played in front of the player every 1.5 s, `off`), `bobmark` (starts `cgame.eyebob`
 over), `hitflesh` (a bullet of the weapon in hand strikes a player 64 units ahead), `shock` (`arg` ms of the default
 shellshock) and `subtitle` (`arg` a string key shown as a started sound's subtitle).
+
+`net.motd` is the server's message of the day as the client holds it (`CS_MOTD`, configstring 10).
 
 `entities.list[].model_name` resolves each snapshot model index through the server's model configstrings.
 `entities.snapshot` and `entities.server_time` name the snapshot the list came from, so a check that compares
@@ -147,15 +172,19 @@ requests answer with an error: the browser hosts no server.
 
 `control-channel` in the harness runs the acceptance of #378: console opened with the player's key, `bots 3` typed in,
 four players waited for, the entity list and scoreboard read, a menu item clicked at the centre of the rectangle the
-state document gave for it, and a capture written with no visible window.
+state document gave for it, and a capture written with no visible window. It also reads `state.server` and asserts
+that the authoritative client list contains the player and bots. `server-control` starts the real `cod4e-server`
+with `--control`, reads its map and cvars, runs `bots 3` at its console, waits for and asserts three authoritative
+bot clients and no script errors, then quits through the channel.
 
 `web-match` runs the browser client through the same requests over the page transport: menus clicked, movement, a
 mouse delta after a trusted click grants pointer lock, fire, grenade, HUD, sound, scoreboard, killcam, map change,
 Leave Game and the no-hosting popup, each asserted on the state document (see the README's Browser section). It then
 runs the native client on the same map, gametype and bot count and records the measured movement, shot and HUD
 ownerdraw differences.
-`crates/harness/src/control.rs` is the harness's side: `Driven` starts a client with `--control 0`, asks, waits,
-presses binds and keys, types, clicks a menu item by name or text where the state document put it, and captures;
+`crates/harness/src/control.rs` is the harness's side: `Driven` starts a client with `--control 0` or connects to a
+server the stage already owns, asks, waits, presses binds and keys, types, clicks a menu item by name or text where
+the state document put it, and captures;
 `Walker` is a stage's own player in a match, turning toward the nearest living enemy with the mouse (or the arrow
 keys when the pointer could not be locked), walking with the forward key and firing with the attack button. No stage
 uses the removed `--ui-script` runner any more (#376); the dev hooks the driven stages still use set up what no key

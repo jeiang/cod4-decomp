@@ -263,9 +263,17 @@ pub const COMMANDS: &[&str] = &[
     "togglep",
     "reset",
     "setfromdvar",
+    "dvar_bool",
+    "dvar_int",
+    "dvar_float",
     "cvarlist",
     "dvarlist",
     "dvardump",
+    // Perks, configs and memory (`SV_SetPerk_f`, `Com_WriteConfig_f`, `Com_Meminfo_f`).
+    "setperk",
+    "writeconfig",
+    "writedefaults",
+    "meminfo",
     // The command list and the console's print channels (the stock configs run `con_showchannel`).
     "cmdlist",
     "con_showchannel",
@@ -274,25 +282,19 @@ pub const COMMANDS: &[&str] = &[
     "con_visiblechannellist",
 ];
 
-/// Stock dedicated-server commands this server does not carry out (#479): accepted with a warning that names them,
-/// so a config or an admin's line is not `Unknown command`.
-const MISSING: &[&str] = &[
-    "scriptdebugger",
-    "scriptvarusage",
-    "stringusage",
-    "scriptusage",
-    "scriptprofile",
-    "scriptbuiltin",
-    "setperk",
-    "dvar_bool",
-    "dvar_int",
-    "dvar_float",
-    "writeconfig",
-    "writedefaults",
-    "meminfo",
-    "tempmeminfo",
-    "dumpraw",
-];
+/// Stock dedicated-server commands this server does not carry out: accepted with a warning that names them and the
+/// issue that tracks them, so a config or an admin's line is not `Unknown command`. The 1.8 debug-build commands
+/// (`scriptdebugger`, `scriptvarusage`, `scriptprofile`, `scriptbuiltin`, `tempmeminfo`, `dumpraw`) are not in
+/// iw3mp.exe 1.7 and are unknown, as there.
+const MISSING: &[(&str, u32)] = &[("stringusage", 535), ("scriptusage", 535)];
+
+/// The issue a known-but-unimplemented stock command is tracked by.
+fn missing_issue(name: &str) -> Option<u32> {
+    MISSING
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, issue)| *issue)
+}
 
 /// Commands of the client console that mean nothing to a headless server; accepted silently
 /// so the stock configs run unchanged.
@@ -310,7 +312,7 @@ pub fn accepts(name: &str) -> bool {
     let l = name.to_ascii_lowercase();
     COMMANDS.contains(&l.as_str())
         || CLIENT_ONLY.contains(&l.as_str())
-        || MISSING.contains(&l.as_str())
+        || missing_issue(&l).is_some()
 }
 
 struct Running {
@@ -392,6 +394,10 @@ pub struct Server {
     rcon_throttle: Throttle,
     /// Lines typed on the server's own terminal (see [`Self::attach_console`]).
     console: Option<std::sync::mpsc::Receiver<String>>,
+    /// The opt-in dev control channel, serviced only by this server's thread.
+    pub(crate) control: Option<devctrl::Channel>,
+    /// When each waiting control request was first offered.
+    pub(crate) control_waits: std::collections::HashMap<u64, Instant>,
     /// The game type the running level was started with (`sv.gametype`).
     gametype: String,
     /// The directory `g_log` names a file in.
@@ -481,6 +487,9 @@ fn core_dvars() -> Vec<(&'static str, Kind, String, u32)> {
         // "Turn on antilag checks for weapon hits" (KisakCOD `game_mp/g_main_mp.cpp:614`): shots and knife swings are
         // judged where the shooter saw the others (`lagcomp`).
         ("g_antilag", Kind::Bool, "1", ARCHIVE | SERVERINFO),
+        // "Enable extrapolation between client states" (KisakCOD `game_mp/g_main_mp.cpp:613`; 1.7 registers it at
+        // 0x4be6cb): which trajectory type a player's entity state carries (`netsv::player_pos_type`).
+        ("g_smoothClients", Kind::Bool, "1", 0),
         ("bot_idle", Kind::Bool, "0", 0),
         // Bots on every map; the listen server's player sets it, and a `bots` command sets it too.
         ("bot_count", Kind::Int(0, 64), "0", 0),
@@ -646,13 +655,9 @@ fn core_dvars() -> Vec<(&'static str, Kind, String, u32)> {
         // The log file name (empty: no log; stock `games_mp.log`); `cod4e-server` asks for `games_mp.log`.
         ("g_log", Kind::String, "", ARCHIVE),
         ("loc_language", Kind::Int(0, 14), "0", ARCHIVE | LATCH),
-        // The message of the day (`g_motd`, KisakCOD `game_mp/g_main_mp.cpp:454`), which the stock level spawn puts
-        // in `CS_MOTD` (`game_mp/g_spawn_mp.cpp:646`); this protocol has no such configstring, so a set one is warned
-        // about at each level start (#523).
+        // The message of the day (`g_motd`, KisakCOD `game_mp/g_main_mp.cpp:454`), which each level spawn puts in
+        // `cs::MOTD` (`game_mp/g_spawn_mp.cpp:646`, `Game::spawn_map_entities`).
         ("g_motd", Kind::String, "", 0),
-        // "Enable extrapolation between client states" (`game_mp/g_main_mp.cpp:613`, read at
-        // `game_mp/g_active_mp.cpp:716,1227`): the native snapshots carry no player trajectory to extrapolate.
-        ("g_smoothClients", Kind::Bool, "1", 0),
         // Set only by `SV_CheckPaused` (`qcommon/common.cpp:1584`, `server_mp/sv_main_mp.cpp:920-940`), for a listen
         // server whose one client paused; nothing pauses a multiplayer game here, so it stays 0.
         ("sv_paused", Kind::Int(0, 2), "0", ROM),
@@ -712,36 +717,16 @@ fn bot_count(s: &str) -> Result<usize, String> {
 }
 
 /// The stock dvars registered here whose effect this server cannot give, warned about once when set (each level
-/// start reads them): `g_motd` has no configstring to reach the clients in, and `g_banIPs` is filtered by nothing
-/// in the stock multiplayer game either (KisakCOD keeps its `ipFilters` only for `addip`, `removeip` and `listip`,
-/// `game/g_svcmds.cpp:17-240`), which this console does not have.
+/// start reads them): `g_banIPs` is filtered by nothing in the stock multiplayer game either (KisakCOD keeps its
+/// `ipFilters` only for `addip`, `removeip` and `listip`, `game/g_svcmds.cpp:17-240`), which this console does not
+/// have.
 fn warn_unhonoured_dvars(c: &Cvars) {
-    if !c.string("g_motd").is_empty() {
-        logging::dedup!(
-            WARN,
-            "g_motd",
-            dvar = "g_motd",
-            issue = 523,
-            "message of the day not sent: this protocol has no motd configstring"
-        );
-    }
     if !c.string("g_banIPs").trim().is_empty() {
         logging::dedup!(
             WARN,
             "g_banIPs",
             dvar = "g_banIPs",
             "IP list not enforced, as in the stock game; addip/removeip/listip are not implemented (banUser/banClient ban)"
-        );
-    }
-    if c.bool("g_smoothClients") {
-        // With it on, the stock game builds a player's entity state with `G_PlayerStateToEntityStateExtrapolate`
-        // (KisakCOD `game_mp/g_active_mp.cpp:716,1227`), so other clients extrapolate it between snapshots.
-        logging::dedup!(
-            WARN,
-            "g_smoothClients",
-            dvar = "g_smoothClients",
-            issue = 514,
-            "player entity states are not extrapolated between snapshots"
         );
     }
 }
@@ -907,6 +892,8 @@ impl Server {
             redirect: None,
             rcon_throttle: Throttle::default(),
             console: None,
+            control: None,
+            control_waits: Default::default(),
             gametype: String::new(),
             log_dir,
             masters_allowed: false,
@@ -2623,12 +2610,153 @@ impl Server {
                 let lines = self.channels.command(&lname, &args).unwrap_or_default();
                 self.say(&format!("{}\n", lines.join("\n")));
             }
-            _ if MISSING.contains(&lname.as_str()) => {
+            // `SV_SetPerk_f` (KisakCOD sv_ccmds_mp.cpp:1065): the named player gets the named perk's bit.
+            "setperk" => {
+                let Some(who) = arg(1) else {
+                    self.say("No player specified.\n");
+                    return Ok(());
+                };
+                let Some(n) = self.find_player(who) else {
+                    self.say(&format!("Player {who} is not on the server\n"));
+                    return Ok(());
+                };
+                let perk = arg(2).unwrap_or("");
+                match crate::script::PERK_NAMES
+                    .iter()
+                    .position(|p| p.eq_ignore_ascii_case(perk))
+                {
+                    Some(i) => {
+                        if let Some(c) = self.game.client_mut(n) {
+                            c.ps.perks |= 1u32 << i;
+                        }
+                    }
+                    // Stock prints this with `Com_DPrintf`, so only a developer run sees it.
+                    None => self.say(&format!("Unknown perk: {perk}\n")),
+                }
+            }
+            // `Dvar_RegisterBool_f`, `Dvar_RegisterInt_f` and `Dvar_RegisterFloat_f`
+            // (KisakCOD dvar_cmds.cpp:540-660): a dvar that does not exist, or a string one a command made, is
+            // registered as a command-made (`DVAR_EXTERNAL`) dvar of the type; an engine dvar of another type is
+            // refused with a message, and one of the same type (an enum counts as an integer) is left alone.
+            "dvar_bool" | "dvar_int" | "dvar_float" => {
+                let (Some(name), Some(default)) = (arg(1), arg(2)) else {
+                    let range = if lname == "dvar_bool" {
+                        ""
+                    } else {
+                        " <min> <max>"
+                    };
+                    return Err(format!("USAGE: {lname} <name> <default>{range}"));
+                };
+                let name = name.to_owned();
+                let default = default.to_owned();
+                let (kind, what) = match lname.as_str() {
+                    "dvar_bool" => (cvar::Kind::Bool, "a boolean"),
+                    _ => {
+                        let (Some(min), Some(max)) = (arg(3), arg(4)) else {
+                            return Err(format!("USAGE: {lname} <name> <default> <min> <max>"));
+                        };
+                        if lname == "dvar_int" {
+                            let (min, max) = (cvar::parse_int(min), cvar::parse_int(max));
+                            if min > max {
+                                self.say(&format!(
+                                    "dvar {name}: min {min} should not be greater than max {max}\n"
+                                ));
+                                return Ok(());
+                            }
+                            (cvar::Kind::Int(min, max), "an integer")
+                        } else {
+                            let (min, max) = (cvar::parse_float(min), cvar::parse_float(max));
+                            if min > max {
+                                self.say(&format!(
+                                    "dvar {name}: min {min} should not be greater than max {max}\n"
+                                ));
+                                return Ok(());
+                            }
+                            // Stock's float refusal says "integer" too (dvar_cmds.cpp:651).
+                            (cvar::Kind::Float(min, max), "an integer")
+                        }
+                    }
+                };
+                let existing = self.game.cvars.get(&name).map(|c| {
+                    let command_made = !c.registered
+                        || (c.flags & cvar::EXTERNAL != 0 && matches!(c.kind, cvar::Kind::String));
+                    (
+                        command_made,
+                        std::mem::discriminant(&c.kind),
+                        c.name.clone(),
+                    )
+                });
+                match existing {
+                    None | Some((true, ..)) => {
+                        self.game
+                            .cvars
+                            .register_kind(&name, kind, &default, cvar::EXTERNAL);
+                    }
+                    Some((false, d, _)) if d == std::mem::discriminant(&kind) => {}
+                    Some((false, _, stored)) => {
+                        self.say(&format!("dvar '{stored}' is not {what} dvar\n"));
+                    }
+                }
+            }
+            // `Com_WriteConfig_f` and `Com_WriteDefaults_f` (KisakCOD common.cpp:1628): the archived dvars'
+            // values, or every engine dvar's reset value. The name is cut to 63 bytes (`I_strncpyz` into 64) and
+            // lands under the log folder (`fs_homepath`'s game directory here), as `FS_BuildOSPath` always puts it
+            // under the game directory; `FS_CreatePath` refuses a name with `..` or `::` (com_files.cpp:459), and a
+            // drive (`:`) is refused with it.
+            "writeconfig" | "writedefaults" => {
+                let Some(name) = arg(1) else {
+                    return Err(format!("Usage: {lname} <filename>"));
+                };
+                let mut end = name.len().min(63);
+                while !name.is_char_boundary(end) {
+                    end -= 1;
+                }
+                let mut file = name[..end].to_owned();
+                if !file.rsplit(['/', '\\']).next().unwrap_or("").contains('.') {
+                    file.push_str(&".cfg"[..4.min(63 - file.len())]);
+                }
+                self.say(&format!("Writing {file}.\n"));
+                if file.contains("..") || file.contains(':') {
+                    self.say(&format!(
+                        "WARNING: refusing to create relative path \"{file}\"\n"
+                    ));
+                    return Ok(());
+                }
+                let path = self.log_dir.join(file.trim_start_matches(['/', '\\']));
+                let mut text = String::from("// generated by Call of Duty, do not modify\n");
+                for c in self.game.cvars.iter() {
+                    if lname == "writeconfig" {
+                        if c.flags & cvar::ARCHIVE != 0 {
+                            text += &format!("seta {} \"{}\"\n", c.name, c.value);
+                        }
+                    } else if c.registered
+                        && c.flags & (cvar::ROM | cvar::CHEAT | cvar::EXTERNAL) == 0
+                    {
+                        text += &format!("set {} \"{}\"\n", c.name, c.default);
+                    }
+                }
+                if let Some(dir) = path.parent()
+                    && let Err(e) = std::fs::create_dir_all(dir)
+                {
+                    tracing::warn!(error = %e, file = file.as_str(), "cannot create the config's folder");
+                }
+                if let Err(e) = std::fs::write(&path, text) {
+                    tracing::warn!(error = %e, file = file.as_str(), "cannot write the config");
+                    self.say(&format!("Couldn't write {file}.\n"));
+                }
+            }
+            // `Com_Meminfo_f`: the process's memory (there is no zone allocator to break it down).
+            "meminfo" => {
+                if let Some(line) = rss_line() {
+                    self.say(&line);
+                }
+            }
+            _ if missing_issue(&lname).is_some() => {
                 logging::dedup!(
                     WARN,
                     lname.as_str(),
                     command = lname.as_str(),
-                    issue = 479,
+                    issue = missing_issue(&lname).unwrap_or(535),
                     "stock command not implemented"
                 );
             }
@@ -3610,6 +3738,7 @@ impl Server {
 
     pub fn run_frames(&mut self, n: u32) {
         for _ in 0..n {
+            self.service_control();
             self.svs_time += self.frame_ms;
             let sample = self.run_frame();
             self.place_heli_view();
@@ -3688,6 +3817,7 @@ impl Server {
             while let Some(line) = self.console.as_ref().and_then(|c| c.try_recv().ok()) {
                 self.cbuf.add_text(&line);
             }
+            self.service_control();
             self.exec_buffer();
             self.cbuf.end_frame();
             if self.quit {
@@ -4320,17 +4450,16 @@ mod tests {
     }
 
     #[test]
-    fn the_s11_dvars_have_their_stock_defaults_and_a_set_motd_or_ban_list_warns() {
+    fn the_s11_dvars_have_their_stock_defaults_and_only_a_set_ban_list_warns() {
         let mut c = crate::cvar::Cvars::new();
         register_core_dvars(&mut c);
         assert_eq!(c.string("g_motd"), "");
         assert!(c.bool("g_smoothClients") && c.bool("sv_botsPressAttackBtn"));
         assert_eq!(c.int("sv_paused"), 0);
-        // The stock default turns on the extrapolation this server lacks (#514), said once per process (an earlier
-        // test's level start may have said it already); nothing else warns.
+        // Nothing warns at the stock defaults.
         let (_, events) = logging::capture(|| super::warn_unhonoured_dvars(&c));
         let dvars: Vec<_> = events.iter().filter_map(|e| e.field("dvar")).collect();
-        assert!(dvars.iter().all(|d| *d == "g_smoothClients"), "{dvars:?}");
+        assert!(dvars.is_empty(), "{dvars:?}");
         c.set("g_motd", "logtest motd");
         c.set("g_banIPs", "10.0.0.1 ");
         let (_, events) = logging::capture(|| super::warn_unhonoured_dvars(&c));
@@ -4338,8 +4467,7 @@ mod tests {
             .iter()
             .filter(|e| e.level == tracing::Level::WARN)
             .filter_map(|e| e.field("dvar"))
-            .filter(|d| *d != "g_smoothClients")
             .collect();
-        assert_eq!(dvars, ["g_motd", "g_banIPs"]);
+        assert_eq!(dvars, ["g_banIPs"]);
     }
 }
