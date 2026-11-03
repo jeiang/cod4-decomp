@@ -448,6 +448,8 @@ struct Counters {
     fx_quads_max: usize,
     fx_tracers_max: usize,
     fx_decals_max: usize,
+    /// Effects the first complete gamestate named (`cs::EFFECT_NAMES`): stock has every `loadfx` effect by then.
+    fx_names_at_gamestate: Option<usize>,
     /// Ragdolls made for corpses seen, and the most corpses drawn at once.
     ragdolls: u64,
     corpses_max: usize,
@@ -915,9 +917,26 @@ impl NetPlay {
     fn pump_for_gamestate(&mut self, wait: Duration) -> bool {
         self.net.pump(wait);
         self.net.send();
-        self.net
+        let complete = self
+            .net
             .ui_ref()
-            .is_some_and(net::ui::ClientUiState::gamestate_complete)
+            .is_some_and(net::ui::ClientUiState::gamestate_complete);
+        if complete && self.c.fx_names_at_gamestate.is_none() {
+            self.sync_names();
+            self.c.fx_names_at_gamestate = Some(self.events.fx_names());
+        }
+        complete
+    }
+
+    /// The effect and looped sound alias names, from their configstrings (`CG_RegisterGraphics` takes them from the
+    /// gamestate, `CG_ConfigStringModified` from each update).
+    fn sync_names(&mut self) {
+        if let Some(ui) = self.net.ui_ref() {
+            self.events
+                .sync_fx_names(|i| ui.config(net::ui::cs::EFFECT_NAMES + i));
+            self.sound
+                .sync_alias_names(|i| ui.config(net::ui::cs::SOUND_ALIASES + i));
+        }
     }
 
     pub fn spawned(&self) -> bool {
@@ -2024,6 +2043,7 @@ impl NetPlay {
             let (sp, cp) = look_pitch.sin_cos();
             let forward = Vec3::new(cp * cy, cp * sy, sp);
             let e = ClientEvent::BulletImpact {
+                source: crate::events::ImpactSource::Hitflesh,
                 origin: (eye + forward * 64.0).to_array(),
                 normal: (-forward).to_array(),
                 surface: crate::effects::SURFACE_FLESH,
@@ -2212,7 +2232,7 @@ impl NetPlay {
             !channel_volume_command(c, sound, &file)
                 && !net::ui::ServerCmd::parse(c).is_some_and(|c| look.command(&c, now, &file))
         });
-        let commands = self.events.take_commands(&mut self.net.commands);
+        let commands = std::mem::take(&mut self.net.commands);
         // Nothing reads these yet (`Frame::commands`): a server command no system here takes is a gap, not a no-op.
         for c in &commands {
             if !ClientSound::is_command(c) {
@@ -2225,6 +2245,7 @@ impl NetPlay {
                 );
             }
         }
+        self.sync_names();
         if let Some(ui) = self.net.ui_ref() {
             let tags = (1..net::ui::cs::EFFECT_TAGS_COUNT)
                 .filter_map(|slot| {
@@ -3291,7 +3312,35 @@ impl NetPlay {
         };
         self.c.cmd_drawn = d;
         report["fx"]["tracers_max"] = json!(self.c.fx_tracers_max);
+        report["fx"]["names_at_gamestate"] = json!(self.c.fx_names_at_gamestate);
+        report["fx"]["names"] = json!(self.events.fx_names());
         report["fx"]["flesh_hits"] = json!(self.effects.flesh_hits);
+        report["fx"]["impacts"] = Value::Array(
+            self.effects
+                .impacts
+                .iter()
+                .map(|impact| {
+                    let (source, entity) = match impact.source {
+                        crate::events::ImpactSource::Network(entity) => ("network", Some(entity)),
+                        crate::events::ImpactSource::Hitflesh => ("hitflesh", None),
+                        crate::events::ImpactSource::Prop => ("prop", None),
+                        crate::events::ImpactSource::Selftest => ("selftest", None),
+                    };
+                    json!({
+                        "source": source,
+                        "entity": entity,
+                        "time_ms": impact.time_ms,
+                        "weapon": impact.weapon,
+                        "shooter": impact.shooter,
+                        "surface": impact.surface,
+                        "exit": impact.exit,
+                        "head": impact.head,
+                        "blood_enabled": impact.blood_enabled,
+                        "origin": impact.origin,
+                    })
+                })
+                .collect(),
+        );
         let bolts = self.effects.bolted_stats();
         report["fx"]["bolted"] = json!({
             "active": bolts.active,

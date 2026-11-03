@@ -86,6 +86,10 @@ pub enum Table {
     Menu,
     /// Localized string references and `settext` text; matched case-sensitively.
     Text,
+    /// `loadfx` effects (`G_EffectIndex`).
+    Fx,
+    /// Sound aliases entities loop (`G_SoundAliasIndex`).
+    Sound,
 }
 
 impl Table {
@@ -95,6 +99,8 @@ impl Table {
             Table::Material => (cs::MATERIALS, cs::MATERIALS_COUNT, "materials"),
             Table::Menu => (cs::SCRIPT_MENUS, cs::SCRIPT_MENUS_COUNT, "script menus"),
             Table::Text => (cs::LOCALIZED, cs::LOCALIZED_COUNT, "localized strings"),
+            Table::Fx => (cs::EFFECT_NAMES, cs::EFFECT_NAMES_COUNT, "effects"),
+            Table::Sound => (cs::SOUND_ALIASES, cs::SOUND_ALIASES_COUNT, "sound aliases"),
         }
     }
 }
@@ -146,6 +152,8 @@ impl Game {
             Table::Material => &mut self.shaders,
             Table::Menu => &mut self.menus,
             Table::Text => &mut self.strings,
+            Table::Fx => &mut self.fx,
+            Table::Sound => &mut self.sounds,
         };
         let known = list.len();
         let i = if table == Table::Text {

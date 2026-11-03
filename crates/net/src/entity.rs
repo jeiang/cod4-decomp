@@ -123,7 +123,7 @@ pub struct EntityState {
     pub head_icon: u16,
     /// Who sees `head_icon`: 0 everyone, 1 axis, 2 allies, 3 spectators.
     pub head_icon_team: u8,
-    /// The sound alias the entity loops: an index of the `sndname` commands the server sent, 0 for none.
+    /// The sound alias the entity loops: its `cs::SOUND_ALIASES` configstring index, 0 for none.
     pub loop_sound: u16,
     /// Script model, corpse and player: the models the scripts `attach`ed, in order, as [`EntityState::set_attach`]
     /// packs them (0 for an empty slot, which ends the list).
