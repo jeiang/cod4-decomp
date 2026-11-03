@@ -7,6 +7,10 @@
 //! a game mode is chosen, and the internet list is empty), and Start New Server's game mode chooser steps through the
 //! modes in the original's order. The install's `players/` folder must be exactly as it was after the run. Needs a
 //! display and the install; skips without.
+//!
+//! The menu stack (`menu.open`) lists the bottom first: home is `["main", "main_text"]`, with the buttons in
+//! `main_text`, and Start New Server leaves `createserver` on top. Every wait compares the last entry without case
+//! (`until_top`, `HOME`), never index 0.
 use super::client_custom_class::{HOME, localized, until_top};
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;

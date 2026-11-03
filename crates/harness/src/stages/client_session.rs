@@ -6,6 +6,10 @@
 //! client starts with `+set cg_fov 75 +exec <file> +name <nick> +connect <server>` beside its own `--` options and
 //! must join the `cod4e-server` started for it under that name, with the variable set over the profile's config and
 //! the file run, read back through the control channel. Needs a display and the install; skips without.
+//!
+//! The player spawns before the prematch countdown ends, and the countdown hides the weapon and compass HUD, so a
+//! step that needs that HUD waits for it to have drawn rather than for the spawn. The players check compares who the
+//! server announced with who was ever drawn, by identity, from the run's `report` (not a count at one moment).
 use super::client_custom_class::session_report;
 use super::client_dedicated::{Dedicated, lists_player, locate_server};
 use super::client_flythrough::locate_client;
