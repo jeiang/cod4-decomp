@@ -98,6 +98,9 @@ scripts/budget-table.py                 @none
 scripts/map-sweep.sh                    @none
 scripts/build-crosscheck-tools.sh       @none
 scripts/gen-wavelet-tables.py           @none
+scripts/serial-log.sh                   @none
+scripts/merge-pr.py                     @none
+scripts/review-delta.py                 @none
 tools/**                                @none
 docs/**                                 @none
 .github/**                              @none
