@@ -71,6 +71,14 @@ evidence-report *args:
 stages-for base="origin/main" head="HEAD":
     @python3 scripts/stages-for.py "$1" "$2"
 
+# Merge PR n only if its head is sha, windows and every other check passed and it is MERGEABLE; dry run unless CONFIRM=yes
+merge-pr n sha:
+    python3 scripts/merge-pr.py "$1" "$2"
+
+# Show what PR n's own change gained since the reviewed head old (merges from main left out)
+review-delta n old:
+    python3 scripts/review-delta.py "$1" "$2"
+
 # Fetch and build the SM3 cross-check drivers
 crosscheck-tools *args:
     scripts/build-crosscheck-tools.sh "$@"
@@ -79,11 +87,14 @@ crosscheck-tools *args:
 wavelet-tables exe:
     python3 scripts/gen-wavelet-tables.py "$@"
 
-# Test scripts/slot-guard.py, scripts/remote-linux.sh's logs and scripts/stages-for.py locally (no host needed)
+# Test scripts/slot-guard.py, scripts/remote-linux.sh's logs, scripts/stages-for.py and the coordinator scripts locally (no host needed)
 script-tests:
     python3 scripts/slot-guard.test.py
     python3 scripts/remote-linux.test.py
     python3 scripts/stages-for.test.py
+    python3 scripts/serial-log.test.py
+    python3 scripts/merge-pr.test.py
+    python3 scripts/review-delta.test.py
 
 # Linux test host
 
@@ -106,6 +117,10 @@ slot-exec n ref +cmd:
 # Run stages (default suite when empty) with the host to itself, on a headless display
 serial ref stages="":
     COD4E_LINUX_HOST={{host}} scripts/remote-linux.sh "$1" -- ${2:+--stage "$2"}
+
+# `just serial` with the whole output and exit status kept in bundles/serial-logs/ (COD4E_LINUX_CHECKS=1 adds host checks)
+serial-log ref stages="":
+    scripts/serial-log.sh "$1" "$2"
 
 # Install scripts/slot-guard.py as the Linux host's ~/Projects/cod4e/bin/slot-guard, with a GC-rooted python3
 slot-guard-install:
