@@ -651,9 +651,8 @@ fn core_dvars() -> Vec<(&'static str, Kind, String, u32)> {
         // The log file name (empty: no log; stock `games_mp.log`); `cod4e-server` asks for `games_mp.log`.
         ("g_log", Kind::String, "", ARCHIVE),
         ("loc_language", Kind::Int(0, 14), "0", ARCHIVE | LATCH),
-        // The message of the day (`g_motd`, KisakCOD `game_mp/g_main_mp.cpp:454`), which the stock level spawn puts
-        // in `CS_MOTD` (`game_mp/g_spawn_mp.cpp:646`); this protocol has no such configstring, so a set one is warned
-        // about at each level start (#523).
+        // The message of the day (`g_motd`, KisakCOD `game_mp/g_main_mp.cpp:454`), which each level spawn puts in
+        // `cs::MOTD` (`game_mp/g_spawn_mp.cpp:646`, `Game::spawn_map_entities`).
         ("g_motd", Kind::String, "", 0),
         // Set only by `SV_CheckPaused` (`qcommon/common.cpp:1584`, `server_mp/sv_main_mp.cpp:920-940`), for a listen
         // server whose one client paused; nothing pauses a multiplayer game here, so it stays 0.
@@ -714,19 +713,10 @@ fn bot_count(s: &str) -> Result<usize, String> {
 }
 
 /// The stock dvars registered here whose effect this server cannot give, warned about once when set (each level
-/// start reads them): `g_motd` has no configstring to reach the clients in, and `g_banIPs` is filtered by nothing
-/// in the stock multiplayer game either (KisakCOD keeps its `ipFilters` only for `addip`, `removeip` and `listip`,
-/// `game/g_svcmds.cpp:17-240`), which this console does not have.
+/// start reads them): `g_banIPs` is filtered by nothing in the stock multiplayer game either (KisakCOD keeps its
+/// `ipFilters` only for `addip`, `removeip` and `listip`, `game/g_svcmds.cpp:17-240`), which this console does not
+/// have.
 fn warn_unhonoured_dvars(c: &Cvars) {
-    if !c.string("g_motd").is_empty() {
-        logging::dedup!(
-            WARN,
-            "g_motd",
-            dvar = "g_motd",
-            issue = 523,
-            "message of the day not sent: this protocol has no motd configstring"
-        );
-    }
     if !c.string("g_banIPs").trim().is_empty() {
         logging::dedup!(
             WARN,
@@ -4452,7 +4442,7 @@ mod tests {
     }
 
     #[test]
-    fn the_s11_dvars_have_their_stock_defaults_and_a_set_motd_or_ban_list_warns() {
+    fn the_s11_dvars_have_their_stock_defaults_and_only_a_set_ban_list_warns() {
         let mut c = crate::cvar::Cvars::new();
         register_core_dvars(&mut c);
         assert_eq!(c.string("g_motd"), "");
@@ -4470,6 +4460,6 @@ mod tests {
             .filter(|e| e.level == tracing::Level::WARN)
             .filter_map(|e| e.field("dvar"))
             .collect();
-        assert_eq!(dvars, ["g_motd", "g_banIPs"]);
+        assert_eq!(dvars, ["g_banIPs"]);
     }
 }

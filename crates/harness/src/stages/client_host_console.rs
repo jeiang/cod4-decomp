@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! `client-host-console`: the host of a listen server at the console (#366, #370), driven through the control
 //! channel as the player types. On the server started with `--listen` (`map`, `sv_cheats 0`): `status` answers in
-//! the host's console, `kick <bot>` drops the bot, `map_restart` loads the level again, and each cheat verb
+//! the host's console, `kick <bot>` drops the bot, `map_restart` loads the level again (with `g_motd` set on the
+//! server first, which the client's `configstrings` then lists as `CS_MOTD`, #523), and each cheat verb
 //! (`noclip`, `ufo`, `god`, `give`, `take`, `setviewpos`) is refused with the localized `GAME_CHEATSNOTENABLED`
 //! text, never the raw key. Then `devmap mp_crash` typed at the console starts a server with cheats, the team and
 //! class menus are clicked through, and the same verbs act: the server's own client state says so (`noclip`,
@@ -26,6 +27,8 @@ const REFUSED: [&str; 6] = [
 ];
 /// The localized `GAME_CHEATSNOTENABLED` (stock `localizedstrings/game.str`).
 const REFUSAL: &str = "Cheats are not enabled";
+/// The message of the day the server is given before `map_restart`.
+const MOTD: &str = "harness motd 523";
 
 /// The console's lines that contain `needle`.
 fn console_count(c: &mut Driven, needle: &str) -> Result<usize, String> {
@@ -155,6 +158,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             std::thread::sleep(Duration::from_millis(200));
         }
 
+        // #523: the server's message of the day, read at the level spawn `map_restart` runs, reaches the client in
+        // `CS_MOTD` (10), which the stock `configstrings` console command lists.
+        c.ask(json!({"cmd": "server", "op": "exec", "line": format!("set g_motd \"{MOTD}\"")}))?;
         let loads = c.ask(json!({"cmd": "server", "op": "state", "what": "map"}))?["level_loads"]
             .as_u64()
             .unwrap_or(0);
@@ -176,6 +182,13 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             json!({"player.alive": true}),
             Duration::from_secs(120),
             "the player did not spawn after map_restart",
+        )?;
+        exec(c, "configstrings")?;
+        console_until(
+            c,
+            &format!("  10: {MOTD}"),
+            1,
+            "g_motd in the client's configstrings after map_restart",
         )?;
 
         // #370 without cheats: each verb is refused in the player's language, never as the raw key.
