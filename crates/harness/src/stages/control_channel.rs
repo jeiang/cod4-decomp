@@ -63,6 +63,22 @@ fn drive(c: &mut Driven, report: &mut StageReport) -> Result<(), String> {
         .metrics
         .insert("player_entities".to_owned(), players as f64);
 
+    // The same running listen server's authoritative state is a named section of the client's document.
+    let server = c.state("server")?;
+    let server_clients = server["clients"]["clients"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    report
+        .metrics
+        .insert("server_clients".to_owned(), server_clients.len() as f64);
+    if server_clients.len() < 4 {
+        return Err(format!(
+            "{} clients in state.server, want 4: {server}",
+            server_clients.len()
+        ));
+    }
+
     // A capture of the frame on screen, with no window of the stage's own.
     let png = c.capture("control")?;
     let bytes = fs::metadata(&png).map_err(|e| e.to_string())?.len();

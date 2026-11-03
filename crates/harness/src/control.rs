@@ -16,9 +16,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-/// A client the stage started with `--control 0`, and the socket its channel answers on.
+/// A running game's control socket, with the child process when the stage started it.
 pub struct Driven {
-    child: Child,
+    child: Option<Child>,
     sock: BufReader<TcpStream>,
     id: u64,
     /// The directory the run writes to (`--out`): captures land here.
@@ -31,6 +31,24 @@ pub struct Driven {
 }
 
 impl Driven {
+    /// Connects to a channel whose process the stage already owns (for example a dedicated server).
+    pub fn connect(addr: &str, dir: &Path) -> Result<Self, String> {
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        let sock = TcpStream::connect(addr)
+            .map_err(|e| format!("the channel at {addr} did not answer: {e}"))?;
+        sock.set_read_timeout(Some(Duration::from_secs(240)))
+            .map_err(|e| e.to_string())?;
+        Ok(Self {
+            child: None,
+            sock: BufReader::new(sock),
+            id: 0,
+            dir: dir.to_owned(),
+            addr: addr.to_owned(),
+            steps: Vec::new(),
+            began: Instant::now(),
+        })
+    }
+
     /// Starts the client with `args` (its own flags: `--listen`, `--bots`, `--duration`, ...) and the harness's
     /// window, sound and profile flags, waits for its channel to open and connects to it. Output lands in `dir`.
     pub fn start(client: &Path, install: &Path, dir: &Path, args: &[&str]) -> Result<Self, String> {
@@ -86,7 +104,7 @@ impl Driven {
             }
         };
         Ok(Self {
-            child,
+            child: Some(child),
             sock,
             id: 0,
             dir: dir.to_owned(),
@@ -363,14 +381,15 @@ impl Driven {
     /// leave within `grace` and was killed.
     pub fn finish(mut self, grace: Duration) -> Option<ExitStatus> {
         let _ = self.ask(json!({"cmd": "quit"}));
+        let mut child = self.child?;
         let end = Instant::now() + grace;
         loop {
-            match self.child.try_wait() {
+            match child.try_wait() {
                 Ok(Some(s)) => return Some(s),
                 Ok(None) if Instant::now() < end => std::thread::sleep(Duration::from_millis(100)),
                 _ => {
-                    let _ = self.child.kill();
-                    let _ = self.child.wait();
+                    let _ = child.kill();
+                    let _ = child.wait();
                     return None;
                 }
             }

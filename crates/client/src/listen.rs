@@ -105,52 +105,6 @@ pub fn request(seq: u64, req: &serde_json::Map<String, Value>) -> Option<Result<
     None
 }
 
-/// Answers one request against the running server.
-fn answer(s: &mut Server, req: &serde_json::Map<String, Value>) -> Result<Value, String> {
-    let op = req.get("op").and_then(Value::as_str).unwrap_or("state");
-    match op {
-        "state" => {
-            let what = req.get("what").and_then(Value::as_str);
-            Ok(s.control_state(what))
-        }
-        "exec" => {
-            let line = req
-                .get("line")
-                .and_then(Value::as_str)
-                .ok_or("exec needs the line")?;
-            s.exec_line(line)?;
-            Ok(json!({"ok": true, "line": line}))
-        }
-        "cvar" => {
-            let name = req
-                .get("name")
-                .and_then(Value::as_str)
-                .ok_or("cvar needs a name")?;
-            match req.get("value").and_then(Value::as_str) {
-                None => Ok(json!({"name": name, "value": s.control_cvar(name)})),
-                // `"force": true` writes as the engine does (`devmap` sets the init-protected `sv_cheats` so).
-                Some(v) if req.get("force").and_then(Value::as_bool) == Some(true) => {
-                    s.game.cvars.force(name, v);
-                    Ok(json!({"name": name, "value": s.control_cvar(name)}))
-                }
-                Some(v) => {
-                    s.exec_line(&format!("set {name} \"{}\"", v.replace('"', "'")))?;
-                    Ok(json!({"name": name, "value": s.control_cvar(name)}))
-                }
-            }
-        }
-        "command_frame" => {
-            let ms = req.get("collect_ms").and_then(Value::as_u64).unwrap_or(0);
-            // 24 usercmds per tick (`MAX_CMDS_PER_FRAME`) at the 125 Hz send cap: about 190 ms fits one tick.
-            if ms > 190 {
-                return Err("command_frame collect_ms must be at most 190".to_owned());
-            }
-            Ok(s.control_command_frame(Duration::from_millis(ms)))
-        }
-        other => Err(format!("no such server request: {other}")),
-    }
-}
-
 /// Queues `line` for the listen server's console.
 pub fn send(line: &str) {
     if let Ok(mut q) = CONSOLE.lock() {
@@ -349,7 +303,7 @@ fn run(
             .map(|mut q| std::mem::take(&mut *q))
             .unwrap_or_default();
         for (seq, req) in asked {
-            let reply = answer(&mut server, &req);
+            let reply = server.control_request(&req);
             if let Ok(mut replies) = REPLIES.lock() {
                 replies.push((seq, reply));
             }

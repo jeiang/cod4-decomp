@@ -27,6 +27,9 @@ pub trait Control {
     /// The state document, narrowed to `what` when it names a part.
     fn state(&mut self, what: Option<&str>) -> Value;
 
+    /// The listen server's full state document. `None` until that server answers between its own frames.
+    fn server_state(&mut self, seq: u64) -> Option<Result<Value, String>>;
+
     /// The keys bound to `command` (`+forward`, `togglemenu`).
     fn binds_of(&self, command: &str) -> Vec<String>;
 
@@ -68,6 +71,19 @@ pub fn handle<H: Control + ?Sized>(h: &mut H, req: &Request) -> Outcome {
             return match h.capture(req.str("dir"), req.bool("base64").unwrap_or(false)) {
                 None => Outcome::Wait,
                 Some(r) => Outcome::Done(reply(&req.id, r)),
+            };
+        }
+        "state"
+            if req
+                .str("what")
+                .or_else(|| req.str("part"))
+                .or_else(|| req.str("of"))
+                == Some("server") =>
+        {
+            let id = req.id.clone();
+            return match h.server_state(req.seq) {
+                None => Outcome::Wait,
+                Some(r) => Outcome::Done(reply(&id, r.map(|server| json!({"server": server})))),
             };
         }
         "wait" => return wait(h, req),
@@ -478,6 +494,7 @@ mod tests {
         lines: Vec<String>,
         captured: usize,
         waited: u64,
+        server_calls: usize,
         steps: u64,
         quit: bool,
     }
@@ -503,6 +520,10 @@ mod tests {
                 None => doc,
                 Some(w) => json!({w: doc.get(w).cloned().unwrap_or(Value::Null)}),
             }
+        }
+        fn server_state(&mut self, _: u64) -> Option<Result<Value, String>> {
+            self.server_calls += 1;
+            (self.server_calls > 1).then(|| Ok(json!({"clients": {"clients": [1, 2, 3, 4]}})))
         }
         fn binds_of(&self, command: &str) -> Vec<String> {
             match command {
@@ -600,6 +621,21 @@ mod tests {
         let filtered = run(&mut f, r#"{"id":5,"cmd":"cvars","filter":"fov"}"#);
         assert_eq!(filtered["cg_fov"], json!("80"));
         assert_eq!(filtered["in_mouse"], Value::Null);
+    }
+
+    #[test]
+    fn server_state_waits_for_the_listen_server_and_names_its_section() {
+        let mut f = Fake::default();
+        let line = r#"{"id":1,"cmd":"state","what":"server"}"#;
+        assert_eq!(run(&mut f, line)["wait"], json!(true));
+        let reply = run(&mut f, line);
+        assert_eq!(reply["ok"], json!(true));
+        assert_eq!(
+            reply["server"]["clients"]["clients"]
+                .as_array()
+                .map(Vec::len),
+            Some(4)
+        );
     }
 
     #[test]
