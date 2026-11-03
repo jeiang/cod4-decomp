@@ -10,8 +10,8 @@
 //! keep `contains` narrow, so a different failure of the same code still shows up.
 //!
 //! The rules an entry works by:
-//! - The first entry, in list order, whose `contains` all match a line takes the line. An empty `stages` covers every
-//!   stage.
+//! - The first entry, in list order, whose `stages` is empty or names the stage and whose `contains` all match a line
+//!   takes the line; an entry for another stage never does.
 //! - `max` is per stage, measured on the default suite on the Linux host, plus a margin of 25% or more, with the
 //!   measurement and date in a comment. `max: None` is for this module's tests only.
 //! - The reason names an issue when the event is a known gap.

@@ -23,7 +23,7 @@ tooling fact, or a flake's status changes, update this file in the same PR.
   - `run-<mac host>-<pid>`: one directory per `remote-linux.sh` run, removed when the run ends. An interrupted run
     leaves its directory behind.
 - `objdump`, `rizin` and `python3` are not on the host's PATH. Use `nix shell nixpkgs#binutils -c objdump ...`
-  and `~/Projects/cod4e/bin/python3`.
+  and `~/Projects/cod4e/bin/python3/bin/python3` (`bin/python3` is a GC-rooted store directory, not the interpreter).
 - Git on the host is the Nix git 2.56, whose store-level gitconfig sets `commit.gpgsign true`. Commit there with
   `git -c commit.gpgsign=false`.
 
@@ -36,8 +36,10 @@ operations, and confirm strings, flags and keys in the binary where 1.7 may diff
 
 ## The Mac
 
-- Run `cargo fmt`, git, gh and file reads only. Never build, test, clippy or check Rust on the Mac, the wasm check
-  included: the `windows` CI check runs `cargo check -p client --target wasm32-unknown-unknown` with `-D warnings`.
+- Run `cargo fmt`, git, gh and file reads only. Never build, test, clippy or check Rust on the Mac. The checks
+  AGENTS.md asks for before a PR are covered this way: the wasm check by the `windows` CI check (`.github/workflows/
+  ci.yml`, `cargo check -p client --target wasm32-unknown-unknown` with `RUSTFLAGS: -D warnings`), and test, clippy
+  and fmt by a `slot-full`, `remote` or `serial` run. No host recipe runs the wasm check.
 - `nix develop -c just script-tests` (the scripts' Python tests) runs locally. CI does not run it. Scripts must work
   with macOS's bash 3.2, and a `| head` in a pipeline can kill the writer with SIGPIPE.
 - `/tmp` is `/private/tmp`: compare canonical paths.
@@ -59,6 +61,10 @@ Every recipe ships the named ref (`git archive`, so uncommitted changes are not 
 | `just slot-exec <n> <ref> <cmd...>` | release binaries on PATH, cwd the checkout, `out/` copied back | whatever the command checks |
 | `just serial <ref> [stages]` | the checks, then the stages (the default suite when empty) with the host to itself | timing-gated stages |
 
+`just stages-for [base] [head]` prints the stages a diff can affect, from `scripts/stage-map.txt` (a shared file or
+an unmapped path gives the whole default suite; an engine crate adds the timing set), for example
+`just slot 1 HEAD "$(just stages-for)"`.
+
 - A `slot` bundle does not show that test, clippy or fmt pass. Only `slot-full`, `remote` and `serial` run them
   (`COD4E_LINUX_CHECKS=0` skips them).
 - Slots 1 to 3 each have their own target dir, headless 1920x1080@60 display and loopback-only network namespace.
@@ -75,8 +81,9 @@ Every recipe ships the named ref (`git archive`, so uncommitted changes are not 
 
 - Each slot has one owner, named by the coordinator. The lease is checked by `~/Projects/cod4e/bin/slot-guard`
   (`scripts/slot-guard.py`, installed apart from the ref under test). Set `COD4E_LINUX_SLOT_TOKEN` from the token
-  file the coordinator names, without printing it. Exit status 75 means the guard refused the run: no lease, wrong
-  token, or a run already live in that slot. A second run under the same lease is refused, not queued.
+  file the coordinator names, without printing it. A guarded run whose token does not hold the lease is refused with
+  exit status 75 (no lease, wrong token, or a run already live in that slot); a second run under the same lease is
+  refused, not queued. A slot run with no token bypasses the guard: only `host-run.sh`'s slot lock keeps it apart.
 - `just host-status` shows the pending serial run, the slots, the leases, harness processes, VRAM, the model servers
   and disk.
 - `host-run.sh` locks:
@@ -134,9 +141,9 @@ message), is a real failure. `N` and `M` stand for any number. "Reason" is the s
 
 | Signature | Stage(s) | Issue | Owner | Slot reruns | Serial reruns | Remove when |
 |---|---|---|---|---|---|---|
-| Log: `script runtime error: cannot cast undefined to bool` in `_missions::ch_kills` line 545, with `script error on the listen server` for the same error (a bot killed by its own frag). The #539 allowance covers it only in client-match | client-gfx | #557 | Fix538 (implementer of #557) | 1 | 1 | #557 fixed |
+| Log: `script runtime error: cannot cast undefined to bool` in `_missions::ch_kills` line 545, with `script error on the listen server` for the same error (a bot killed by its own frag). The #539 allowance covers it only in client-match | client-gfx | #557 | author of #557's fix PR | 1 | 1 | #557 fixed |
 | Reason: `effect names missing: ` with an empty name, `net.fx.missing` `[""]` (a `play_fx` before its effect name reached the client) | client-match | #553 | author of #556 | 0 (timing set) | 1 | #556 merged |
-| Reason: `bullet_impact_noblood played 3 times since the mark, want 1` (before #542: `fx:bullet_impact_noblood is +3`); live bots' flesh hits inside the 1 s blood window | client-gfx | #511 (research), fixed by #556 | author of #556 | 1 | 1 | #556 merged |
+| Reason: `bullet_impact_noblood played 3 times since the mark, want 1` (before #542: `fx:bullet_impact_noblood is +3`); live bots' flesh hits inside the 1 s blood window | client-gfx | #553, fixed by #556 | author of #556 | 1 | 1 | #556 merged |
 | Reason: `shell_eject played N times since the mark, want 0` (before #542: `cgis=fx:shell_eject 0` returned N) | client-gfx | #511 (fixed by #513) | the coordinator's 10-run confirmation of #511 | 1 | 1 | 10 consecutive runs pass and #511 closes |
 | Log: `the window's surface gave no frame outcome=Validation` | client-gfx | #511 (fixed by #510) | the coordinator's 10-run confirmation of #511 | 1 | 1 | 10 consecutive runs pass and #511 closes |
 | Reason: `N of the M other players the server announced were ever drawn` | client-commands | #511 (fixed by #513) | the coordinator's 10-run confirmation of #511 | 1 | 1 | 10 consecutive runs pass and #511 closes |

@@ -209,18 +209,21 @@ the client reported about focus and pointer lock.
 
 Facts the stages depend on that are easy to get wrong. Each is the code on main.
 
-- **The reply.** Every reply is `{"id", "ok", "error"?}` plus the answer. An answer that is an object has its fields
-  spread into the reply (`state` answers `{"id":…, "ok":true, "player":{…}}`); any other answer is under `value`. A
-  `wait` that runs out answers `ok:false, timeout:true` with what it last `observed` (`crates/devctrl/src/protocol.rs`).
+- **The reply.** Every reply is `{"id", "ok", "error"?}` plus the answer (`crates/devctrl/src/protocol.rs`). An
+  answer that is an object has its fields spread into the reply (`state` answers `{"id":…, "ok":true, "player":{…}}`);
+  any other answer is under `value`. A `wait` that runs out answers `ok:false, timeout:true` with what it last
+  `observed` (`crates/client/src/control/host.rs` `wait`, `crates/server/src/control.rs` for the server).
 - **The server shapes differ.** A listen server's `{"cmd":"server","op":"state","what":"clients"}` answers the
   section spread into the reply, so the list is `r["clients"]`. The dedicated server's `state` with `what:"clients"`
   answers it under the section's name, so the list is `r["clients"]["clients"]`. A `--connect` client has no listen
   server: `state server` is `null` and a `server` request fails.
-- **Parts.** A `wait` or `state` with no `parts` reads `client`, `menu`, `player`, `entities`, `scoreboard`, `hud`,
-  `draw`, `render`, `sound`, `fx`, `events`, `net`, `console`, `cvars`, `binds`, `view`, `look` and `watch`
-  (`PARTS` in `crates/client/src/control/mod.rs`). `report`, `gfx`, `cgame` and `server` are read only when named.
-  `report` is what the run saw, the same object the client writes to its report: a check of the whole run reads it.
-  The match parts are `null` before the client is in a match.
+- **Parts.** `state` with no `what` (or its aliases `part` and `of`) answers the default sections: `client`, `menu`,
+  `player`, `entities`, `scoreboard`, `hud`, `draw`, `render`, `sound`, `fx`, `events`, `net`, `console`, `cvars`,
+  `binds`, `view`, `look` and `watch` (`PARTS` in `crates/client/src/control/mod.rs`). `wait` and `assert` always match
+  against those sections only, so a `report.…`, `gfx.…`, `cgame.…` or `server.…` path is null inside them and such a
+  `wait` can only time out. Read those sections with `state` and `what` set to their name (`Driven::state`,
+  `Driven::lookup`). `report` is what the run saw, the same object the client writes to its report: a check of the
+  whole run reads it. The match sections are `null` before the client is in a match.
 - **Reading is read-only.** No `state`, `wait` or `capture` changes the game; a stage that needs the game in a state
   gets there by the player's path or a named dev hook.
 - **Acknowledged is not done.** `exec` acknowledges every line, and `Driven::console` returning `Ok` means the line
