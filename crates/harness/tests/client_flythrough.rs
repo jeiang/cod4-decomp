@@ -27,7 +27,7 @@ if [ "$1" = --list-display-modes ]; then
 fi
 all="$*"
 while [ $# -gt 0 ]; do
-  case $1 in --out) out=$2; shift;; --fullscreen) kind=$2; shift;; esac
+  case $1 in --out) out=$2; shift;; --fullscreen) kind=$2; shift;; --map) map=$2; shift;; esac
   shift
 done
 mkdir -p "$out"
@@ -39,10 +39,14 @@ fi
 printf 'cpu_ms,gpu_ms,present_interval_ms,mem_bytes\n1.0,0.5,16.0,100\n2.0,,17.0,200\n3.0,0.7,18.0,300\n' > "$out/frames.raw.csv"
 printf 'video' > "$out/flythrough.ivf"
 printf 'png' > "$out/screenshot.png"
+row2='2,10.00,-20.50,64.25,-90.00,10.00,0.00,65.00,80.69'
+[ "$beh" = badpose ] && row2='2,11.00,-20.50,64.25,-90.00,10.00,0.00,65.00,80.69'
+printf 'frame,x,y,z,yaw,pitch,roll,cg_fov,fov_x\n1,0.00,0.00,64.25,-90.00,10.00,0.00,65.00,80.69\n%s\n3,20.00,-20.50,64.25,-90.00,10.00,0.00,65.00,80.69\n' "$row2" > "$out/frames.pose.csv"
+pose='{"map":"'$map'","frame":2,"origin":[10.0,-20.5,64.25],"yaw":-90.0,"pitch":10.0,"roll":0.0,"cg_fov":65.0,"fov_x":80.69,"width":1280,"height":720,"setviewpos":"setviewpos 10.00 -20.50 64.25 -90.00 10.00"}'
 [ "$beh" = fellback ] && [ "$kind" = exclusive ] && kind=borderless
 health='{"device_losses":[],"errors":[]}'
 [ "$beh" = gpuerror ] && health='{"device_losses":[],"errors":["Buffer is invalid"]}'
-echo '{"status":"ok","frames":3,"video":{"file":"flythrough.ivf","frames":360,"dropped":0,"bytes":5},"screenshot":"screenshot.png","zone_load_ms":42.0,"world":{"surfaces_drawn_p50":7},"mode":{"fullscreen":"'$kind'"},"gpu_health":'$health'}' > "$out/client.json"
+echo '{"status":"ok","frames":3,"video":{"file":"flythrough.ivf","frames":360,"dropped":0,"bytes":5},"screenshot":"screenshot.png","pose":'"$pose"',"zone_load_ms":42.0,"world":{"surfaces_drawn_p50":7},"mode":{"fullscreen":"'$kind'"},"gpu_health":'$health'}' > "$out/client.json"
 "#;
 
 struct Fake {
@@ -119,6 +123,7 @@ fn runs_every_planned_mode_and_aggregates() {
             "screenshot.png",
             "client.log",
             "client.json",
+            "frames.pose.csv",
         ] {
             assert!(r.files.contains(&format!("{s}/{f}")), "{s}/{f} not listed");
         }
@@ -208,4 +213,19 @@ fn graphics_errors_the_client_reports_fail_every_run() {
     let (r, _, _k) = run(&fake, true);
     assert_eq!(r.status, Status::Failed);
     assert_eq!(r.notes.len(), 8);
+}
+
+#[test]
+fn a_screenshot_pose_that_is_not_its_frames_camera_fails_every_run() {
+    let fake = Fake::new("badpose");
+    let (r, _, _k) = run(&fake, true);
+    assert_eq!(r.status, Status::Failed);
+    assert_eq!(r.notes.len(), 8);
+    assert!(
+        r.notes
+            .iter()
+            .all(|n| n.contains("not the screenshot's pose")),
+        "{:?}",
+        r.notes
+    );
 }
