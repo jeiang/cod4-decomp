@@ -650,12 +650,7 @@ fn consume(
         report.files.push(format!("{slug}/{POSE_CSV}"));
     }
     match &cj.pose {
-        Some(p) => match pose_problem(p, plan.map, &pose_csv, timed_frames) {
-            Some(why) => problems.push(why),
-            None => report
-                .notes
-                .push(format!("{slug}: screenshot pose {}", p.setviewpos)),
-        },
+        Some(p) => problems.extend(pose_problem(p, plan.map, &pose_csv, timed_frames)),
         None => problems.push("client.json has no pose for the screenshot".into()),
     }
     Ok(if problems.is_empty() {
