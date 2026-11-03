@@ -53,6 +53,9 @@ pub mod cs {
     pub const MESSAGE: u16 = 3;
     /// The scene's fog, `<start> <density> <r> <g> <b> <transition ms>` (`setExpFog`); empty or `0` for none.
     pub const FOGVARS: u16 = 9;
+    /// The server's message of the day (`g_motd`), set at each level spawn (stock `CS_MOTD`, KisakCOD
+    /// `universal/q_shared.h:144`, `game_mp/g_spawn_mp.cpp:646`).
+    pub const MOTD: u16 = 10;
     pub const SCORES_ALLIES: u16 = 4;
     pub const SCORES_AXIS: u16 = 5;
     pub const GAMEENDTIME: u16 = 11;

@@ -93,6 +93,8 @@ and `debug_strings` (the listen server's `line`/`print3d` drawings on screen las
 `net.spawned` with `net.view` (`death_view_frames`, `death_view_range_max`, `dof_frames`), and `look` (`naked`,
 `night`, `goggles`, `night_vision`, `channel`, `blend` with `ms`, `missing`, `applied`, the last goggles `switch`).
 
+`net.motd` is the server's message of the day as the client holds it (`CS_MOTD`, configstring 10).
+
 `entities.list[].model_name` resolves each snapshot model index through the server's model configstrings.
 `entities.snapshot` and `entities.server_time` name the snapshot the list came from, so a check that compares
 snapshots reads the list and its snapshot in one request.
