@@ -21,6 +21,7 @@ pub enum ImpactSource {
     Network(u16),
     Hitflesh,
     Prop,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // the browser has no fx self-test
     Selftest,
 }
 
