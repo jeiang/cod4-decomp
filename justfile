@@ -87,10 +87,11 @@ crosscheck-tools *args:
 wavelet-tables exe:
     python3 scripts/gen-wavelet-tables.py "$@"
 
-# Test scripts/slot-guard.py, scripts/remote-linux.sh's logs, scripts/stages-for.py and the coordinator scripts locally (no host needed)
+# Test scripts/slot-guard.py, scripts/remote-linux.sh's logs, scripts/host-run.sh's queue, scripts/stages-for.py and the coordinator scripts locally (no host needed)
 script-tests:
     python3 scripts/slot-guard.test.py
     python3 scripts/remote-linux.test.py
+    python3 scripts/host-run.test.py
     python3 scripts/stages-for.test.py
     python3 scripts/serial-log.test.py
     python3 scripts/merge-pr.test.py
@@ -164,7 +165,7 @@ host +cmd:
 host-shell:
     ssh -t {{host}} 'cd ~/Projects/cod4e; exec bash -l'
 
-# Show slots, serial lock, harness processes, VRAM, model servers and disk on the Linux host
+# Show slots, serial lock, queued and running host runs, harness processes, VRAM, model servers and disk on the Linux host
 host-status:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -175,6 +176,9 @@ host-status:
       if flock -n $r/.slot-$n.lock true; then echo "slot $n free"; else echo "slot $n busy"; fi
     done
     if [ -x $r/bin/slot-guard ]; then $r/bin/slot-guard version; $r/bin/slot-guard status; else echo "slot-guard not installed"; fi
+    EOF
+    ssh {{host}} bash -s -- --queue < scripts/host-run.sh
+    ssh {{host}} bash -s <<'EOF'
     pgrep -af 'cod4e-harness|cod4e-server|/cod4e |sway|chromium|iw3mp' || echo "no harness processes"
     echo "VRAM used: $(( $(cat /sys/class/drm/card1/device/mem_info_vram_used) / 1048576 )) MiB"
     echo "embed: $(curl -s -m 5 http://127.0.0.1:8189/health || echo down)"

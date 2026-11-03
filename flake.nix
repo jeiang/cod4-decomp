@@ -78,7 +78,9 @@
               # scripts/virtual-display.sh and scripts/netns.sh (harness slots)
               pkgs.sway
               pkgs.iproute2
-            ];
+            ]
+            # scripts/host-run.test.py: the Linux host's flock comes from util-linux.
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ pkgs.flock ];
             LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux (pkgs.lib.makeLibraryPath (windowLibs ++ [ pkgs.udev pkgs.alsa-lib ]));
           };
       });
