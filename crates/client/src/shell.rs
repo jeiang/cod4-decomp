@@ -510,6 +510,8 @@ const OPTION_DEFAULTS: &[(&str, &str)] = &[
     // equalizer pass).
     ("cg_blood", "1"),
     ("cg_brass", "1"),
+    // Laser sights light what they strike (`cg_laserLight`, archived and on in stock).
+    ("cg_laserLight", "1"),
     ("cg_subtitles", "1"),
     ("snd_khz", "44"),
     ("snd_enableEq", "1"),

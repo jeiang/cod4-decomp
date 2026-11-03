@@ -12,8 +12,9 @@ pub mod host;
 
 pub use host::{Control, handle};
 
-/// The state document's sections: what `{"cmd":"state"}` without a `what` returns, and what a `wait` or an `assert`
-/// builds for the paths it names.
+/// The client-side state document's sections: what `{"cmd":"state"}` without a `what` returns, and what a `wait`
+/// or an `assert` builds for the paths it names. `state what=server` is separate because the listen server answers
+/// asynchronously between its own frames.
 pub const PARTS: &[&str] = &[
     "client",
     "menu",
@@ -32,7 +33,6 @@ pub const PARTS: &[&str] = &[
     "binds",
     "view",
     "look",
-    "server",
     "watch",
 ];
 

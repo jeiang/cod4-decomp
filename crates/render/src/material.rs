@@ -215,6 +215,8 @@ impl Prepared {
                     codeconst::BASE_LIGHTING_COORDS
                         | codeconst::PARTICLE_CLOUD_MATRIX
                         | codeconst::PARTICLE_CLOUD_COLOR
+                        | codeconst::CODE_MESH_ARG_0
+                        | codeconst::CODE_MESH_ARG_1
                 )
         })
     }

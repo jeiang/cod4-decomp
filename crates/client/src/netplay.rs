@@ -110,6 +110,8 @@ const SCORES_INTERVAL: Duration = Duration::from_secs(2);
 const SCORES_MISSING_INTERVAL: Duration = Duration::from_secs(10);
 /// How long a player model is kept after the snapshots stop mentioning it.
 const GONE_AFTER: Duration = Duration::from_millis(500);
+/// How far below the eye the test laser (`laser=`) starts, so its beam shows as a line to what it strikes.
+const TEST_LASER_DROP: f32 = 6.0;
 
 /// Whether `spawn` starts a life the client has not seen yet (the first snapshot counts), remembering it in `last`.
 fn new_life(last: &mut Option<u16>, spawn: u16) -> bool {
@@ -150,8 +152,8 @@ fn fixed_fov(ps: &PlayerState) -> Option<f32> {
 }
 
 /// The settings of the client that change what it makes of the match: the on/off ones (`cg_drawCrosshair`,
-/// `ragdoll_enable`, `fx_marks`, `cg_blood`, `cg_brass`, `cg_drawGun`; all on, as the stock defaults have them) and
-/// the physics tunables.
+/// `ragdoll_enable`, `fx_marks`, `cg_blood`, `cg_brass`, `cg_drawGun`, `cg_laserLight`; all on, as the stock defaults
+/// have them) and the physics tunables.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Switches {
     /// The weapon's crosshair is drawn.
@@ -180,6 +182,8 @@ pub struct Switches {
     pub bullet: fx::BulletTune,
     /// `nightVisionDisableEffects` is off: the goggles' vision set and overlay apply (`CG_LookingThroughNightVision`).
     pub night_vision_effects: bool,
+    /// `cg_laserLight`: laser sights cast their post light on what they strike.
+    pub laser_light: bool,
 }
 
 impl Default for Switches {
@@ -198,6 +202,7 @@ impl Default for Switches {
             killcam: crate::camera::KillCamTune::default(),
             bullet: fx::BulletTune::default(),
             night_vision_effects: true,
+            laser_light: true,
         }
     }
 }
@@ -231,6 +236,7 @@ impl Switches {
             killcam: crate::camera::KillCamTune::read(c),
             bullet: bullet_tune(c),
             night_vision_effects: !c.bool("nightVisionDisableEffects"),
+            laser_light: on("cg_laserLight"),
         }
     }
 }
@@ -575,8 +581,12 @@ pub struct NetPlay {
     tracer_material: Option<std::sync::Arc<assets::zone::gfx::Material>>,
     /// `gfx_laser`, which laser sights are drawn with; none, none are drawn.
     laser_material: Option<std::sync::Arc<assets::zone::gfx::Material>>,
+    /// `gfx_laser_light`, the post light laser sights cast; none, none is drawn.
+    laser_light_material: Option<std::sync::Arc<assets::zone::gfx::Material>>,
     /// The laser sights of this frame's script models, drawn with the effects.
     lasers: Vec<crate::laser::Beam>,
+    /// A test laser from below the eye along the view is drawn each frame (the `laser=` script step).
+    test_laser: bool,
     /// Earthquakes shaking the view.
     shakes: sim::shake::CameraShakes,
     props: Props,
@@ -718,7 +728,9 @@ impl NetPlay {
             switches: Switches::default(),
             tracer_material: None,
             laser_material: None,
+            laser_light_material: None,
             lasers: Vec::new(),
+            test_laser: false,
             shakes: Default::default(),
             lib,
             models_warmed: HashSet::new(),
@@ -958,16 +970,23 @@ impl NetPlay {
         }
     }
 
-    /// The materials the tracers (`gfx_tracer`) and laser sights (`gfx_laser`) are drawn with, from the UI zones; kept
-    /// across levels.
+    /// The materials the tracers (`gfx_tracer`), laser sights (`gfx_laser`) and their post lights (`gfx_laser_light`)
+    /// are drawn with, from the UI zones; kept across levels.
     pub fn set_beam_materials(
         &mut self,
         tracer: Option<std::sync::Arc<assets::zone::gfx::Material>>,
         laser: Option<std::sync::Arc<assets::zone::gfx::Material>>,
+        laser_light: Option<std::sync::Arc<assets::zone::gfx::Material>>,
     ) {
         self.effects.set_tracer_material(tracer.clone());
         self.tracer_material = tracer;
         self.laser_material = laser;
+        self.laser_light_material = laser_light;
+    }
+
+    /// Draws a test laser from just below the eye along the view each frame, or stops.
+    pub fn set_test_laser(&mut self, on: bool) {
+        self.test_laser = on;
     }
 
     /// What the player has set about tracers (`cg_tracerchance` and the like).
@@ -2070,14 +2089,31 @@ impl NetPlay {
         self.props.update(dt, self.boxes.world());
         self.prop_effects();
         let mut drawn = self.effects.draw(eye, yaw, pitch, roll);
-        let lasers = std::mem::take(&mut self.lasers);
-        if !lasers.is_empty() {
-            logging::dedup!(
-                WARN,
-                "laser-light",
-                issue = 516,
-                "laser sights are drawn without their post light (gfx_laser_light), see #516"
+        let mut lasers = std::mem::take(&mut self.lasers);
+        if self.test_laser {
+            let forward = Vec3::new(
+                yaw.cos() * pitch.cos(),
+                yaw.sin() * pitch.cos(),
+                pitch.sin(),
             );
+            let origin = eye - Vec3::Z * TEST_LASER_DROP;
+            let reach = origin + forward * crate::laser::RANGE;
+            let tr = self.boxes.world().trace(
+                origin.to_array(),
+                reach.to_array(),
+                [0.0; 3],
+                [0.0; 3],
+                own,
+                sim::contents::MASK_SHOT,
+            );
+            lasers.push(crate::laser::Beam::new(
+                origin,
+                forward,
+                tr.fraction,
+                tr.contents,
+            ));
+        }
+        if !lasers.is_empty() {
             if self.laser_material.is_none() {
                 logging::dedup!(
                     WARN,
@@ -2086,11 +2122,27 @@ impl NetPlay {
                     "laser sights are not drawn: the gfx_laser material is not loaded (#411)"
                 );
             }
+            if self.switches.laser_light && self.laser_light_material.is_none() {
+                logging::dedup!(
+                    WARN,
+                    "laser-light-material",
+                    issue = 516,
+                    "laser sights cast no post light: the gfx_laser_light material is not loaded (#516)"
+                );
+            }
         }
         if let Some(m) = &self.laser_material
             && let Some(mesh) = crate::laser::mesh(m, &lasers, eye)
         {
             drawn.meshes.push(mesh);
+        }
+        // `CG_Laser_Add_Core`: with `cg_laserLight` on, each laser lights what it strikes.
+        if self.switches.laser_light
+            && let Some(m) = &self.laser_light_material
+        {
+            drawn
+                .meshes
+                .extend(crate::laser::light_meshes(m, &lasers, eye));
         }
         drawn.models.extend(projectiles);
         drawn.sway = self.shakes.sway(st, eye.to_array());
@@ -2745,6 +2797,7 @@ impl NetPlay {
                                 f.origin,
                                 forward,
                                 tr.fraction,
+                                tr.contents,
                             ));
                         }
                     }

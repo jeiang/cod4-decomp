@@ -11,6 +11,8 @@
 //! cgame drew or played (`cgame`, `fx.played`). A frame with a bright test light in front of the player must also be
 //! clearly brighter than the same frame without it (the dynamic light pass). At the end the graphics device is
 //! destroyed under the match, as a driver reset does it, and the client must make a new one and draw the world again.
+//! Last, a test laser sight in the mp_crash garage, aimed at the floor, must draw its post light (`gfx_laser_light`,
+//! #516) only with `cg_laserLight` on, and that light must brighten the floor where the laser strikes.
 //!
 //! The cgame and renderer dvars of #369 are checked on the way: untouched registration defaults are observed before
 //! writes, and the menu-started match resets cheat dvars and refuses protected writes. A match started with `devmap`
@@ -116,6 +118,13 @@ const MENU_SETTINGS_BACK: &[&str] = &[
 /// Share of pixels a light must brighten, and by how much (of 255, in luma).
 const LIT_SHARE: f64 = 0.05;
 const LIT_STEP: i32 = 24;
+/// Where a test laser aimed along the view strikes the garage floor, as fractions of the picture (x from, x to, y from,
+/// y to, y down): just below the crosshair, clear of the gun and the HUD, which move between frames on their own.
+const LASER_STRIKE: [f64; 4] = [0.45, 0.55, 0.45, 0.6];
+/// Share of [`LASER_STRIKE`]'s pixels the laser's post light must brighten, and by how much (of 255, in luma): the
+/// light is a few units wide, so a patch of it (measured about 7%, and nothing without the light).
+const LASER_LIT_SHARE: f64 = 0.015;
+const LASER_LIT_STEP: i32 = 8;
 /// How much brighter (in luma) the picture at `r_gamma` 2 must be than at 0.5.
 const GAMMA_STEP: f64 = 20.0;
 /// Channel value from which a pixel counts as white, and how much whiter the middle may get with distortion on.
@@ -124,19 +133,53 @@ const WHITE_MARGIN: f64 = 0.15;
 /// A picture with a world in it has more light than this on average (of 255).
 const BLANK_LUMA: f64 = 5.0;
 
-/// Share of pixels of `on` whose luma is more than [`LIT_STEP`] above that of `off` (same size).
-fn brightened_share(off: &[u8], on: &[u8]) -> f64 {
+/// Pixels of `on` whose luma is more than `step` above that of `off` (same size).
+fn brightened(off: &[u8], on: &[u8], step: i32) -> usize {
     let luma =
         |p: &[u8]| (i32::from(p[0]) * 77 + i32::from(p[1]) * 150 + i32::from(p[2]) * 29) >> 8;
-    let n = off.len() / 3;
-    let lit = off
-        .as_chunks::<3>()
+    off.as_chunks::<3>()
         .0
         .iter()
         .zip(on.as_chunks::<3>().0)
-        .filter(|(a, b)| luma(&b[..]) - luma(&a[..]) > LIT_STEP)
-        .count();
-    lit as f64 / n.max(1) as f64
+        .filter(|(a, b)| luma(&b[..]) - luma(&a[..]) > step)
+        .count()
+}
+
+/// Share of pixels of `on` whose luma is more than [`LIT_STEP`] above that of `off` (same size).
+fn brightened_share(off: &[u8], on: &[u8]) -> f64 {
+    brightened(off, on, LIT_STEP) as f64 / (off.len() / 3).max(1) as f64
+}
+
+/// A laser sight with `cg_laserLight` on lights what it strikes (`gfx_laser_light`, #516): the frame with the post light
+/// brightens a patch of the floor where the laser strikes ([`LASER_STRIKE`]) against the same laser with
+/// `cg_laserLight` off. Returns the pixels it brightened.
+fn laser_light_lit(dir: &std::path::Path) -> Result<usize, String> {
+    use super::client_models::decode;
+    let (w, h, off) = decode(&dir.join("laser-off.png"))?;
+    let (w2, h2, on) = decode(&dir.join("laser-on.png"))?;
+    if (w, h) != (w2, h2) {
+        return Err("laser light screenshots differ in size".into());
+    }
+    let (w, h) = (w as usize, h as usize);
+    let off = crop(w, h, &off, LASER_STRIKE);
+    let lit = brightened(&off, &crop(w, h, &on, LASER_STRIKE), LASER_LIT_STEP);
+    let need = (LASER_LIT_SHARE * (off.len() / 3) as f64).ceil() as usize;
+    if lit < need {
+        return Err(format!(
+            "a laser sight's post light brightened {lit} pixels where it struck (need {need})"
+        ));
+    }
+    Ok(lit)
+}
+
+/// The pixels of a packed RGB picture inside `[x from, x to, y from, y to]`, as fractions of its size.
+fn crop(w: usize, h: usize, px: &[u8], [x0, x1, y0, y1]: [f64; 4]) -> Vec<u8> {
+    let at = |f: f64, n: usize| (f * n as f64) as usize;
+    let (x0, x1) = (at(x0, w), at(x1, w));
+    (at(y0, h)..at(y1, h))
+        .flat_map(|y| &px[(y * w + x0) * 3..(y * w + x1) * 3])
+        .copied()
+        .collect()
 }
 
 /// The frame with the test flash light brightens a real share of the picture compared with the frame without it.
@@ -1076,6 +1119,21 @@ fn devmap_window(c: &mut Driven) -> Result<(), String> {
         c.pause(secs(2))?;
         gfx_is(c, "aa", "1")?;
         c.capture("recovered").map(drop)
+    })?;
+    // A test laser sight aimed at the garage floor draws its post light only with `cg_laserLight` on (#516).
+    c.step("laser post light", |c| {
+        c.console("setviewpos 200.8 2267.5 323.5 175.3 20")?;
+        c.pause(secs(1))?;
+        dev(c, "laser", "1")?;
+        c.console("set cg_laserLight 0")?;
+        c.pause(secs(1))?;
+        gfx_is(c, "postlights", "0")?;
+        c.capture("laser-off")?;
+        c.console("set cg_laserLight 1")?;
+        c.pause(secs(1))?;
+        gfx_is(c, "postlights", "1+")?;
+        c.capture("laser-on")?;
+        dev(c, "laser", "0")
     })
 }
 
@@ -1151,22 +1209,35 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         "no-gun.png",
         "no-2d.png",
         "fullbright.png",
+        "laser-off.png",
+        "laser-on.png",
     ] {
         if ctx.dir.join(f).is_file() {
             out.files.push(f.into());
         }
     }
+    let mut laser_lit = None;
     let problems: Vec<String> = match (played, report) {
         (Err(e), _) => vec![e],
         (Ok(()), Err(e)) => vec![format!("the run's report could not be read: {e}")],
-        (Ok(()), Ok(report)) => verdict(&report)
-            .into_iter()
-            .chain(dynamic_light_lit(&ctx.dir).err())
-            .chain(gamma_moves_brightness(&ctx.dir).err())
-            .chain(distortion_samples_the_scene(&ctx.dir).err())
-            .chain(device_recovers(&ctx.dir, &report).err())
-            .collect(),
+        (Ok(()), Ok(report)) => {
+            let laser = laser_light_lit(&ctx.dir);
+            laser_lit = laser.as_ref().ok().copied();
+            verdict(&report)
+                .into_iter()
+                .chain(dynamic_light_lit(&ctx.dir).err())
+                .chain(gamma_moves_brightness(&ctx.dir).err())
+                .chain(distortion_samples_the_scene(&ctx.dir).err())
+                .chain(device_recovers(&ctx.dir, &report).err())
+                .chain(laser.err())
+                .collect()
+        }
     };
+    if let Some(lit) = laser_lit {
+        out.notes.push(format!(
+            "a laser sight's post light brightened {lit} pixels where it struck"
+        ));
+    }
     if !problems.is_empty() {
         out.status = Status::Failed;
         out.reason = Some(problems.join("; "));
@@ -1186,7 +1257,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
 
 #[cfg(test)]
 mod tests {
-    use super::{brightened_share, mean_luma, value_matches, white_share};
+    use super::{brightened_share, crop, mean_luma, value_matches, white_share};
 
     #[test]
     fn white_share_counts_the_middle_third_only() {
@@ -1218,5 +1289,15 @@ mod tests {
         assert!(!value_matches("1 2", "1"));
         assert!(!value_matches("1", "1 2"));
         assert!(!value_matches("NaN", "NaN"));
+    }
+
+    #[test]
+    fn crop_keeps_the_pixels_inside_its_fractions() {
+        // 4x3 pixels, each its own index: columns 1..3 of row 1.
+        let px: Vec<u8> = (0..12u8).flat_map(|i| [i; 3]).collect();
+        assert_eq!(
+            crop(4, 3, &px, [0.25, 0.75, 0.34, 0.67]),
+            vec![5, 5, 5, 6, 6, 6]
+        );
     }
 }

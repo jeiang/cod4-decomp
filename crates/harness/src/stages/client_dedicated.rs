@@ -98,8 +98,30 @@ impl Dedicated {
         bots: usize,
         log: &Path,
     ) -> Result<(Self, u16), String> {
+        Self::boot_inner(server, install, cwd, bots, log, None)
+    }
+
+    /// Starts the real dedicated server with its dev control channel writing its bound address to `control`.
+    pub(crate) fn boot_with_control(
+        server: &Path,
+        install: &Path,
+        cwd: &Path,
+        log: &Path,
+        control: &Path,
+    ) -> Result<(Self, u16), String> {
+        Self::boot_inner(server, install, cwd, 0, log, Some(control))
+    }
+
+    fn boot_inner(
+        server: &Path,
+        install: &Path,
+        cwd: &Path,
+        bots: usize,
+        log: &Path,
+        control: Option<&Path>,
+    ) -> Result<(Self, u16), String> {
         let port = free_port().map_err(|e| format!("no free port: {e}"))?;
-        let d = Self::start(server, install, cwd, port, bots, log)
+        let d = Self::start(server, install, cwd, port, bots, log, control)
             .map_err(|e| format!("cannot start cod4e-server: {e}"))?;
         let up = d.lines.wait_for(0, SERVER_UP, |l| {
             l.starts_with("map mp_crash loaded") || l == EOF
@@ -124,15 +146,21 @@ impl Dedicated {
         port: u16,
         bots: usize,
         log: &Path,
+        control: Option<&Path>,
     ) -> io::Result<Self> {
-        let mut child = Command::new(server)
+        let mut command = Command::new(server);
+        command
             .arg("--install")
             .arg(install)
             .args(["+set", "net_port"])
             .arg(port.to_string())
             .args(["+set", "g_gametype", "war", "+set", "bot_count"])
             .arg(bots.to_string())
-            .args(["+map", "mp_crash"])
+            .args(["+map", "mp_crash"]);
+        if let Some(file) = control {
+            command.args(["--control", "0", "--control-file"]).arg(file);
+        }
+        let mut child = command
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

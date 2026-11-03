@@ -466,6 +466,8 @@ struct State {
     test_light: bool,
     /// Dynamic lights the last frame drew.
     lights_drawn: usize,
+    /// Post lights (laser sights' glow) the last frame drew.
+    post_lights_drawn: usize,
     /// The sound system of the menus when no match is running (started by the first menu sound).
     menu_sound: Option<crate::sound::ClientSound>,
     /// The map being loaded in the background (the loading screen shows meanwhile).
@@ -985,6 +987,7 @@ impl Viewer {
             n.set_beam_materials(
                 sh.ui.assets.material("gfx_tracer").cloned(),
                 sh.ui.assets.material("gfx_laser").cloned(),
+                sh.ui.assets.material("gfx_laser_light").cloned(),
             );
         }
         let (profiles, stats) = match self
@@ -1148,6 +1151,7 @@ impl Viewer {
             shot_serial: 0,
             test_light: false,
             lights_drawn: 0,
+            post_lights_drawn: 0,
             menu_sound: None,
             loading: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -2060,6 +2064,7 @@ impl Viewer {
             }
             st.surfaces_drawn.push(stats.surfaces as f64);
             st.lights_drawn = stats.lights;
+            st.post_lights_drawn = stats.post_lights;
             st.distortion_now = stats.distortion_copy;
             if let Some(sh) = st.shell.as_mut() {
                 sh.st.fps_scene = crate::hud::fps::Scene {
@@ -2666,6 +2671,7 @@ const GFX_FACTS: &[&str] = &[
     "aniso",
     "mipmode",
     "dlights",
+    "postlights",
     "aspect",
     "fullscreen",
     "uncapped",
@@ -2784,6 +2790,8 @@ fn gfx_value(st: &State, name: &str) -> Option<String> {
             .map(|r| (r.materials.mip_mode as u8).to_string()),
         // How many dynamic lights the last frame drew.
         "dlights" => Some(st.lights_drawn.to_string()),
+        // How many post lights (a laser sight's glow on what it strikes) the last frame drew.
+        "postlights" => Some(st.post_lights_drawn.to_string()),
         "aspect" => Some(format!("{:.2}", st.aspect.unwrap_or(0.0))),
         "fullscreen" => Some(u8::from(st.window.fullscreen().is_some()).to_string()),
         // 1 when the surface does not wait for the display, or has no mode that does not.
@@ -3020,6 +3028,12 @@ fn dev_hook(st: &mut State, op: &str, arg: &str) -> Result<(), String> {
         "losedevice" => st.gpu.device.destroy(),
         // `1` adds a bright light a little way in front of the camera each frame, `0` removes it.
         "dlight" => st.test_light = arg.trim() != "0",
+        // `1` draws a laser sight from just below the eye along the view each frame, `0` removes it.
+        "laser" => st
+            .net
+            .as_mut()
+            .ok_or_else(|| "no match to draw a laser in".to_owned())?
+            .set_test_laser(arg.trim() != "0"),
         // Counts the frames from here, for the `pace` graphics fact.
         "pacereset" => st.pace = (Instant::now(), 0),
         "fxdemo" | "bobmark" | "hitflesh" | "shock" | "subtitle" => {
@@ -4308,6 +4322,7 @@ fn finish_load(
             net.set_beam_materials(
                 sh.ui.assets.material("gfx_tracer").cloned(),
                 sh.ui.assets.material("gfx_laser").cloned(),
+                sh.ui.assets.material("gfx_laser_light").cloned(),
             );
         }
     } else {
@@ -4329,6 +4344,7 @@ fn finish_load(
             net.set_beam_materials(
                 sh.ui.assets.material("gfx_tracer").cloned(),
                 sh.ui.assets.material("gfx_laser").cloned(),
+                sh.ui.assets.material("gfx_laser_light").cloned(),
             );
         }
         net.start_client_side_effects(crate::ambient::enabled_by(&st.input.cvars));
@@ -4915,6 +4931,22 @@ impl crate::control::Control for ControlHost<'_> {
         state_document(self.cli, self.st, &parts)
     }
 
+    fn server_state(&mut self, seq: u64) -> Option<Result<Value, String>> {
+        if self.st.listen.is_none() {
+            return Some(Ok(Value::Null));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let req = serde_json::Map::from_iter([("op".to_owned(), json!("state"))]);
+            crate::listen::request(seq, &req)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = seq;
+            Some(Ok(Value::Null))
+        }
+    }
+
     fn binds_of(&self, command: &str) -> Vec<String> {
         self.st
             .input
@@ -5100,6 +5132,7 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
             "draw" => json!({
                 "surfaces": st.surfaces_drawn.last().copied(),
                 "lights": st.lights_drawn,
+                "post_lights": st.post_lights_drawn,
                 "distortion_copy": st.distortion_now,
                 "late": st.late,
             }),
