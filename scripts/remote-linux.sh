@@ -22,6 +22,10 @@
 #   COD4E_LINUX_EXEC=1            (slot only) run the command after `--` in the slot instead of the harness, with
 #                                 the release binaries on PATH; it writes into out/.
 #   COD4E_LINUX_CHECKS=0          skip test/clippy/fmt (the build still runs).
+#   COD4E_HOST_WAIT_TIMEOUT       seconds the host run may wait in all for the host's locks and queue before it gives
+#                                 up with exit 76 (default 21600; 0 waits without a bound); passed to host-run.sh.
+#   COD4E_HOST_WAIT_REPORT        seconds between a waiting host run's queue reports (default 300).
+# When the host run gave up waiting, the last stderr line before `log:` is `remote: host run gave up waiting: …`.
 # Without a slot the run is serial: it takes the host-wide stage lock exclusively, after the running slots finish
 # and before new ones start, so timing checks see a quiet host; it gets its own headless display like a slot.
 # Builds and tests run at nice 19.
@@ -66,6 +70,14 @@ if [ -n "$token" ] && [ -z "$slot" ]; then
 fi
 # The shipped tree has no .git, so the harness's build script cannot name the commit; pass it in.
 vars="COD4_PATH=\$HOME/Projects/cod4e/shared/COD4 COD4E_BUILD_HASH=$(git rev-parse --short=12 "$commit") "
+for v in COD4E_HOST_WAIT_TIMEOUT COD4E_HOST_WAIT_REPORT; do
+  [ -n "${!v:-}" ] || continue
+  if [[ ! ${!v} =~ ^[0-9]+$ ]]; then
+    echo "$v must be a whole number of seconds" >&2
+    exit 2
+  fi
+  vars="${vars}$v=$(printf '%q' "${!v}") "
+done
 [ -n "$slot" ] && vars="${vars}COD4E_SLOT=$(printf '%q' "$slot") "
 opts=""
 [ "${COD4E_LINUX_CHECKS:-1}" = 0 ] && opts="--no-checks "
@@ -112,6 +124,9 @@ for z in "$tmp"/bundles/*; do
 done
 rm -rf "$tmp"
 ssh "$host" "bash -c 'cd $dir && [ -d out ] && tar c out || true'" | tar x -C . 2>/dev/null || true
+# host-run.sh leaves this file only when it gave up waiting (exit 76); a command's own status 76 leaves none.
+gave_up=$(ssh "$host" "bash -c 'cat $dir/.host-run-gave-up 2>/dev/null || true'") || true
 ssh "$host" "bash -c 'rm -rf $dir'" || true
 for p in ${copied[@]+"${copied[@]}"}; do echo "local bundle: $p"; done
+[ -z "$gave_up" ] || echo "remote: host run gave up waiting: ${gave_up#host-run: }" >&2
 exit $status

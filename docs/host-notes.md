@@ -90,17 +90,20 @@ before a confirmed run. `just review-delta <n> <old>` shows what the PR's own ch
   file the coordinator names, without printing it. A guarded run whose token does not hold the lease is refused with
   exit status 75 (no lease, wrong token, or a run already live in that slot); a second run under the same lease is
   refused, not queued. A slot run with no token bypasses the guard: only `host-run.sh`'s slot lock keeps it apart.
-- `just host-status` shows the pending serial run, the slots, the leases, harness processes, VRAM, the model servers
-  and disk.
+- `just host-status` shows the pending serial run, the slots, the leases, the registered host runs (oldest first,
+  with state and options), harness processes, VRAM, the model servers and disk.
 - `host-run.sh` locks:
   - A slot run holds `.slot-<n>.lock` from its build on.
   - Every run holds `.stage-lock` shared from its build on. A serial run then takes it exclusively for its stages, so
     no stage and no compile runs beside them.
   - A serial run writes its PID to `.serial-pending` while it waits and runs. No new run starts its build while that
-    marker names a live process. Serial runs queue on `.serial-queue.lock`.
-  - Every wait is bounded at 1800 s (current; #561 changes this). After that the run prints `timed out waiting for
-    <lock>` with the lock holders and exits 1, and nothing is retried. A serial run takes 14 to 42 min, so do not
-    queue a run behind one that will not finish within 30 min. Chain serial runs in one command instead.
+    marker names a live process. Serial runs queue on `.serial-queue.lock` and start in registration order.
+- Host runs queue (#561). Each run registers in `~/Projects/cod4e/queue/`. A waiting run prints what it waits on and
+  `queue position <k> of <m>` with each run ahead, at once and every `COD4E_HOST_WAIT_REPORT` s (300). It gives up
+  only after `COD4E_HOST_WAIT_TIMEOUT` s of waiting (21600; `0` = no bound; build and test time do not count): exit
+  76, `host-run: gave up after <n>s waiting for <what> …`, repeated last by `remote-linux.sh` as `remote: host run
+  gave up waiting: …`. Nothing ran after that point; rerun it. A queued guarded slot run keeps its lease busy while it
+  waits. Refs older than the queue still drop a run after 1800 s (`timed out waiting for <lock>`, exit 1).
 
 ## Logs and bundles
 

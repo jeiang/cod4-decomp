@@ -38,6 +38,8 @@ HOST_RUN = """#!/usr/bin/env bash
   printf 'COD4E_SLOT=%s\\n' "${COD4E_SLOT:-}"
   printf 'COD4E_SLOT_OWNER=%s\\n' "${COD4E_SLOT_OWNER:-}"
   printf 'COD4E_SLOT_TOKEN=%s\\n' "${COD4E_SLOT_TOKEN:-}"
+  printf 'COD4E_HOST_WAIT_TIMEOUT=%s\\n' "${COD4E_HOST_WAIT_TIMEOUT:-}"
+  printf 'COD4E_HOST_WAIT_REPORT=%s\\n' "${COD4E_HOST_WAIT_REPORT:-}"
   printf 'shipped=%s\\n' "$(cat version.txt)"
 } > "$FAKE_RECORD"
 echo "host stdout line"
@@ -45,6 +47,7 @@ echo "host stderr line" >&2
 mkdir -p bundles out
 echo zip > bundles/cod4e-run-1.zip
 echo result > out/result.txt
+[ -z "${FAKE_GAVE_UP:-}" ] || echo "host-run: gave up after 9s waiting for slot 2 (queue position 2 of 2)" > .host-run-gave-up
 exit "${FAKE_STATUS:-0}"
 """
 
@@ -85,7 +88,7 @@ class RemoteLinux(unittest.TestCase):
         full = dict(self.git_env, PATH=self.bin + os.pathsep + os.environ["PATH"], COD4E_LINUX_HOST="testhost",
                     FAKE_HOME=self.home, FAKE_HOST_RUN=os.path.join(self.tmp, "host-run"), FAKE_RECORD=self.record)
         for k in ("COD4E_LINUX_SLOT", "COD4E_LINUX_SLOT_TOKEN", "COD4E_LINUX_EXEC", "COD4E_LINUX_CHECKS",
-                  "COD4E_SLOT_GUARD_DIR", "COD4E_SLOT_TOKEN"):
+                  "COD4E_SLOT_GUARD_DIR", "COD4E_SLOT_TOKEN", "COD4E_HOST_WAIT_TIMEOUT", "COD4E_HOST_WAIT_REPORT"):
             full.pop(k, None)
         for k, v in env.items():
             if v is None:
@@ -141,6 +144,25 @@ class RemoteLinux(unittest.TestCase):
         self.assertIn("host_status=3", log)
         self.assertTrue(log.endswith("exit=3\n"), log)
         self.assertEqual(glob.glob(os.path.join(self.home, "Projects", "cod4e", "run-*")), [])
+
+    def test_wait_settings_are_passed_on_and_a_give_up_is_named_last(self):
+        r = self.remote("--", COD4E_HOST_WAIT_TIMEOUT="0", COD4E_HOST_WAIT_REPORT="60")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rec = self.recorded()
+        self.assertIn("COD4E_HOST_WAIT_TIMEOUT=0\nCOD4E_HOST_WAIT_REPORT=60\n", rec)
+        self.assertNotIn("gave up", r.stderr)
+        r = self.remote("--", COD4E_HOST_WAIT_TIMEOUT="6h")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("COD4E_HOST_WAIT_TIMEOUT must be a whole number of seconds", r.stderr)
+        r = self.remote("--", FAKE_STATUS="76", FAKE_GAVE_UP="1")
+        self.assertEqual(r.returncode, 76, r.stderr)
+        lines = r.stderr.splitlines()
+        self.assertEqual(lines[-2], "remote: host run gave up waiting: gave up after 9s waiting for slot 2 "
+                                    "(queue position 2 of 2)")
+        # A command's own status 76 is not a give-up.
+        r = self.remote("--", FAKE_STATUS="76")
+        self.assertEqual(r.returncode, 76, r.stderr)
+        self.assertNotIn("gave up", r.stderr)
 
     def test_early_failures_are_logged_with_their_status(self):
         cases = (((["no-such-ref", "--"]), {}, 128, "no-such-ref"),
