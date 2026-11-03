@@ -109,13 +109,14 @@ web_stages=()
 chrome=
 if [ $run = 1 ] && [ $exec_mode = 0 ]; then
   selected=0 named=() allowed=,
+  # Match the harness's separate-token options and exact stage names, not equals forms or globs. Unsupported
+  # arguments stay unchanged for the harness to reject; preflight is not a second argument validator.
   args=("$@")
   i=0
   while [ $i -lt ${#args[@]} ]; do
     opt=${args[$i]}
     case $opt in
       --stage|--allow-skip|--script) val=${args[$((i + 1))]:-}; i=$((i + 2)) ;;
-      --stage=*|--allow-skip=*|--script=*) val=${opt#*=}; opt=${opt%%=*}; i=$((i + 1)) ;;
       *) i=$((i + 1)); continue ;;
     esac
     case $opt in
@@ -125,7 +126,9 @@ if [ $run = 1 ] && [ $exec_mode = 0 ]; then
     esac
   done
   [ $selected = 1 ] || named=(web-client web-join web-download web-match)
-  for s in ${named[@]+"${named[@]}"}; do [[ $s != web-* ]] || web_stages+=("$s"); done
+  for s in ${named[@]+"${named[@]}"}; do
+    case $s in web-client|web-join|web-download|web-match) web_stages+=("$s") ;; esac
+  done
   chrome=$(scripts/find-chromium.sh)
   unaccepted=()
   for s in ${web_stages[@]+"${web_stages[@]}"}; do [[ $allowed == *",$s,"* ]] || unaccepted+=("$s"); done

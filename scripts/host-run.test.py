@@ -252,7 +252,7 @@ class HostQueue(unittest.TestCase):
     def test_without_chromium_a_run_selecting_web_stages_refuses_to_start(self):
         shutil.rmtree(os.path.join(self.root, "bin"))
         refused = (("web", ["--", "--stage", "web-client"], "web-client"),
-                   ("webeq", ["--", "--stage=client-load,web-match"], "web-match"),
+                   ("webmixed", ["--", "--stage", "client-load,web-match"], "web-match"),
                    ("suite", ["--"], WEB_STAGES),
                    ("slot", ["--", "--stage", "web-join"], "web-join"),
                    ("partial", ["--", "--allow-skip", "web-client"], "web-join web-download web-match"))
@@ -269,7 +269,7 @@ class HostQueue(unittest.TestCase):
                 ("native", ["--", "--stage", "client-load"]),
                 ("allowed", ["--", "--stage", "client-gfx", "--allow-skip", "web-client"]),
                 ("script", ["--", "--stage", "client-gfx", "--script", "scenarios/web-x.cfg"]),
-                ("allskip", ["--", "--allow-skip", "web-client,web-join", "--allow-skip=web-download,web-match"]))
+                ("allskip", ["--", "--allow-skip", "web-client,web-join", "--allow-skip", "web-download,web-match"]))
         for name, args in runs:
             with self.subTest(args=args):
                 p = self.finish(name, *args)
@@ -288,6 +288,20 @@ class HostQueue(unittest.TestCase):
             self.assertEqual(p.returncode, 0, self.stderr(p))
         self.assertEqual(self.lines("chrome"), [f"web {self.chromium}", f"native {self.chromium}"])
         self.assertEqual(self.lines("web"), ["web"])
+
+    def test_preflight_does_not_recognize_forms_the_harness_rejects(self):
+        shutil.rmtree(os.path.join(self.root, "bin"))
+        # A valid native selection suppresses the default suite. Unsupported arguments must not add web stages
+        # to preflight or trigger a web build. The stand-in harness ignores arguments; the real harness rejects them.
+        for name, args in (("equals", ["--stage=web-client"]),
+                           ("glob", ["--stage", "web-*"]),
+                           ("prefix", ["--stage", "web-client-extra"])):
+            p = self.finish(name, "--", "--stage", "client-load", *args)
+            self.assertEqual(p.returncode, 0, self.stderr(p))
+        self.assertEqual(self.lines("web"), [])
+        # An unsupported equals-form allow-skip must not authorize a real web selection.
+        p = self.finish("skip-equals", "--", "--stage", "web-client", "--allow-skip=web-client")
+        self.assertEqual(p.returncode, 78, self.stderr(p))
 
 
 if __name__ == "__main__":
