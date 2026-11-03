@@ -118,6 +118,10 @@ slot-guard-install:
     $b/slot-guard version
     EOF
 
+# Put a GC-rooted Chromium for the web-* stages on the Linux host (~/Projects/cod4e/bin/chromium), so a GC cannot skip them
+chromium-install:
+    ssh {{host}} "bash -c 'mkdir -p ~/Projects/cod4e/bin && nix build --out-link ~/Projects/cod4e/bin/chromium nixpkgs#chromium && ~/Projects/cod4e/bin/chromium/bin/chromium --version'"
+
 # Lease slot n to an owner (coordinator); prints a new token unless COD4E_SLOT_TOKEN gives one
 slot-lease n owner *args:
     #!/usr/bin/env bash
