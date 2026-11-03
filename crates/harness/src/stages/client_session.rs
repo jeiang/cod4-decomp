@@ -160,7 +160,22 @@ fn menus(c: &mut Driven) -> Result<(), String> {
         c.click("Assault")?;
         spawn(c)
     })?;
-    c.pause(Duration::from_secs(3))?;
+    // The prematch countdown hides the weapon and compass HUD; the player spawns before it ends, so the capture waits
+    // for the HUD the menus check (overlay, magazine graphic, minimap image, player arrow) to have drawn.
+    c.step("menu HUD after the prematch", |c| {
+        c.until(
+            json!({
+                "hud.report.drawn.112": {"ge": 1},
+                "hud.report.drawn.117": {"ge": 1},
+                "hud.report.drawn.159": {"ge": 1},
+                "hud.report.drawn.150": {"ge": 1},
+            }),
+            Duration::from_secs(30),
+            "the weapon and compass HUD never drew after the prematch",
+        )
+        .map(|_| ())
+    })?;
+    c.pause(Duration::from_secs(1))?;
     c.step("menu capture", |c| c.capture("menus").map(|_| ()))
 }
 

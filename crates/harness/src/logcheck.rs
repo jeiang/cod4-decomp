@@ -160,8 +160,9 @@ pub const ALLOWED: &[Allow] = &[
     },
     Allow {
         contains: &["cod4e::voice", "microphone cannot be opened", "#488"],
-        reason: "client-hud holds +talk and shows the record meter on a host with no capture device (#488)",
-        stages: &["client-hud"],
+        reason: "client-hud holds +talk and shows the record meter, and client-frontend opens Options > Voice Chat (the \
+                 record meter), on a host with no capture device (#488)",
+        stages: &["client-hud", "client-frontend"],
         max: Some(6), // measured 1 with +talk alone on the Linux host, 2026-11-01; the meter adds an open (5 s retry)
     },
     Allow {
