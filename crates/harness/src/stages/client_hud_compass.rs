@@ -334,12 +334,19 @@ fn frag_verdict(thrown: bool, shots: u64, before: Counts, after: Counts) -> Resu
     Ok(())
 }
 
-/// The person's server state once they are alive (a killed person respawns within a few seconds).
+/// The person's server state once they are alive (a killed person respawns within a few seconds), and the client has
+/// seen it. A person at health 0 is dying, not alive: the frag can kill them on the frame the server still reports
+/// `alive`, and a step after this one would then find them dead.
 fn alive_person(c: &mut Driven, me: u64) -> Result<Value, String> {
     let end = Instant::now() + Duration::from_secs(15);
     loop {
         let p = server_client(c, me)?;
-        if p["alive"] == json!(true) {
+        if p["alive"] == json!(true) && p["health"].as_f64().is_some_and(|h| h > 0.0) {
+            c.until(
+                json!({"player.alive": true}),
+                Duration::from_secs(10),
+                "the client never saw the person alive again",
+            )?;
             return Ok(p);
         }
         if Instant::now() > end {
