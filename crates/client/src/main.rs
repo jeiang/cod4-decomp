@@ -96,8 +96,8 @@ usage: cod4e [options] [+command args ...]
   --fov <degrees>        horizontal field of view at 4:3 (default 65, the stock cg_fov; held to its 65 to 80); wider displays widen it (Hor+)
   --flythrough           fly the scripted path, then exit
   --duration <secs>      flythrough length (default 12)
-  --fly-at <secs>        hold the flythrough at this time of its path (the same picture every run, for comparing renders)
-  --out <dir>            flythrough output: frames.raw.csv, frames.phases.csv (where each frame went), client.json, flythrough.mp4, screenshot.png
+  --fly-at <secs>        hold the flythrough at this time of its path (the same picture every run, for comparing renders; `pose` in client.json gives its setviewpos line)
+  --out <dir>            flythrough output: frames.raw.csv, frames.phases.csv (where each frame went), frames.pose.csv (each frame's camera), client.json (the screenshot's camera as `pose`), flythrough.mp4, screenshot.png
   --show-models          smoke scene: stock player models in different poses and the first-person weapon in
                          front of a fixed camera (--model-count N sets the number of players, default 7)
   --video / --screenshot record a video / save a screenshot during the flythrough
