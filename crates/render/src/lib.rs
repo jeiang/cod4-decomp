@@ -28,7 +28,7 @@ pub mod ui2d;
 pub mod water;
 
 pub use dlight::{DynLight, SpotCone, SpotParams};
-pub use dynmesh::{Cloud, DynMesh, DynVertex};
+pub use dynmesh::{Cloud, DynMesh, DynVertex, PostLight};
 pub use gpu::{Gpu, GpuError, GpuInfo};
 pub use material::MipMode;
 pub use post::{DOF_BIAS, Dof, PostParams, ShellShock};

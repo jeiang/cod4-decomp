@@ -172,6 +172,8 @@ fn connection(st: &NetPlay) -> Value {
         "packets_in": s.map(|s| s.packets_in),
         "bytes_in": s.map(|s| s.bytes_in),
         "bytes_out": s.map(|s| s.bytes_out),
+        // The server's message of the day as the client holds it (`CS_MOTD`; stock draws it nowhere).
+        "motd": st.net.ui_ref().map(|ui| ui.config(net::ui::cs::MOTD)),
         "view": {
             "death_view_frames": st.c.death_view_frames,
             "death_view_range_max": st.c.death_view_range_max,
