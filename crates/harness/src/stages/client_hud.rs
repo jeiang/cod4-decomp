@@ -16,6 +16,8 @@
 //! overlay over the world with the HUD still above it), the killcam must have played behind the body with its skip
 //! prompt over it, a teammate must have had a name over the head and the player under the crosshair a name of their
 //! own, and nothing may be on screen as a bare string key. Needs a display and the install; skips without.
+//! Night-vision and concussion observations idle the bots and record life transitions/impacts; only the shock
+//! check's explicit devkill may change the observed life. Bot play resumes even when setup or an assertion fails.
 use super::client_flythrough::locate_client;
 use super::client_models::{decode, no_display};
 use super::client_session::{render_problem, steps_problem};
@@ -1181,6 +1183,74 @@ fn received_voice(c: &mut Driven, install: &Path, notes: &mut Vec<String>) -> Re
     }
     result
 }
+/// Keep the state at the action, not just the final state after a timeout/respawn. Impacts do not identify an attacker.
+fn life_note(c: &mut Driven, notes: &mut Vec<String>, label: &str) -> Result<Value, String> {
+    let player = c.state("player")?;
+    let deaths = c.lookup("hud.deaths")?;
+    notes.push(format!("{label}: player {player}, deaths {deaths}"));
+    Ok(player)
+}
+
+fn same_life(c: &mut Driven, before: &Value) -> Result<(), String> {
+    let after = c.state("player")?;
+    if after["alive"] != json!(true)
+        || after["killcam"] != json!(false)
+        || after["spawn_count"] != before["spawn_count"]
+    {
+        return Err(format!("the observation changed life: {before} -> {after}"));
+    }
+    Ok(())
+}
+
+/// Protect noncombat observations from bot play, without suppressing grenade damage or the explicit shock death.
+/// Every fallible operation after enabling idle is inside the result/cleanup path.
+fn living_window(
+    c: &mut Driven,
+    notes: &mut Vec<String>,
+    label: &str,
+    f: impl FnOnce(&mut Driven, &mut Vec<String>, &Value) -> Result<(), String>,
+) -> Result<(), String> {
+    use super::client_hud_compass::exec;
+    exec(c, "set bot_idle 1")?;
+    let mut impacts_start = 0;
+    let mut result = (|| {
+        c.pause(Duration::from_secs(1))?;
+        c.until(
+            json!({"player.alive": true, "hud.live.killcam": false}),
+            Duration::from_secs(30),
+            "the player was not alive outside killcam for the observation",
+        )?;
+        impacts_start = c.lookup("fx.impacts")?.as_array().map_or(0, Vec::len);
+        let before = life_note(c, notes, &format!("{label} ready"))?;
+        f(c, notes, &before)
+    })();
+    let final_life = life_note(c, notes, &format!("{label} finished")).map(|_| ());
+    let impacts = c.lookup("fx.impacts").map(|impacts| {
+        let window = impacts.as_array().map(|v| &v[impacts_start.min(v.len())..]);
+        notes.push(format!(
+            "{label} impacts (no attacker attribution): {}",
+            json!(window)
+        ));
+    });
+    // Try restoration even if the observation, readiness or either diagnostic failed.
+    let restored = exec(c, "set bot_idle 0");
+    for (what, cleanup) in [
+        ("final life", final_life),
+        ("impacts", impacts),
+        ("restore bot play", restored),
+    ] {
+        if let Err(error) = cleanup {
+            let detail = format!("{label} {what}: {error}");
+            notes.push(detail.clone());
+            result = Err(match result {
+                Ok(()) => detail,
+                Err(original) => format!("{original}; {detail}"),
+            });
+        }
+    }
+    result
+}
+
 /// The match, step by step. Every step goes through the channel: a failure names the step and what was observed.
 fn play(
     c: &mut Driven,
@@ -1541,6 +1611,7 @@ fn play(
     // player stands still for the matched captures: two with the goggles off (what the view changes by on its own) and
     // one with them on.
     c.step("night vision", |c| {
+        living_window(c, notes, "night vision", |c, notes, life| {
         w.stop(c)?;
         c.until(
             json!({"player.alive": true, "hud.live.killcam": false}),
@@ -1556,6 +1627,8 @@ fn play(
         c.capture(NV_OFF)?;
         c.pause(secs(1))?;
         c.capture(NV_STILL)?;
+        life_note(c, notes, "NV bind")?;
+        same_life(c, life)?;
         c.bind("+actionslot 1", "tap")?;
         c.until(
             json!({
@@ -1609,7 +1682,9 @@ fn play(
             "the goggles did not come off with nightVisionDisableEffects 1",
         )?;
         c.console("set nightVisionDisableEffects 0")?;
-        r
+        r?;
+        same_life(c, life)
+        })
     })?;
 
     // A shell shock ends at the next spawn, as stock's does (`ClientSpawn` wipes the player state's shock and the
@@ -1617,17 +1692,23 @@ fn play(
     // grenade at its feet through the server (`devgrenade`, the stock scripts shock it), dies (`devkill`) and
     // respawns; the look must have no shock at the first live frame.
     c.step("shock ends at spawn", |c| {
+        living_window(c, notes, "shock ends at spawn", |c, notes, life| {
         w.stop(c)?;
         let me = c.lookup("player.client")?.as_u64().ok_or("player.client is not a number")?;
         let before = c.lookup("look.shocks")?.as_u64().unwrap_or(0);
+        life_note(c, notes, "concussion launch")?;
+        same_life(c, life)?;
         c.ask(json!({"cmd": "server", "op": "exec", "line": "devgrenade human concussion_grenade_mp 0 100"}))?;
         c.until(
             json!({"look.shocks": {"gt": before}}),
             secs(10),
             "a concussion grenade at the player's feet did not shell shock the client",
         )?;
+        life_note(c, notes, "concussion observed")?;
+        same_life(c, life)?;
         let shock = c.lookup("look.shock")?;
         let end = shock["start_ms"].as_f64().unwrap_or(0.0) + shock["duration_ms"].as_f64().unwrap_or(0.0);
+        life_note(c, notes, "intentional death")?;
         c.ask(json!({"cmd": "server", "op": "exec", "line": format!("devkill {me} {me}")}))?;
         c.until(json!({"player.dead": true}), secs(10), "devkill did not kill the player")?;
         c.until(
@@ -1637,6 +1718,7 @@ fn play(
         )?;
         let look = c.lookup("look")?;
         let now = look["time"].as_f64().unwrap_or(0.0);
+        life_note(c, notes, "respawn")?;
         if !look["shock"].is_null() {
             return Err(format!(
                 "the shell shock ({shock}) is still running after the spawn at {now} ms; stock ends it at spawn"
@@ -1648,6 +1730,7 @@ fn play(
             ));
         }
         Ok(())
+        })
     })?;
 
     // A grenade cooked and thrown with its key: while it cooks the crosshair's centre dot grows with the fuse

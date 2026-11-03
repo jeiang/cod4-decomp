@@ -44,6 +44,10 @@ Linux harness displays keep a virtual keyboard and pointer attached to their pri
 host input devices. The helper sends no game input and lives only as long as that display. `client-hud` also checks
 the arrow-key fallback explicitly: aim must settle within four degrees and a shot must consume ammunition before
 the mouse-driven match begins.
+The compass grenade check waits for positive server health and the client's live state before handing off to
+key-only aiming. Night-vision and concussion observation windows hold bots idle, then restore bot play even on
+failure; life transitions and impact observations are kept in the stage notes. The goggles must be checked in one
+life, and a new concussion must arrive before the shock check's intentional death and spawn-clear assertion.
 
 `client-hud` checks synchronous input selection with the player's real UDP commands: a development-channel
 scheduling fixture collects a backlog before observing one actual server tick, then checks retained input on
