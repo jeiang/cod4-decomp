@@ -289,8 +289,9 @@ fn misses(what: &str, list: &Value, allowed: &[&str]) -> Option<String> {
 /// The runtime error the stock scripts raise for a player their own frag killed (#539): the stock damage callback
 /// (`_globallogic`) sets `explosiveInfo["suicideGrenadeKill"]` only for damage from someone else, and the stock kill
 /// challenges (`_missions::ch_kills`) test it in their frag branch, so the original's VM raises the same error there
-/// (KisakCOD `script/scr_variable.cpp:1727`). Message and innermost location, as the listen report gives them.
-const FRAG_SUICIDE_ERROR: (&str, &str) = (
+/// (KisakCOD `script/scr_variable.cpp:1727`). Message and innermost location, as the listen report gives them;
+/// `client-gfx` holds its listen servers to the same bound (#557).
+pub(crate) const FRAG_SUICIDE_ERROR: (&str, &str) = (
     "cannot cast undefined to bool",
     "maps\\mp\\gametypes\\_missions::ch_kills line 545",
 );

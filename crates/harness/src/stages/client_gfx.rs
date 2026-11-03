@@ -25,6 +25,7 @@
 //! device loss, the bob and frame-pace probes) is set up with the channel's `dev` hooks, each followed by what the
 //! player sees. Needs a display and the install; skips without.
 use super::client_flythrough::locate_client;
+use super::client_match::FRAG_SUICIDE_ERROR;
 use super::client_models::no_display;
 use super::client_session::verdict;
 use crate::control::Driven;
@@ -1137,13 +1138,51 @@ fn devmap_window(c: &mut Driven) -> Result<(), String> {
     })
 }
 
-/// The whole run, step by step.
+/// How many of a listen server's script errors (its `script` state: `[map, VM text]` pairs and the frag suicides it
+/// counted) were the stock `ch_kills` error a frag suicide raises ([`FRAG_SUICIDE_ERROR`], #539), and how many of
+/// those no counted suicide stands behind. The text's first line is the message, its first `at` the innermost site,
+/// as the listen report reads them.
+fn frag_suicide_errors(script: &Value) -> (u64, u64) {
+    let seen = script["errors"].as_array().map_or(0, |a| {
+        a.iter()
+            .filter(|e| {
+                let mut lines = e[1]
+                    .as_str()
+                    .unwrap_or("")
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty() && !l.starts_with("*******"));
+                lines.next() == Some(FRAG_SUICIDE_ERROR.0)
+                    && lines.find_map(|l| l.strip_prefix("at ")) == Some(FRAG_SUICIDE_ERROR.1)
+            })
+            .count() as u64
+    });
+    let suicides = script["frag_suicides"].as_u64().unwrap_or(0);
+    (seen, seen.saturating_sub(suicides))
+}
+
+/// The listen server's stock `ch_kills` errors, each with a frag suicide behind it (#557): a bot's frag can kill its
+/// thrower, and the stock scripts then raise that error as the original's VM does, so `logcheck` lets its two lines
+/// through in this stage up to a bound, and this holds every one to a suicide the server counted.
+fn frag_suicides_explain_errors(c: &mut Driven) -> Result<(), String> {
+    let script = c.ask(json!({"cmd": "server", "op": "state", "what": "script"}))?;
+    match frag_suicide_errors(&script) {
+        (_, 0) => Ok(()),
+        (seen, over) => Err(format!(
+            "{seen} stock ch_kills script errors on the listen server, {over} more than its counted frag suicides"
+        )),
+    }
+}
+
+/// The whole run, step by step. Each listen server's script errors are checked before the next match replaces it.
 fn play(c: &mut Driven) -> Result<(), String> {
     front_end(c)?;
     menu_match(c)?;
+    frag_suicides_explain_errors(c)?;
     devmap_renderer(c)?;
     devmap_cgame(c)?;
-    devmap_window(c)
+    devmap_window(c)?;
+    frag_suicides_explain_errors(c)
 }
 
 /// The run's report in the shape the session verdict reads (the steps, `gpu_health`, `render`, the match's `net`
@@ -1257,7 +1296,40 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
 
 #[cfg(test)]
 mod tests {
-    use super::{brightened_share, crop, mean_luma, value_matches, white_share};
+    use super::{
+        brightened_share, crop, frag_suicide_errors, mean_luma, value_matches, white_share,
+    };
+    use serde_json::json;
+
+    /// Only the stock `ch_kills` frag-suicide error counts, read from the VM text with or without its banner, and only
+    /// errors beyond the server's counted frag suicides are unexplained (#557).
+    #[test]
+    fn only_stock_ch_kills_errors_beyond_the_frag_suicides_are_unexplained() {
+        let stock = "cannot cast undefined to bool\n  at maps\\mp\\gametypes\\_missions::ch_kills line 545\n  \
+                     at maps\\mp\\gametypes\\_missions::domissioncallback line 1153\n";
+        let bannered = format!("******* script runtime error *******\n{stock}");
+        let other_site = "cannot cast undefined to bool\n  at maps\\mp\\gametypes\\_missions::ch_kills line 546\n";
+        let other_error = "cannot cast undefined to int\n  at maps\\mp\\gametypes\\_missions::ch_kills line 545\n";
+        let script = |suicides: u64| {
+            json!({
+                "errors": [
+                    ["mp_crash", stock],
+                    ["mp_crash", bannered],
+                    ["mp_crash", other_site],
+                    ["mp_crash", other_error],
+                ],
+                "frag_suicides": suicides,
+            })
+        };
+        assert_eq!(frag_suicide_errors(&script(2)), (2, 0));
+        assert_eq!(frag_suicide_errors(&script(3)), (2, 0));
+        assert_eq!(frag_suicide_errors(&script(1)), (2, 1));
+        assert_eq!(frag_suicide_errors(&json!({"errors": []})), (0, 0));
+        assert_eq!(
+            frag_suicide_errors(&json!({"errors": [["mp_backlot", stock]]})),
+            (1, 1)
+        );
+    }
 
     #[test]
     fn white_share_counts_the_middle_third_only() {
