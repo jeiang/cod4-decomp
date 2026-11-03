@@ -127,6 +127,8 @@ match `laser` (`arg` `1` draws a laser sight from just below the eye along the v
 over), `hitflesh` (a bullet of the weapon in hand strikes a player 64 units ahead), `shock` (`arg` ms of the default
 shellshock) and `subtitle` (`arg` a string key shown as a started sound's subtitle).
 
+`net.motd` is the server's message of the day as the client holds it (`CS_MOTD`, configstring 10).
+
 `entities.list[].model_name` resolves each snapshot model index through the server's model configstrings.
 `entities.snapshot` and `entities.server_time` name the snapshot the list came from, so a check that compares
 snapshots reads the list and its snapshot in one request.
