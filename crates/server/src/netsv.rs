@@ -108,10 +108,6 @@ pub struct Peer {
     /// Milliseconds spent waiting for packets since this client's last one.
     unheard_ms: u64,
     heard_now: bool,
-    /// Effect names announced so far (`fx <index> <name>` commands).
-    fx_sent: usize,
-    /// How many of `Game::sounds` the client has been told the names of.
-    snd_sent: usize,
     /// A reliable command did not fit: the peer is too far behind and is dropped at the next service
     /// ([`NetSv::overflowed`]).
     overflowed: bool,
@@ -689,8 +685,6 @@ impl NetSv {
             last_heard: Instant::now(),
             unheard_ms: 0,
             heard_now: false,
-            fx_sent: 0,
-            snd_sent: 0,
             overflowed: false,
             last_ack: 0,
             ack_moved: Instant::now(),
@@ -771,9 +765,6 @@ impl NetSv {
     pub fn put_peer(&mut self, slot: u16, mut peer: Peer) {
         peer.last_heard = Instant::now();
         peer.unheard_ms = 0;
-        // The new level numbers its effects afresh: the client needs the names again.
-        peer.fx_sent = 0;
-        peer.snd_sent = 0;
         peer.stalled = false;
         peer.next_snapshot = 0;
         // The new level starts from a full snapshot, and the load that follows is not a client that stopped acking.
@@ -1085,33 +1076,6 @@ impl NetSv {
                 continue;
             };
             let peer = self.peers[slot].as_mut().expect("peer");
-            while peer.fx_sent < game.fx.len() {
-                let Some(name) = game.fx.name(peer.fx_sent + 1) else {
-                    break;
-                };
-                // A full window is the client catching up: the rest follows next frame.
-                if peer
-                    .link
-                    .command(format!("fx {} {name}", peer.fx_sent + 1))
-                    .is_err()
-                {
-                    break;
-                }
-                peer.fx_sent += 1;
-            }
-            while peer.snd_sent < game.sounds.len() {
-                let Some(name) = game.sounds.name(peer.snd_sent + 1) else {
-                    break;
-                };
-                if peer
-                    .link
-                    .command(format!("sndname {} {name}", peer.snd_sent + 1))
-                    .is_err()
-                {
-                    break;
-                }
-                peer.snd_sent += 1;
-            }
             let bytes = peer.link.send(&mut self.t, Some(snap.canonical()))
                 + std::mem::take(&mut peer.voice_bytes);
             self.rng = xorshift(self.rng);
@@ -1857,8 +1821,6 @@ mod tests {
             cmds: VecDeque::new(),
             name: String::new(),
             last_heard: Instant::now(),
-            fx_sent: 0,
-            snd_sent: 0,
             overflowed: false,
             last_ack: 0,
             ack_moved: Instant::now(),

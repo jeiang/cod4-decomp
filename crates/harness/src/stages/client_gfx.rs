@@ -24,7 +24,11 @@
 //! subtitle, a shellshock, a bullet striking flesh, the test light, an effect played in front of the player, the
 //! device loss, the bob and frame-pace probes) is set up with the channel's `dev` hooks, each followed by what the
 //! player sees. Needs a display and the install; skips without.
+//! The blood and brass and blood limit checks each run with the host's `bot_idle 1` (after a one-second wait) and set
+//! `bot_idle 0` afterwards, so real bot hits cannot contaminate injected-hit counts; the result notes retain each
+//! `fx.impacts` entry of that window with its source, entity and weapon.
 use super::client_flythrough::locate_client;
+use super::client_match::FRAG_SUICIDE_ERROR;
 use super::client_models::no_display;
 use super::client_session::verdict;
 use crate::control::Driven;
@@ -365,6 +369,29 @@ fn cg_is(c: &mut Driven, name: &str, want: &str) -> Result<(), String> {
 /// How often each effect kind has played (`fx.played`), to count what plays from now.
 fn fx_mark(c: &mut Driven) -> Result<Value, String> {
     c.lookup("fx.played")
+}
+
+/// Runs `f` with the server's bots idle (`bot_idle 1`, then a second to settle) so real bot hits cannot
+/// add to the injected-hit counts, notes every impact the client recorded meanwhile (`fx.impacts`) under
+/// `label`, and lets the bots move again (`bot_idle 0`) whatever `f` returned.
+fn bots_idle(
+    c: &mut Driven,
+    notes: &mut Vec<String>,
+    label: &str,
+    f: impl FnOnce(&mut Driven) -> Result<(), String>,
+) -> Result<(), String> {
+    let idle = |c: &mut Driven, on: &str| {
+        c.ask(json!({"cmd": "server", "op": "exec", "line": format!("set bot_idle {on}")}))
+    };
+    idle(c, "1")?;
+    c.pause(Duration::from_secs(1))?;
+    let start = c.lookup("fx.impacts")?.as_array().map_or(0, Vec::len);
+    let result = f(c);
+    let impacts = c.lookup("fx.impacts")?;
+    let window = impacts.as_array().map(|v| &v[start.min(v.len())..]);
+    notes.push(format!("{label} impacts: {}", json!(window)));
+    idle(c, "0")?;
+    result
 }
 
 /// The effect `kind` played exactly `n` times since `mark` (so a wrong kind fails as much as a missing one).
@@ -786,7 +813,7 @@ fn toggled(
 
 /// The devmap match's cgame: view model, 2D, shellshock, blood and brass, unlit scene, centre prints, crosshair,
 /// killcam cameras and the film and glow output.
-fn devmap_cgame(c: &mut Driven) -> Result<(), String> {
+fn devmap_cgame(c: &mut Driven, notes: &mut Vec<String>) -> Result<(), String> {
     let secs = Duration::from_secs;
     c.step("view model", |c| {
         toggled(
@@ -818,23 +845,25 @@ fn devmap_cgame(c: &mut Driven) -> Result<(), String> {
         )
     })?;
     c.step("blood and brass", |c| {
-        let mark = fx_mark(c)?;
-        c.console("set cg_blood 0")?;
-        dev(c, "hitflesh", "")?;
-        c.pause(secs(1))?;
-        fx_since(c, &mark, "bullet_impact_noblood", 1)?;
-        fx_since(c, &mark, "bullet_impact_flesh", 0)?;
-        c.console("set cg_blood 1")?;
-        dev(c, "hitflesh", "")?;
-        c.pause(secs(1))?;
-        fx_since(c, &mark, "bullet_impact_flesh", 1)?;
-        fx_since(c, &mark, "bullet_impact_noblood", 1)?;
-        c.console("set cg_brass 0")?;
-        c.pause(Duration::from_millis(100))?;
-        let mark = fx_mark(c)?;
-        hold(c, "mouse1", secs(1))?;
-        fx_since(c, &mark, "shell_eject", 0)?;
-        c.console("set cg_brass 1")
+        bots_idle(c, notes, "blood and brass", |c| {
+            let mark = fx_mark(c)?;
+            c.console("set cg_blood 0")?;
+            dev(c, "hitflesh", "")?;
+            c.pause(secs(1))?;
+            fx_since(c, &mark, "bullet_impact_noblood", 1)?;
+            fx_since(c, &mark, "bullet_impact_flesh", 0)?;
+            c.console("set cg_blood 1")?;
+            dev(c, "hitflesh", "")?;
+            c.pause(secs(1))?;
+            fx_since(c, &mark, "bullet_impact_flesh", 1)?;
+            fx_since(c, &mark, "bullet_impact_noblood", 1)?;
+            c.console("set cg_brass 0")?;
+            c.pause(Duration::from_millis(100))?;
+            let mark = fx_mark(c)?;
+            hold(c, "mouse1", secs(1))?;
+            fx_since(c, &mark, "shell_eject", 0)?;
+            c.console("set cg_brass 1")
+        })
     })?;
     c.step("unlit scene", |c| {
         toggled(
@@ -973,26 +1002,28 @@ fn devmap_cgame(c: &mut Driven) -> Result<(), String> {
         typed(c, &["set r_glowUseTweaks 0", "set r_glowTweakEnable 0"])
     })?;
     c.step("blood limit", |c| {
-        let mark = fx_mark(c)?;
-        typed(c, &["set cg_bloodLimitMsec 2000", "set cg_bloodLimit 1"])?;
-        // Two hits a frame apart: the second is within the limit.
-        dev(c, "hitflesh", "")?;
-        dev(c, "hitflesh", "")?;
-        c.pause(secs(1))?;
-        fx_since(c, &mark, "bullet_impact_flesh", 1)?;
-        // A third about a second later is still within it; a fourth past two seconds is not.
-        dev(c, "hitflesh", "")?;
-        c.pause(Duration::from_millis(1200))?;
-        fx_since(c, &mark, "bullet_impact_flesh", 1)?;
-        dev(c, "hitflesh", "")?;
-        fx_since(c, &mark, "bullet_impact_flesh", 2)?;
-        c.console("set cg_bloodLimitMsec 1")?;
-        c.pause(Duration::from_millis(100))?;
-        dev(c, "hitflesh", "")?;
-        c.pause(Duration::from_millis(100))?;
-        dev(c, "hitflesh", "")?;
-        fx_since(c, &mark, "bullet_impact_flesh", 4)?;
-        typed(c, &["set cg_bloodLimit 0", "set cg_bloodLimitMsec 330"])
+        bots_idle(c, notes, "blood limit", |c| {
+            let mark = fx_mark(c)?;
+            typed(c, &["set cg_bloodLimitMsec 2000", "set cg_bloodLimit 1"])?;
+            // Two hits a frame apart: the second is within the limit.
+            dev(c, "hitflesh", "")?;
+            dev(c, "hitflesh", "")?;
+            c.pause(secs(1))?;
+            fx_since(c, &mark, "bullet_impact_flesh", 1)?;
+            // A third about a second later is still within it; a fourth past two seconds is not.
+            dev(c, "hitflesh", "")?;
+            c.pause(Duration::from_millis(1200))?;
+            fx_since(c, &mark, "bullet_impact_flesh", 1)?;
+            dev(c, "hitflesh", "")?;
+            fx_since(c, &mark, "bullet_impact_flesh", 2)?;
+            c.console("set cg_bloodLimitMsec 1")?;
+            c.pause(Duration::from_millis(100))?;
+            dev(c, "hitflesh", "")?;
+            c.pause(Duration::from_millis(100))?;
+            dev(c, "hitflesh", "")?;
+            fx_since(c, &mark, "bullet_impact_flesh", 4)?;
+            typed(c, &["set cg_bloodLimit 0", "set cg_bloodLimitMsec 330"])
+        })
     })?;
     c.step("cl_noprint", |c| {
         c.console("set cl_noprint 1")?;
@@ -1137,13 +1168,53 @@ fn devmap_window(c: &mut Driven) -> Result<(), String> {
     })
 }
 
-/// The whole run, step by step.
-fn play(c: &mut Driven) -> Result<(), String> {
+/// A listen server's script errors (its `script` state: `[map, VM text]` pairs and the frag suicides it counted):
+/// how many there were, and how many of them are excused, being the stock `ch_kills` error a frag suicide raises
+/// ([`FRAG_SUICIDE_ERROR`], #539) with a counted suicide behind each, as `client-match` excuses them. The text's first
+/// line is the message, its first `at` the innermost site, as the listen report reads them.
+fn frag_suicide_errors(script: &Value) -> (u64, u64) {
+    let errors = script["errors"].as_array().map_or(&[][..], Vec::as_slice);
+    let seen = errors
+        .iter()
+        .filter(|e| {
+            let mut lines = e[1]
+                .as_str()
+                .unwrap_or("")
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with("*******"));
+            lines.next() == Some(FRAG_SUICIDE_ERROR.0)
+                && lines.find_map(|l| l.strip_prefix("at ")) == Some(FRAG_SUICIDE_ERROR.1)
+        })
+        .count() as u64;
+    let suicides = script["frag_suicides"].as_u64().unwrap_or(0);
+    (errors.len() as u64, seen.min(suicides))
+}
+
+/// The listen server's script errors are all the stock `ch_kills` error with a frag suicide behind each (#557): a
+/// bot's frag can kill its thrower, and the stock scripts then raise that error as the original's VM does, so
+/// `logcheck` lets its two lines through in this stage up to a bound, and this fails on any error not so explained.
+fn frag_suicides_explain_errors(c: &mut Driven) -> Result<(), String> {
+    let script = c.ask(json!({"cmd": "server", "op": "state", "what": "script"}))?;
+    match frag_suicide_errors(&script) {
+        (errors, excused) if errors <= excused => Ok(()),
+        (errors, excused) => Err(format!(
+            "{errors} script errors on the listen server, {} not the stock ch_kills error behind a counted frag \
+             suicide",
+            errors - excused
+        )),
+    }
+}
+
+/// The whole run, step by step. Each listen server's script errors are checked before the next match replaces it.
+fn play(c: &mut Driven, notes: &mut Vec<String>) -> Result<(), String> {
     front_end(c)?;
     menu_match(c)?;
+    frag_suicides_explain_errors(c)?;
     devmap_renderer(c)?;
-    devmap_cgame(c)?;
-    devmap_window(c)
+    devmap_cgame(c, notes)?;
+    devmap_window(c)?;
+    frag_suicides_explain_errors(c)
 }
 
 /// The run's report in the shape the session verdict reads (the steps, `gpu_health`, `render`, the match's `net`
@@ -1190,7 +1261,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         }
     };
     out.notes.push(format!("channel {}", c.addr));
-    let played = play(&mut c);
+    let played = play(&mut c, &mut out.notes);
     // Read before the run ends, played out or not: a failed step still says what the renderer and the device did.
     let report = assemble(&mut c);
     let status = c.finish(Duration::from_secs(30));
@@ -1257,7 +1328,35 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
 
 #[cfg(test)]
 mod tests {
-    use super::{brightened_share, crop, mean_luma, value_matches, white_share};
+    use super::{
+        brightened_share, crop, frag_suicide_errors, mean_luma, value_matches, white_share,
+    };
+    use serde_json::json;
+
+    /// Only the stock `ch_kills` frag-suicide error is excused, read from the VM text with or without its banner, and
+    /// only up to the server's counted frag suicides; every other script error is unexplained (#557).
+    #[test]
+    fn only_stock_ch_kills_errors_beyond_the_frag_suicides_are_unexplained() {
+        let stock = "cannot cast undefined to bool\n  at maps\\mp\\gametypes\\_missions::ch_kills line 545\n  \
+                     at maps\\mp\\gametypes\\_missions::domissioncallback line 1153\n";
+        let bannered = format!("******* script runtime error *******\n{stock}");
+        let other_site = "cannot cast undefined to bool\n  at maps\\mp\\gametypes\\_missions::ch_kills line 546\n";
+        let other_error = "cannot cast undefined to int\n  at maps\\mp\\gametypes\\_missions::ch_kills line 545\n";
+        let stock_only = |suicides: u64| json!({"errors": [["mp_crash", stock], ["mp_crash", bannered]], "frag_suicides": suicides});
+        assert_eq!(frag_suicide_errors(&stock_only(2)), (2, 2));
+        assert_eq!(frag_suicide_errors(&stock_only(3)), (2, 2));
+        assert_eq!(frag_suicide_errors(&stock_only(1)), (2, 1));
+        assert_eq!(frag_suicide_errors(&json!({"errors": []})), (0, 0));
+        assert_eq!(
+            frag_suicide_errors(&json!({"errors": [["mp_backlot", stock]]})),
+            (1, 0)
+        );
+        for other in [other_site, other_error] {
+            let script =
+                json!({"errors": [["mp_crash", stock], ["mp_crash", other]], "frag_suicides": 5});
+            assert_eq!(frag_suicide_errors(&script), (2, 1));
+        }
+    }
 
     #[test]
     fn white_share_counts_the_middle_third_only() {

@@ -4,10 +4,11 @@
 //! to kick a bot by slot (`clientkick`); the vote's configstrings, which the client draws as the yellow vote lines,
 //! reach the other, who votes yes and the bot is dropped. The first then calls a kick vote against the
 //! other, who votes yes: the server drops the second client three seconds after the vote passes. The first
-//! finally calls a gametype-and-map vote alone (it is the only voter) and the server changes to that map and
-//! gametype. It then renames itself through its userinfo, calls a `g_gametype` vote (`g_gametype war; map_restart`)
-//! and the level restarts in that gametype. A `getstatus` from a bare socket lists the players, and `games_mp.log`
-//! holds the game start, the chat, the script's join lines and the end of the first level.
+//! renames itself through its userinfo while TDM changes names automatically, then calls a gametype-and-map vote
+//! alone (it is the only voter) and the server changes to that map and gametype. A `getstatus` from a bare socket
+//! lists the renamed player after the switch to S&D's manual name mode. A `g_gametype` vote (`g_gametype war;
+//! map_restart`) restarts the level in that gametype. `games_mp.log` holds the game start, the chat, the script's
+//! join lines and the end of the first level.
 use super::net_objective::Human;
 use crate::stage::{StageCtx, StageReport, Status};
 use net::ui::cs;
@@ -273,6 +274,21 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         frame(&mut server, &mut people);
     }
 
+    // TDM changes names automatically; S&D holds them until updateclientnames. Rename before the typemap vote.
+    people[0]
+        .c
+        .command(&net::client::userinfo_command("^1Zed  Zed", 25_000, 30));
+    while server.game.client(a).is_none_or(|c| c.name != "Zed  Zed") {
+        if Instant::now() > deadline {
+            return fail(format!(
+                "the userinfo did not rename the player (it is {:?}, {} s into the stage)",
+                server.game.client(a).map(|c| c.name.clone()),
+                (Instant::now() + LIMIT - deadline).as_secs()
+            ));
+        }
+        frame(&mut server, &mut people);
+    }
+
     // A vote with one voter passes alone and changes the gametype and the map. A vote needs two people connected, so a
     // bot joins, and watches (a spectator does not vote).
     if let Err(e) = server.exec_line("bots 1") {
@@ -321,21 +337,6 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         }
         frame(&mut server, &mut people);
     };
-
-    // The person renames itself: the server cleans the name, and the others' view (the configstring) follows.
-    people[0]
-        .c
-        .command(&net::client::userinfo_command("^1Zed  Zed", 25_000, 30));
-    while server.game.client(a).is_none_or(|c| c.name != "Zed  Zed") {
-        if Instant::now() > deadline {
-            return fail(format!(
-                "the userinfo did not rename the player (it is {:?}, {} s into the stage)",
-                server.game.client(a).map(|c| c.name.clone()),
-                (Instant::now() + LIMIT - deadline).as_secs()
-            ));
-        }
-        frame(&mut server, &mut people);
-    }
 
     // A `getstatus` from a bare socket lists the players and the server settings.
     let probe = std::net::UdpSocket::bind("127.0.0.1:0")?;

@@ -316,6 +316,7 @@ struct ClientJson {
     error: Option<String>,
     video: Option<VideoJson>,
     screenshot: Option<String>,
+    pose: Option<PoseJson>,
     frames: Option<u64>,
     zone_load_ms: Option<f64>,
     world: Option<WorldJson>,
@@ -341,6 +342,107 @@ struct VideoJson {
 #[derive(Deserialize)]
 struct WorldJson {
     surfaces_drawn_p50: Option<f64>,
+}
+
+/// The screenshot's camera (`client.json` `pose`, #431): the original's `setviewpos` line and `cg_fov` at the
+/// frame's size reproduce the picture.
+#[derive(Deserialize)]
+struct PoseJson {
+    map: String,
+    frame: usize,
+    origin: [f64; 3],
+    yaw: f64,
+    pitch: f64,
+    cg_fov: f64,
+    fov_x: f64,
+    width: u32,
+    height: u32,
+    setviewpos: String,
+}
+
+/// The pose file beside `frames.raw.csv`: the camera each frame was drawn with.
+const POSE_CSV: &str = "frames.pose.csv";
+
+/// Why the screenshot's recorded camera is not usable to reproduce it, or `None`: the pose must name the run's map,
+/// its `setviewpos` line must carry its eye and angles, `fov_x` must be `cg_fov` widened for the frame's shape
+/// (Hor+), and `frames.pose.csv` must hold one row per timed frame whose row for the screenshot's frame is the same
+/// camera, with the camera moving along the tour.
+fn pose_problem(pose: &PoseJson, map: &str, csv: &str, frames: usize) -> Option<String> {
+    const EPS: f64 = 0.011;
+    let near = |a: f64, b: f64| (a - b).abs() <= EPS;
+    if pose.map != map {
+        return Some(format!(
+            "the pose names map {:?}, the run was {map}",
+            pose.map
+        ));
+    }
+    let want = [
+        pose.origin[0],
+        pose.origin[1],
+        pose.origin[2],
+        pose.yaw,
+        pose.pitch,
+    ];
+    let args: Vec<f64> = pose
+        .setviewpos
+        .strip_prefix("setviewpos ")
+        .map(|a| a.split(' ').filter_map(|v| v.parse().ok()).collect())
+        .unwrap_or_default();
+    if args.len() != 5 || !args.iter().zip(want).all(|(&a, b)| near(a, b)) {
+        return Some(format!(
+            "the pose's line {:?} is not setviewpos with its eye {:?}, yaw {} and pitch {}",
+            pose.setviewpos, pose.origin, pose.yaw, pose.pitch
+        ));
+    }
+    if !(-180.0..180.0).contains(&pose.yaw) || !(-90.0..=90.0).contains(&pose.pitch) {
+        return Some(format!(
+            "the pose's angles yaw {} pitch {} are outside the stock ranges",
+            pose.yaw, pose.pitch
+        ));
+    }
+    let aspect = f64::from(pose.width) / f64::from(pose.height.max(1));
+    let widened = 2.0 * ((pose.cg_fov.to_radians() * 0.5).tan() * 0.75 * aspect).atan();
+    if !(65.0..=80.0).contains(&pose.cg_fov) || (widened.to_degrees() - pose.fov_x).abs() > 0.05 {
+        return Some(format!(
+            "the pose's cg_fov {} at {}x{} widens to {:.2}, not its fov_x {}",
+            pose.cg_fov,
+            pose.width,
+            pose.height,
+            widened.to_degrees(),
+            pose.fov_x
+        ));
+    }
+    let mut lines = csv.lines();
+    if lines.next() != Some("frame,x,y,z,yaw,pitch,roll,cg_fov,fov_x") {
+        return Some(format!("{POSE_CSV} is missing or has no header"));
+    }
+    let rows: Vec<Vec<f64>> = lines
+        .map(|l| l.split(',').filter_map(|v| v.parse().ok()).collect())
+        .collect();
+    if rows.len() != frames || rows.iter().any(|r| r.len() != 9) {
+        return Some(format!(
+            "{POSE_CSV} has {} rows, not one complete row for each of the {frames} timed frames",
+            rows.len()
+        ));
+    }
+    let Some(row) = rows.iter().find(|r| r[0] as usize == pose.frame) else {
+        return Some(format!(
+            "{POSE_CSV} has no row for the screenshot's frame {}",
+            pose.frame
+        ));
+    };
+    let csv_cam = [row[1], row[2], row[3], row[4], row[5], row[7], row[8]];
+    let json_cam = want.into_iter().chain([pose.cg_fov, pose.fov_x]);
+    if !csv_cam.iter().zip(json_cam).all(|(&a, b)| near(a, b)) {
+        return Some(format!(
+            "{POSE_CSV} row for frame {} is {row:?}, not the screenshot's pose",
+            pose.frame
+        ));
+    }
+    if rows.windows(2).all(|w| w[0][1..4] == w[1][1..4]) {
+        return Some(format!("{POSE_CSV}: the camera never moved along the tour"));
+    }
+    None
 }
 
 /// Run the client once. `Ok(Err(why))` is a failed run; `Err` is a harness
@@ -435,6 +537,8 @@ fn consume(
     let raw = out.join(RAW_CSV);
     let text = fs::read_to_string(&raw)
         .map_err(|e| io::Error::new(e.kind(), format!("{RAW_CSV}: {e}")))?;
+    // The rows after the header: one per timed frame, which `frames.pose.csv` must match.
+    let timed_frames = text.lines().count().saturating_sub(1);
     let mut rec = FrameRecorder::create(&out.join("frames.csv"))?;
     for (i, line) in text.lines().enumerate().skip(1) {
         match parse_frame(line) {
@@ -541,6 +645,14 @@ fn consume(
         Some(s) if out.join(s).is_file() => report.files.push(format!("{slug}/{s}")),
         _ => problems.push("no screenshot".into()),
     }
+    let pose_csv = fs::read_to_string(out.join(POSE_CSV)).unwrap_or_default();
+    if !pose_csv.is_empty() {
+        report.files.push(format!("{slug}/{POSE_CSV}"));
+    }
+    match &cj.pose {
+        Some(p) => problems.extend(pose_problem(p, plan.map, &pose_csv, timed_frames)),
+        None => problems.push("client.json has no pose for the screenshot".into()),
+    }
     Ok(if problems.is_empty() {
         Ok(())
     } else {
@@ -570,6 +682,46 @@ fn parse_frame(line: &str) -> Option<FrameSample> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pose() -> PoseJson {
+        PoseJson {
+            map: "mp_crash".into(),
+            frame: 2,
+            origin: [10.0, -20.5, 64.25],
+            yaw: -90.0,
+            pitch: 10.0,
+            cg_fov: 65.0,
+            // 65 degrees at 4:3 widened for 16:9.
+            fov_x: 80.69,
+            width: 1280,
+            height: 720,
+            setviewpos: "setviewpos 10.00 -20.50 64.25 -90.00 10.00".into(),
+        }
+    }
+
+    const ROWS: &str = "frame,x,y,z,yaw,pitch,roll,cg_fov,fov_x\n\
+        1,0.00,0.00,64.25,-90.00,10.00,0.00,65.00,80.69\n\
+        2,10.00,-20.50,64.25,-90.00,10.00,0.00,65.00,80.69\n";
+
+    #[test]
+    fn a_screenshot_pose_must_be_its_frames_camera_and_a_setviewpos_line() {
+        assert_eq!(pose_problem(&pose(), "mp_crash", ROWS, 2), None);
+        let p = pose_problem(&pose(), "mp_bog", ROWS, 2).expect("wrong map");
+        assert!(p.contains("mp_bog"), "{p}");
+        let mut wrong_line = pose();
+        wrong_line.setviewpos = "setviewpos 10.00 -20.50 64.25 90.00 10.00".into();
+        assert!(pose_problem(&wrong_line, "mp_crash", ROWS, 2).is_some());
+        let mut wrong_fov = pose();
+        wrong_fov.fov_x = 65.0;
+        assert!(pose_problem(&wrong_fov, "mp_crash", ROWS, 2).is_some());
+        let moved = ROWS.replace("2,10.00,", "2,11.00,");
+        let p = pose_problem(&pose(), "mp_crash", &moved, 2).expect("row differs");
+        assert!(p.contains("not the screenshot's pose"), "{p}");
+        assert!(pose_problem(&pose(), "mp_crash", ROWS, 3).is_some());
+        let still = ROWS.replace("1,0.00,0.00,", "1,10.00,-20.50,");
+        assert!(pose_problem(&pose(), "mp_crash", &still, 2).is_some());
+        assert!(pose_problem(&pose(), "mp_crash", "", 2).is_some());
+    }
 
     fn mode(w: u32, h: u32, hz: u32) -> Mode {
         Mode {

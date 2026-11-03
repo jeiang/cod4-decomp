@@ -135,6 +135,58 @@ fn ellipse(t: f32, mins: Vec3, maxs: Vec3) -> Pose {
     }
 }
 
+/// The camera one frame was drawn with, in the client's own convention: the eye's origin, angles in radians with
+/// pitch negative looking down, and `cg_fov` (degrees at 4:3) beside the horizontal field of view it was widened to
+/// for the frame's shape (radians).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ViewPose {
+    pub origin: Vec3,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub roll: f32,
+    pub cg_fov: f32,
+    pub fov_x: f32,
+}
+
+/// The columns of [`ViewPose::csv_row`] (`frames.pose.csv`).
+pub const POSE_CSV: &str = "frame,x,y,z,yaw,pitch,roll,cg_fov,fov_x";
+
+impl ViewPose {
+    /// The angles as the original prints and takes them (`refdefViewAngles`, `viewpos`, `setviewpos`): degrees, yaw
+    /// within [-180, 180), pitch positive looking down; `[pitch, yaw, roll]`.
+    pub fn stock_angles(&self) -> [f32; 3] {
+        let yaw = (self.yaw.to_degrees() + 180.0).rem_euclid(360.0) - 180.0;
+        [-self.pitch.to_degrees(), yaw, self.roll.to_degrees()]
+    }
+
+    /// The original's console line that puts its camera here (a cheat: `sv_cheats 1`). `setviewpos x y z yaw pitch`
+    /// takes the eye, for it lowers the origin by the player's view height before it moves the player
+    /// (`Cmd_SetViewpos_f`, KisakCOD game_mp/g_cmds_mp.cpp:1109), and the stock angles. Roll has no argument.
+    pub fn setviewpos(&self) -> String {
+        let [pitch, yaw, _] = self.stock_angles();
+        let o = self.origin;
+        format!(
+            "setviewpos {:.2} {:.2} {:.2} {yaw:.2} {pitch:.2}",
+            o.x, o.y, o.z
+        )
+    }
+
+    /// One row of `frames.pose.csv` ([`POSE_CSV`]): the frame's number, then the eye, the stock angles in degrees,
+    /// `cg_fov` and the drawn horizontal field of view in degrees.
+    pub fn csv_row(&self, frame: usize) -> String {
+        let [pitch, yaw, roll] = self.stock_angles();
+        let o = self.origin;
+        format!(
+            "{frame},{:.2},{:.2},{:.2},{yaw:.2},{pitch:.2},{roll:.2},{:.2},{:.2}",
+            o.x,
+            o.y,
+            o.z,
+            self.cg_fov,
+            self.fov_x.to_degrees()
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,5 +234,24 @@ mod tests {
             let p = tour.pose(i as f32 * 0.5);
             assert!(p.origin.cmpge(mins).all() && p.origin.cmple(maxs).all());
         }
+    }
+
+    #[test]
+    fn a_pose_is_written_in_the_originals_angles() {
+        let p = ViewPose {
+            origin: Vec3::new(10.0, -20.5, 64.25),
+            yaw: 270f32.to_radians(),
+            pitch: (-10f32).to_radians(),
+            roll: 0.0,
+            cg_fov: 65.0,
+            fov_x: 80f32.to_radians(),
+        };
+        // Yaw wraps into the stock range; a camera looking down has a positive stock pitch.
+        assert_eq!(p.setviewpos(), "setviewpos 10.00 -20.50 64.25 -90.00 10.00");
+        assert_eq!(
+            p.csv_row(7),
+            "7,10.00,-20.50,64.25,-90.00,10.00,0.00,65.00,80.00"
+        );
+        assert_eq!(POSE_CSV.split(',').count(), p.csv_row(0).split(',').count());
     }
 }

@@ -1915,7 +1915,11 @@ impl Server {
                 "console" => {
                     json!({"lines": self.log.iter().rev().take(256).rev().collect::<Vec<_>>()})
                 }
-                "script" => json!({"errors": self.all_script_errors}),
+                // The frag suicides beside the errors: a stock `ch_kills` error stands for one (#539, #557).
+                "script" => json!({
+                    "errors": self.all_script_errors,
+                    "frag_suicides": self.game.stats.frag_suicides,
+                }),
                 "net" => {
                     let s = self.net_stats();
                     json!({

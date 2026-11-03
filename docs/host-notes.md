@@ -19,6 +19,9 @@ tooling fact, or a flake's status changes, update this file in the same PR.
     `client_mp`, `server_mp` and `ui_mp`, effects under `EffectsCore` (names are case-sensitive). `grep -rn` over a
     directory works through `bash -s`.
   - `bin/`: GC-rooted tools: `chromium` (`just chromium-install`), `python3`, `slot-guard` (`just slot-guard-install`).
+    Without `bin/chromium` (or one on `PATH`) a harness run that selects a web-* stage, the default suite included,
+    refuses to start with exit 78 naming `just chromium-install`, unless `--allow-skip` names every such stage (#558).
+    An unrooted Chromium in the Nix store is never used.
   - `slot-1` to `slot-3`: each slot's own cargo target dir. `slot-guard/`: the leases.
   - `run-<mac host>-<pid>`: one directory per `remote-linux.sh` run, removed when the run ends. An interrupted run
     leaves its directory behind.
@@ -60,10 +63,16 @@ Every recipe ships the named ref (`git archive`, so uncommitted changes are not 
 | `just slot-full <n> <ref> <stages>` | the checks, then the stages in slot n | PR evidence: the checks and the stages |
 | `just slot-exec <n> <ref> <cmd...>` | release binaries on PATH, cwd the checkout, `out/` copied back | whatever the command checks |
 | `just serial <ref> [stages]` | the checks, then the stages (the default suite when empty) with the host to itself | timing-gated stages |
+| `just serial-log <ref> [stages]` | `just serial`, with the whole output and exit status kept in `bundles/serial-logs/` (`COD4E_LINUX_CHECKS=1` adds the checks) | as `serial`; the log is the evidence |
 
 `just stages-for [base] [head]` prints the stages a diff can affect, from `scripts/stage-map.txt` (a shared file or
 an unmapped path gives the whole default suite; an engine crate adds the timing set), for example
 `just slot 1 HEAD "$(just stages-for)"`.
+
+`just merge-pr <n> <sha>` merges PR n only when its head is `sha`, `windows` and every other check passed and it is
+MERGEABLE. It prints the diff stat and deleted files first, and is a dry run unless `CONFIRM=yes`: read the deletions
+before a confirmed run. `just review-delta <n> <old>` shows what the PR's own change gained since the reviewed head
+`old`, with merges from main left out.
 
 - A `slot` bundle does not show that test, clippy or fmt pass. Only `slot-full`, `remote` and `serial` run them
   (`COD4E_LINUX_CHECKS=0` skips them).
@@ -84,17 +93,20 @@ an unmapped path gives the whole default suite; an engine crate adds the timing 
   file the coordinator names, without printing it. A guarded run whose token does not hold the lease is refused with
   exit status 75 (no lease, wrong token, or a run already live in that slot); a second run under the same lease is
   refused, not queued. A slot run with no token bypasses the guard: only `host-run.sh`'s slot lock keeps it apart.
-- `just host-status` shows the pending serial run, the slots, the leases, harness processes, VRAM, the model servers
-  and disk.
+- `just host-status` shows the pending serial run, the slots, the leases, the registered host runs (oldest first,
+  with state and options), harness processes, VRAM, the model servers and disk.
 - `host-run.sh` locks:
   - A slot run holds `.slot-<n>.lock` from its build on.
   - Every run holds `.stage-lock` shared from its build on. A serial run then takes it exclusively for its stages, so
     no stage and no compile runs beside them.
   - A serial run writes its PID to `.serial-pending` while it waits and runs. No new run starts its build while that
-    marker names a live process. Serial runs queue on `.serial-queue.lock`.
-  - Every wait is bounded at 1800 s (current; #561 changes this). After that the run prints `timed out waiting for
-    <lock>` with the lock holders and exits 1, and nothing is retried. A serial run takes 14 to 42 min, so do not
-    queue a run behind one that will not finish within 30 min. Chain serial runs in one command instead.
+    marker names a live process. Serial runs queue on `.serial-queue.lock` and start in registration order.
+- Host runs queue (#561). Each run registers in `~/Projects/cod4e/queue/`. A waiting run prints what it waits on and
+  `queue position <k> of <m>` with each run ahead, at once and every `COD4E_HOST_WAIT_REPORT` s (300). It gives up
+  only after `COD4E_HOST_WAIT_TIMEOUT` s of waiting (21600; `0` = no bound; build and test time do not count): exit
+  76, `host-run: gave up after <n>s waiting for <what> …`, repeated last by `remote-linux.sh` as `remote: host run
+  gave up waiting: …`. Nothing ran after that point; rerun it. A queued guarded slot run keeps its lease busy while it
+  waits. Refs older than the queue still drop a run after 1800 s (`timed out waiting for <lock>`, exit 1).
 
 ## Logs and bundles
 
@@ -141,13 +153,11 @@ message), is a real failure. `N` and `M` stand for any number. "Reason" is the s
 
 | Signature | Stage(s) | Issue | Owner | Slot reruns | Serial reruns | Remove when |
 |---|---|---|---|---|---|---|
-| Log: `script runtime error: cannot cast undefined to bool` in `_missions::ch_kills` line 545, with `script error on the listen server` for the same error (a bot killed by its own frag). The #539 allowance covers it only in client-match | client-gfx | #557 | author of #557's fix PR | 1 | 1 | #557 fixed |
 | Reason: `effect names missing: ` with an empty name, `net.fx.missing` `[""]` (a `play_fx` before its effect name reached the client) | client-match | #553 | author of #556 | 0 (timing set) | 1 | #556 merged |
 | Reason: `bullet_impact_noblood played 3 times since the mark, want 1` (before #542: `fx:bullet_impact_noblood is +3`); live bots' flesh hits inside the 1 s blood window | client-gfx | #553, fixed by #556 | author of #556 | 1 | 1 | #556 merged |
 | Reason: `shell_eject played N times since the mark, want 0` (before #542: `cgis=fx:shell_eject 0` returned N) | client-gfx | #511 (fixed by #513) | the coordinator's 10-run confirmation of #511 | 1 | 1 | 10 consecutive runs pass and #511 closes |
 | Log: `the window's surface gave no frame outcome=Validation` | client-gfx | #511 (fixed by #510) | the coordinator's 10-run confirmation of #511 | 1 | 1 | 10 consecutive runs pass and #511 closes |
 | Reason: `N of the M other players the server announced were ever drawn` | client-commands | #511 (fixed by #513) | the coordinator's 10-run confirmation of #511 | 1 | 1 | 10 consecutive runs pass and #511 closes |
-| Skipped: `no Chromium found (set COD4E_CHROME)` | web-client, web-join, web-download, web-match | #558 | the coordinator | 0 | 0 | #558 fixed. This is a skip, not a flake: reruns 0, fix the host (`just chromium-install`) |
 
 Fixed and closed, for reference: `ExecutableFileBusy` (ETXTBSY) in the harness's `cargo test` (#538, fixed by #543).
 Reported once and not filed: net-match `0 of 300 prediction passes clear`, possibly host load. If it recurs, file it

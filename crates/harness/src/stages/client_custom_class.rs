@@ -2,9 +2,9 @@
 //! `client-custom-class`: a person with a saved profile builds a custom class in the menus and plays from it, driven
 //! through the control channel with the player's own pointer, keys and console (#376). Typed at the console, custom
 //! class 5 is named `P90` (`customclass5`, as players rename classes). Create a Class > custom slot 5 > Primary
-//! Weapon > Sub Machine Guns is walked in the stock menus; the P90 row there does not open its attachment popup on
-//! this client, so the class's P90, no attachment and Special Grenades as perk 1 are typed `statset` fixtures, as is
-//! the experience (a stat no menu writes). The profile's stats (read back with `statGetInDvar`, as a player would)
+//! Weapon > Sub Machine Guns > P90 is walked in the stock menus: the P90 row's click sets the class's P90 with no
+//! attachment and must open the SMG attachment popup. Special Grenades as perk 1 is typed as a `statset` fixture, as
+//! is the experience (a stat no menu writes). The profile's stats (read back with `statGetInDvar`, as a player would)
 //! must hold the class. The stats reach the server before the person begins, so the class loadout holds the P90, the
 //! perk and experience survive the join (the server's stand-ins are never taken for news), a class change in the first
 //! seconds of a round applies at once, and every other player the server announces is drawn. Needs a display and the
@@ -22,16 +22,17 @@ use std::time::{Duration, Instant};
 
 const NAME: &str = "client-custom-class";
 
-/// Custom class 5 (its stats start at 240): the P90's row of the stats table as the primary weapon (`stat + 1`), no
-/// attachment (`stat + 2`) and Special Grenades x 3 as perk 1 (`stat + 5`; the join once replaced it with a stand-in),
-/// typed as fixtures (see the exception in [`build_class`]). The experience (`2301`) has no menu, so the stage types it.
+/// Custom class 5 (its stats start at 240): the P90's row of the stats table as the primary weapon (`stat + 1`) and no
+/// attachment (`stat + 2`), both set by the P90 row's click in the SMG popup, and Special Grenades x 3 as perk 1
+/// (`stat + 5`; the join once replaced it with a stand-in), typed as a fixture (see the exception in [`build_class`]).
+/// The experience (`2301`) has no menu, so the stage types it.
 const PRIMARY: (u32, i64) = (241, 14);
 const ATTACHMENT: (u32, i64) = (242, 0);
 const PERK1: (u32, i64) = (245, 176);
 const EXPERIENCE: (u32, i64) = (2301, 5000);
 
 /// The localize keys of the menu items the stage clicks that have no name of their own.
-const KEYS: [&str; 1] = ["MPUI_SUB_MACHINE_GUNS"];
+const KEYS: [&str; 2] = ["MPUI_SUB_MACHINE_GUNS", "WEAPON_P90"];
 
 /// The install's localized strings for `keys` (without `@`), read from its own zones as the menus read them (the
 /// localized zones of `ui::assets::UI_ZONES`, a later zone's string replacing an earlier one's), so a check finds a
@@ -273,11 +274,16 @@ fn build_class(c: &mut Driven, text: &HashMap<String, String>) -> Result<(), Str
         )?;
         open_by(c, "SMG", t("MPUI_SUB_MACHINE_GUNS"), "sniper_popup_cac_smg")
     })?;
-    // EXCEPTION (#376): on this client the P90 row of the SMG popup does not open its attachment popup when clicked
-    // (a client bug to file), so the menu path ends at the SMG popup and the class's P90, no attachment and Special
-    // Grenades as perk 1 are typed as `statset` fixtures, with no camouflage left as the profile has it. Escape closes
-    // the popups the way a player backs out.
-    c.step("the P90 class, typed", |c| {
+    // The stock P90 row is a live button only once the profile unlocks the P90 (bit 0 of stat 3014); its click sets
+    // the class's primary weapon and attachment and runs `openMenuOnDvar selected_weapon_class SMG
+    // sniper_attachment_popup_SMG` (#537).
+    c.step("primary weapon: P90", |c| {
+        open_by(c, "", t("WEAPON_P90"), "sniper_attachment_popup_smg")
+    })?;
+    // EXCEPTION (#376): the menu path ends at the attachment popup, so Special Grenades as perk 1 is typed as a
+    // `statset` fixture, with no camouflage left as the profile has it. Escape closes the popups the way a player
+    // backs out.
+    c.step("perk 1, typed", |c| {
         for _ in 0..6 {
             let open = c.lookup("menu.open")?;
             let top = open
@@ -291,10 +297,7 @@ fn build_class(c: &mut Driven, text: &HashMap<String, String>) -> Result<(), Str
             c.pause(Duration::from_millis(500))?;
         }
         until_top(c, HOME, Duration::from_secs(5))?;
-        for (index, value) in [PRIMARY, ATTACHMENT, PERK1] {
-            c.console(&format!("statset {index} {value}"))?;
-        }
-        Ok(())
+        c.console(&format!("statset {} {}", PERK1.0, PERK1.1))
     })?;
     c.step("custom class 5 holds the P90 class", |c| {
         stat_is(c, PRIMARY, "the primary weapon")?;
@@ -389,7 +392,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             out.reason = Some(w);
         }
         None => out.notes.push(
-            "walked Create a Class to custom slot 5's SMG popup, typed the P90 class (the P90 row opens no attachment popup on this client), spawned with its P90, kept the profile's perk and experience, changed class in the grace period and saw the other players"
+            "walked Create a Class to custom slot 5's SMG popup, picked the P90 (its attachment popup opened), typed perk 1, spawned with its P90, kept the profile's perk and experience, changed class in the grace period and saw the other players"
                 .into(),
         ),
     }

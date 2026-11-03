@@ -83,6 +83,13 @@ pub mod cs {
     pub const MINIMAP: u16 = 823;
     pub const MODELS: u16 = 830;
     pub const MODELS_COUNT: u16 = 512;
+    /// Sound aliases entities loop (`playloopsound`, an entity's `loop_sound`), as stock's `CS_SOUNDALIASES`.
+    pub const SOUND_ALIASES: u16 = 1342;
+    pub const SOUND_ALIASES_COUNT: u16 = 256;
+    /// Effects `loadfx` registered, named in the gamestate before any snapshot plays them, as stock's
+    /// `CS_EFFECT_NAMES` (KisakCOD `cgame_mp/cg_main_mp.cpp` `CG_RegisterGraphics`).
+    pub const EFFECT_NAMES: u16 = 1598;
+    pub const EFFECT_NAMES_COUNT: u16 = 100;
     /// Menus registered with `precachemenu`.
     pub const SCRIPT_MENUS: u16 = 1970;
     pub const SCRIPT_MENUS_COUNT: u16 = 32;

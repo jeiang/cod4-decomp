@@ -1269,7 +1269,8 @@ fn earthquake(g: &mut Game, _: &mut Vm, a: Args) -> R {
 /// `loadfx(name)`: `Scr_LoadFX` (KisakCOD `game_mp/g_scr_main_mp.cpp:4094`). The name is under `fx/`, given
 /// without the folder. A new one registers only while the level initializes: after that `G_EffectIndex`
 /// (`game_mp/g_utils_mp.cpp:338`) finds only a loaded one, and its `G_FindConfigstringIndex` (`:120-127`) raises
-/// `effect "<name>" not precached` before `Scr_LoadFX`'s own error, which only an empty name reaches. A name the
+/// `effect "<name>" not precached` before `Scr_LoadFX`'s own error, which only an empty name reaches. The name is a
+/// `cs::EFFECT_NAMES` configstring, so the gamestate names every effect before a snapshot plays one. A name the
 /// zones lack registers (the client draws nothing for it) and is warned about.
 fn load_fx(g: &mut Game, _: &mut Vm, a: Args) -> R {
     let n = a.string(0)?;
@@ -1290,7 +1291,7 @@ fn load_fx(g: &mut Game, _: &mut Vm, a: Args) -> R {
                 "effect is not in the loaded zones"
             );
         }
-        id = g.fx.index(n);
+        id = usize::from(g.precache(Table::Fx, n)?);
     }
     if id == 0 && !g.level.initializing {
         return Err("loadFx must be called before any wait statements in the level script, or on an already loaded effect\n".into());
@@ -1316,7 +1317,7 @@ fn warn_missing_asset(g: &mut Game, builtin: &str, table: Table, name: &str) {
     let missing = match table {
         Table::Material => !g.content.material_defined(name),
         Table::Menu => !g.content.menu_exists(name),
-        Table::Model | Table::Text => false,
+        Table::Model | Table::Text | Table::Fx | Table::Sound => false,
     };
     if missing && !name.is_empty() {
         logging::dedup!(
@@ -2208,6 +2209,27 @@ mod precache_tests {
         let err = call(load_fx, &mut g, &mut vm, "loadfx", "").unwrap_err();
         assert!(err.contains("loadFx must be called"), "{err}");
         assert_eq!(g.fx.find("smoke/logtest_late"), 0);
+    }
+
+    #[test]
+    fn loadfx_names_each_effect_in_its_configstring_up_to_the_stock_limit() {
+        let (mut g, mut vm) = setup(true);
+        let _ = logging::capture(|| {
+            for n in 1..net::ui::cs::EFFECT_NAMES_COUNT {
+                let name = format!("misc/fx_{n}");
+                let id = call(load_fx, &mut g, &mut vm, "loadfx", &name).unwrap();
+                assert!(matches!(id, Value::Int(i) if i == i32::from(n)));
+                assert_eq!(
+                    g.configstrings
+                        .get(&u32::from(net::ui::cs::EFFECT_NAMES + n)),
+                    Some(&name),
+                    "the gamestate names effect {n}"
+                );
+            }
+            let err = call(load_fx, &mut g, &mut vm, "loadfx", "misc/one_too_many").unwrap_err();
+            assert!(err.contains("too many effects"), "{err}");
+        });
+        assert_eq!(g.fx.find("misc/one_too_many"), 0);
     }
 
     #[test]

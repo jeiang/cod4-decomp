@@ -79,7 +79,9 @@
               pkgs.sway
               pkgs.iproute2
               pkgs.pulseaudio
-            ];
+            ]
+            # scripts/host-run.test.py: the Linux host's flock comes from util-linux.
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ pkgs.flock ];
             LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux (pkgs.lib.makeLibraryPath (windowLibs ++ [ pkgs.udev pkgs.alsa-lib ]));
             # ALSA's PulseAudio plugin, which scripts/virtual-audio.sh points the client's default ALSA device at.
             COD4E_ALSA_PLUGINS = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux "${pkgs.alsa-plugins}/lib/alsa-lib";

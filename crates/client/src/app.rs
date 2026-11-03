@@ -418,6 +418,12 @@ struct State {
     /// Effect meshes in the last frame played on a server; the screenshot waits for some.
     fx_in_view: usize,
     shot_ok: bool,
+    /// Per frame, parallel to `samples`: the camera it was drawn with (`frames.pose.csv`).
+    poses: Vec<flythrough::ViewPose>,
+    /// The camera of the frame being drawn.
+    view_pose: flythrough::ViewPose,
+    /// The `--screenshot` frame's number (index into `samples`) and camera: `pose` in `client.json` (#431).
+    shot_pose: Option<(usize, flythrough::ViewPose)>,
     notes: Vec<String>,
     present_mode: wgpu::PresentMode,
     /// `r_aspectRatio`: the screen's shape, if the menu chose one.
@@ -1121,6 +1127,9 @@ impl Viewer {
             shot_taken: false,
             fx_in_view: 0,
             shot_ok: false,
+            poses: Vec::new(),
+            view_pose: flythrough::ViewPose::default(),
+            shot_pose: None,
             notes,
             present_mode,
             aspect: None,
@@ -1999,6 +2008,14 @@ impl Viewer {
             fov_x,
             time: t,
         };
+        st.view_pose = flythrough::ViewPose {
+            origin: st.pos,
+            yaw: st.yaw,
+            pitch: st.pitch,
+            roll: st.roll,
+            cg_fov: cg_fov(&st.input),
+            fov_x,
+        };
         let surface_view = frame.texture.create_view(&Default::default());
         let size = (st.config.width, st.config.height);
         // `r_gamma` maps the whole picture, as the original's display ramp does: that ramp works only in full screen
@@ -2175,7 +2192,10 @@ impl Viewer {
                 st.config.format,
                 &out.join("screenshot.png"),
             ) {
-                Ok(_) => st.shot_ok = true,
+                Ok(_) => {
+                    st.shot_ok = true;
+                    st.shot_pose = Some((st.samples.len(), st.view_pose));
+                }
                 Err(e) => {
                     tracing::error!(error = %e, "screenshot failed");
                     st.notes.push(format!("screenshot failed: {e}"));
@@ -2264,6 +2284,7 @@ impl Viewer {
             st.rss = rss();
         }
         st.samples.push([cpu_ms, interval, st.rss as f64]);
+        st.poses.push(st.view_pose);
         let c = st.prev_cost;
         let l = st.laps;
         let lap = |i: usize| {
@@ -2575,6 +2596,39 @@ impl Viewer {
             writeln!(ph, "{}", row.join(",")).map_err(|e| e.to_string())?;
         }
         ph.flush().map_err(|e| e.to_string())?;
+        // The camera of each frame, same rows as `frames.raw.csv`: the pose any frame of the video was drawn from.
+        let mut po = std::io::BufWriter::new(
+            std::fs::File::create(out.join("frames.pose.csv")).map_err(|e| e.to_string())?,
+        );
+        writeln!(po, "{}", flythrough::POSE_CSV).map_err(|e| e.to_string())?;
+        for (i, p) in st.poses.iter().enumerate().skip(1) {
+            writeln!(po, "{}", p.csv_row(i)).map_err(|e| e.to_string())?;
+        }
+        po.flush().map_err(|e| e.to_string())?;
+        let map = if st.map_name.is_empty() {
+            self.cli.map.as_str()
+        } else {
+            st.map_name.as_str()
+        };
+        // The screenshot's camera, as the original takes it: `setviewpos` (eye and stock angles) and `cg_fov`, at the
+        // same frame shape (Hor+ widens `cg_fov` for it as the original's `r_aspectRatio auto` does).
+        let pose = st.shot_pose.map(|(frame, p)| {
+            let [pitch, yaw, roll] = p.stock_angles();
+            json!({
+                "map": map,
+                "frame": frame,
+                "fly_at": self.cli.fly_at,
+                "origin": [p.origin.x, p.origin.y, p.origin.z],
+                "yaw": yaw,
+                "pitch": pitch,
+                "roll": roll,
+                "cg_fov": p.cg_fov,
+                "fov_x": p.fov_x.to_degrees(),
+                "width": st.config.width,
+                "height": st.config.height,
+                "setviewpos": p.setviewpos(),
+            })
+        });
         let video = match st.recorder.take() {
             Some(r) => {
                 let s = r.finish(&st.gpu.device).map_err(|e| e.to_string())?;
@@ -2628,6 +2682,7 @@ impl Viewer {
             "precache": precache,
             "video": video,
             "screenshot": st.shot_ok.then_some("screenshot.png"),
+            "pose": pose,
             "zone_load_ms": self.load_ms,
             "world": {"surfaces_drawn_p50": drawn.get(drawn.len() / 2)},
             "showcase": st.showcase.as_ref().map(Showcase::report),
