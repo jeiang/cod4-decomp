@@ -46,7 +46,7 @@ Every request is an object with an optional `id` (echoed back) and a `cmd`:
 | `mouse {x,y}` / `{dx,dy}` / `button` / `wheel` | move the pointer, look, click, scroll |
 | `exec line` | run a console line as Enter does |
 | `dev {op, arg}` | run one of the client's dev hooks (below): scenario setup no key or menu of the player's reaches |
-| `viewpos {origin,angles}` | place the camera (`setviewpos`) |
+| `viewpos {origin,angles}` | move the client's own camera; outside a match it stays (`held` true), in a match the server's position and the player's aim replace it on the next frame (`held` false), so it is not stock `setviewpos` |
 | `capture [dir] [base64] [after]` | save the frame on screen as a PNG, after it is drawn; `"after":"distortion"` saves the first frame from now that copied the scene for a distortion material, or fails after 10 s |
 | `wait {state, timeout_ms}` | answer when the state document matches (or the clock runs out: `ok` false with `observed`) |
 | `assert {state}` | one look: `ok` false unless the state matches now |
@@ -205,3 +205,40 @@ uses the mouse-driven walker in the match. Key-only turning uses slower configur
 and feedback pulses: each channel request crosses a rendered frame, so the original 140-degree/second keys would
 overshoot a small aiming error before the key-up even arrived. The stage's notes say which match path ran and what
 the client reported about focus and pointer lock.
+
+## What a stage can rely on
+
+Facts the stages depend on that are easy to get wrong. Each is the code on main.
+
+- **The reply.** Every reply is `{"id", "ok", "error"?}` plus the answer (`crates/devctrl/src/protocol.rs`). An
+  answer that is an object has its fields spread into the reply (`state` answers `{"id":…, "ok":true, "player":{…}}`);
+  any other answer is under `value`. A `wait` that runs out answers `ok:false, timeout:true` with what it last
+  `observed` (`crates/client/src/control/host.rs` `wait`, `crates/server/src/control.rs` for the server).
+- **The server shapes differ.** A listen server's `{"cmd":"server","op":"state","what":"clients"}` answers the
+  section spread into the reply, so the list is `r["clients"]`. The dedicated server's `state` with `what:"clients"`
+  answers it under the section's name, so the list is `r["clients"]["clients"]`. A `--connect` client has no listen
+  server: `state server` is `null` and a `server` request fails.
+- **Parts.** `state` with no `what` (or its aliases `part` and `of`) answers the default sections: `client`, `menu`,
+  `player`, `entities`, `scoreboard`, `hud`, `draw`, `render`, `sound`, `fx`, `events`, `net`, `console`, `cvars`,
+  `binds`, `view`, `look` and `watch` (`PARTS` in `crates/client/src/control/mod.rs`). `wait` and `assert` always match
+  against those sections only, so a `report.…`, `gfx.…`, `cgame.…` or `server.…` path is null inside them and such a
+  `wait` can only time out. Read those sections with `state` and `what` set to their name (`Driven::state`,
+  `Driven::lookup`). `report` is what the run saw, the same object the client writes to its report: a check of the
+  whole run reads it. The match sections are `null` before the client is in a match.
+- **Reading is read-only.** No `state`, `wait` or `capture` changes the game; a stage that needs the game in a state
+  gets there by the player's path or a named dev hook.
+- **Acknowledged is not done.** `exec` acknowledges every line, and `Driven::console` returning `Ok` means the line
+  was typed and the console closed. Neither says the command worked: read its effect from the state document. The
+  `cvar` request with a `value` sets the dvar directly (as `set` does), so it does not prove that typing works.
+- **Menus.** `menu.open` is the stack, bottom first: the front end's home is `["main", "main_text"]`, and its buttons
+  are in `main_text`. Compare the last entry, without case (`until_top` and `HOME` in `client_custom_class.rs`).
+  `Start New Server` leaves `createserver` on top. While a menu or the console is open, keys go to it and not to the
+  binds: close it before a bind test.
+- **The prematch.** The player spawns before the prematch countdown ends, and the countdown freezes every player's
+  controls while `player.weapons_enabled` stays true. It is not a readiness signal: wait for what the step needs
+  (the server's `playing` count, a HUD element drawn, a fire that consumed ammunition).
+- **Exit.** `Driven::finish` sends `quit`, so a stage that must prove the player's own Quit closed the client uses
+  `Driven::wait_exit`, which sends nothing.
+- **One observation.** A fact made of several values (team, round and score after a round) is read in one `wait` or
+  `state`, not in several requests between which the game moves on.
+- **`--autoplay`** drives the player from inside the client. A stage using it cannot prove a bind or a menu route.

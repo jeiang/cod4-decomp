@@ -9,6 +9,9 @@
 //! `game["attackers"]`) swap after rounds one and two, not after the last: the objective text the server sets on the
 //! client (`cg_objectiveText`, `updateObjectiveText`) names the other role in round two and the first one again in
 //! round three. The team survives into the final scoreboard. Needs a display and the install; skips without.
+//!
+//! A fact made of several values (the intermission, the scoreboard menu, its rows and the player's team) is matched in
+//! one `wait`: between separate reads the level can rotate and the player becomes the next map's spectator.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
 use super::client_session::{gpu_problem, render_problem, steps_problem};
