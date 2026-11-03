@@ -60,10 +60,16 @@ Every recipe ships the named ref (`git archive`, so uncommitted changes are not 
 | `just slot-full <n> <ref> <stages>` | the checks, then the stages in slot n | PR evidence: the checks and the stages |
 | `just slot-exec <n> <ref> <cmd...>` | release binaries on PATH, cwd the checkout, `out/` copied back | whatever the command checks |
 | `just serial <ref> [stages]` | the checks, then the stages (the default suite when empty) with the host to itself | timing-gated stages |
+| `just serial-log <ref> [stages]` | `just serial`, with the whole output and exit status kept in `bundles/serial-logs/` (`COD4E_LINUX_CHECKS=1` adds the checks) | as `serial`; the log is the evidence |
 
 `just stages-for [base] [head]` prints the stages a diff can affect, from `scripts/stage-map.txt` (a shared file or
 an unmapped path gives the whole default suite; an engine crate adds the timing set), for example
 `just slot 1 HEAD "$(just stages-for)"`.
+
+`just merge-pr <n> <sha>` merges PR n only when its head is `sha`, `windows` and every other check passed and it is
+MERGEABLE. It prints the diff stat and deleted files first, and is a dry run unless `CONFIRM=yes`: read the deletions
+before a confirmed run. `just review-delta <n> <old>` shows what the PR's own change gained since the reviewed head
+`old`, with merges from main left out.
 
 - A `slot` bundle does not show that test, clippy or fmt pass. Only `slot-full`, `remote` and `serial` run them
   (`COD4E_LINUX_CHECKS=0` skips them).
