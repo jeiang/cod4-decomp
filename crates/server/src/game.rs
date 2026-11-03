@@ -437,8 +437,9 @@ pub struct Game {
     pub models: Precache,
     pub shaders: Precache,
     pub strings: Precache,
+    /// Effects `loadfx` registered; clients learn the names from the `cs::EFFECT_NAMES` configstrings.
     pub fx: Precache,
-    /// Sound aliases named by `playloopsound`; clients learn the names in `sndname` commands.
+    /// Sound aliases named by `playloopsound`; clients learn the names from the `cs::SOUND_ALIASES` configstrings.
     pub sounds: Precache,
     pub items: Precache,
     pub menus: Precache,
@@ -869,6 +870,9 @@ impl Game {
         });
         self.set_configstring(cs::AMBIENT, &ambient);
         self.set_configstring(cs::MESSAGE, get(world, "message").unwrap_or(""));
+        // `SP_worldspawn` (KisakCOD `game_mp/g_spawn_mp.cpp:646`): the message of the day, read at each level spawn.
+        let motd = self.cvars.string("g_motd").to_owned();
+        self.set_configstring(cs::MOTD, &motd);
         self.cvars
             .force("g_gravity", get(world, "gravity").unwrap_or("800"));
         let north = get(world, "northyaw").unwrap_or("");

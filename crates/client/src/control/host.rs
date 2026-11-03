@@ -27,6 +27,9 @@ pub trait Control {
     /// The state document, narrowed to `what` when it names a part.
     fn state(&mut self, what: Option<&str>) -> Value;
 
+    /// The listen server's full state document. `None` until that server answers between its own frames.
+    fn server_state(&mut self, seq: u64) -> Option<Result<Value, String>>;
+
     /// The keys bound to `command` (`+forward`, `togglemenu`).
     fn binds_of(&self, command: &str) -> Vec<String>;
 
@@ -41,9 +44,19 @@ pub trait Control {
     /// Runs one console line as Enter does: echoed, then executed.
     fn exec(&mut self, line: &str);
 
-    /// Saves the frame on screen. `dir` overrides the run's output directory. `None` while not between frames: a
-    /// capture is taken after the next present, so the request waits.
-    fn capture(&mut self, dir: Option<&str>, base64: bool) -> Option<Result<Value, String>>;
+    /// Saves the frame on screen. `dir` overrides the run's output directory. With `distortion`, the frame saved is the
+    /// first one from now that copied the scene for a distortion material, and the request fails when none does within
+    /// a few seconds. `None` while not between frames: a capture is taken after the next present, so the request waits.
+    fn capture(
+        &mut self,
+        dir: Option<&str>,
+        base64: bool,
+        distortion: bool,
+    ) -> Option<Result<Value, String>>;
+
+    /// Runs one of the client's dev hooks by name with its argument (`dlight` `1`, `shock` `8000`, `losedevice`):
+    /// scenario setup no key or menu of the player's reaches.
+    fn dev(&mut self, op: &str, arg: &str) -> Result<Value, String>;
 
     /// Places the camera (`setviewpos`): the player's own origin, and angles in degrees.
     fn view(&mut self, origin: Option<[f32; 3]>, angles: Option<[f32; 3]>)
@@ -65,9 +78,38 @@ pub trait Control {
 pub fn handle<H: Control + ?Sized>(h: &mut H, req: &Request) -> Outcome {
     match req.cmd.as_str() {
         "capture" => {
-            return match h.capture(req.str("dir"), req.bool("base64").unwrap_or(false)) {
+            let distortion = match req.str("after") {
+                None => false,
+                Some("distortion") => true,
+                Some(other) => {
+                    return Outcome::Done(reply(
+                        &req.id,
+                        Err(format!(
+                            "capture after {other:?}: only \"distortion\" is known"
+                        )),
+                    ));
+                }
+            };
+            return match h.capture(
+                req.str("dir"),
+                req.bool("base64").unwrap_or(false),
+                distortion,
+            ) {
                 None => Outcome::Wait,
                 Some(r) => Outcome::Done(reply(&req.id, r)),
+            };
+        }
+        "state"
+            if req
+                .str("what")
+                .or_else(|| req.str("part"))
+                .or_else(|| req.str("of"))
+                == Some("server") =>
+        {
+            let id = req.id.clone();
+            return match h.server_state(req.seq) {
+                None => Outcome::Wait,
+                Some(r) => Outcome::Done(reply(&id, r.map(|server| json!({"server": server})))),
             };
         }
         "wait" => return wait(h, req),
@@ -208,6 +250,10 @@ fn answer<H: Control + ?Sized>(h: &mut H, req: &Request) -> Result<Value, String
             let line = req.str("line").ok_or("exec needs the line")?;
             h.exec(line);
             Ok(json!({"line": line}))
+        }
+        "dev" => {
+            let op = req.str("op").ok_or("dev needs an op")?;
+            h.dev(op, req.str("arg").unwrap_or(""))
         }
         "viewpos" => {
             let origin = vec3(req.value("origin"));
@@ -477,7 +523,10 @@ mod tests {
         events: Vec<InputEvent>,
         lines: Vec<String>,
         captured: usize,
+        /// The `distortion` flag of each capture asked for.
+        gated: Vec<bool>,
         waited: u64,
+        server_calls: usize,
         steps: u64,
         quit: bool,
     }
@@ -504,6 +553,10 @@ mod tests {
                 Some(w) => json!({w: doc.get(w).cloned().unwrap_or(Value::Null)}),
             }
         }
+        fn server_state(&mut self, _: u64) -> Option<Result<Value, String>> {
+            self.server_calls += 1;
+            (self.server_calls > 1).then(|| Ok(json!({"clients": {"clients": [1, 2, 3, 4]}})))
+        }
         fn binds_of(&self, command: &str) -> Vec<String> {
             match command {
                 "+forward" => vec!["w".to_owned()],
@@ -523,9 +576,24 @@ mod tests {
         fn exec(&mut self, line: &str) {
             self.lines.push(line.to_owned());
         }
-        fn capture(&mut self, _: Option<&str>, _: bool) -> Option<Result<Value, String>> {
+        fn capture(
+            &mut self,
+            _: Option<&str>,
+            _: bool,
+            distortion: bool,
+        ) -> Option<Result<Value, String>> {
             self.captured += 1;
+            self.gated.push(distortion);
             Some(Ok(json!({"path": "out/shot.png"})))
+        }
+        fn dev(&mut self, op: &str, arg: &str) -> Result<Value, String> {
+            match op {
+                "dlight" | "shock" => {
+                    self.lines.push(format!("dev {op} {arg}"));
+                    Ok(json!({"op": op}))
+                }
+                _ => Err(format!("no dev hook {op}")),
+            }
         }
         fn view(
             &mut self,
@@ -600,6 +668,21 @@ mod tests {
         let filtered = run(&mut f, r#"{"id":5,"cmd":"cvars","filter":"fov"}"#);
         assert_eq!(filtered["cg_fov"], json!("80"));
         assert_eq!(filtered["in_mouse"], Value::Null);
+    }
+
+    #[test]
+    fn server_state_waits_for_the_listen_server_and_names_its_section() {
+        let mut f = Fake::default();
+        let line = r#"{"id":1,"cmd":"state","what":"server"}"#;
+        assert_eq!(run(&mut f, line)["wait"], json!(true));
+        let reply = run(&mut f, line);
+        assert_eq!(reply["ok"], json!(true));
+        assert_eq!(
+            reply["server"]["clients"]["clients"]
+                .as_array()
+                .map(Vec::len),
+            Some(4)
+        );
     }
 
     #[test]
@@ -678,6 +761,23 @@ mod tests {
             InputEvent::Motion { dx: 5.0, dy: -3.0 }
         ));
         assert!(matches!(f.events[2], InputEvent::Wheel { y: 1.0 }));
+    }
+
+    #[test]
+    fn a_dev_request_runs_the_hook_and_a_capture_may_wait_for_distortion() {
+        let mut f = Fake::default();
+        let lit = run(&mut f, r#"{"id":1,"cmd":"dev","op":"dlight","arg":"1"}"#);
+        assert_eq!(lit["ok"], json!(true));
+        assert_eq!(f.lines, ["dev dlight 1"]);
+        let unknown = run(&mut f, r#"{"id":2,"cmd":"dev","op":"nope"}"#);
+        assert_eq!(unknown["ok"], json!(false));
+        assert_eq!(run(&mut f, r#"{"id":3,"cmd":"dev"}"#)["ok"], json!(false));
+        run(&mut f, r#"{"id":4,"cmd":"capture"}"#);
+        run(&mut f, r#"{"id":5,"cmd":"capture","after":"distortion"}"#);
+        assert_eq!(f.gated, [false, true]);
+        let bad = run(&mut f, r#"{"id":6,"cmd":"capture","after":"sunset"}"#);
+        assert_eq!(bad["ok"], json!(false));
+        assert_eq!(f.captured, 2);
     }
 
     #[test]

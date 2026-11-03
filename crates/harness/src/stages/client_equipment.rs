@@ -1,37 +1,30 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! `client-equipment`: the equipment a person reaches with their own keys works. On the Assault class the rifle's
-//! action slot raises its underbarrel launcher and a shot puts a shell in the air; on Spec Ops the C4 goes down on the
-//! throw button (a pack appears and one is spent) and comes up on the attack button (the pack goes off). The class is
-//! picked before the spawn, so the change applies at once. Needs a display and the install; skips without.
+//! `client-equipment`: the equipment a person reaches with their own keys works, driven through the control channel
+//! (#376). Each run starts from the main menu and clicks with the pointer through Start New Server, the server's team
+//! menu and the class menu. On the Assault class the rifle's action slot (key 5) raises its underbarrel launcher and a
+//! shot puts a shell in the air; on Spec Ops the C4 (key 5, its action slot) goes down on the throw button (a pack
+//! appears and one is spent) and comes up on the attack button (the pack goes off). The class is picked before the
+//! spawn, so the change applies at once. Needs a display and the install; skips without.
+use super::client_custom_class::session_report;
 use super::client_flythrough::locate_client;
+use super::client_hardpoint::join;
 use super::client_models::no_display;
-use super::client_session::{run_client, verdict};
+use super::client_session::verdict;
+use crate::control::Driven;
 use crate::stage::{StageCtx, StageReport, Status};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::io;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const NAME: &str = "client-equipment";
-const ARGS: &[&str] = &["--bots", "1"];
-/// The stock menu path up to the spawn with the class of the run picked.
-const MENU: &str = "click=Start New Server,menu=createserver:20,click=Start,menu=team_marinesopfor:90,\
-click=auto_assign,menu=changeclass:30,wait=1,click=";
-/// Assault: the rifle in hand, key 5 for the launcher, then a shot.
-const ASSAULT: &str = "Assault,ingame=120,weapon=m16:20,wait=2,shot=gl_rifle,\
-holdkey=5,wait=1,releasekey=5,weapon=gl_:20,wait=2,shot=gl_selected,\
-holdkey=mouse1,wait=1,releasekey=mouse1,wait=3,shot=gl_fired";
-/// Spec Ops: the C4 in hand (key 5, its action slot), planted with the throw button (mouse2, the stock ADS bind) and
-/// set off with the attack button.
-const SPECOPS: &str = "Spec Ops,ingame=120,holdkey=5,wait=1,releasekey=5,weapon=c4:20,wait=2,shot=c4_hand,\
-holdkey=mouse2,wait=1,releasekey=mouse2,wait=2,shot=c4_planted,\
-holdkey=mouse1,wait=1,releasekey=mouse1,wait=3,shot=c4_detonated";
+const ARGS: &[&str] = &["--bots", "1", "--duration", "240"];
 
 fn count(v: &Value) -> u64 {
     v.as_u64().unwrap_or(0)
 }
 
-/// One `shot=` step's numbers: the weapon in hand, the missiles in the world and the explosions received.
+/// One capture's numbers: the weapon in hand, the missiles in the world and the explosions received.
 struct Shot {
     weapon: String,
     missiles: u64,
@@ -40,64 +33,145 @@ struct Shot {
     stock: i64,
 }
 
-/// The `shot=` steps of one run, by name.
-fn shots(report: &Value) -> Vec<(String, Shot)> {
-    report["steps"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|s| {
-                    let name = s["step"].as_str()?.strip_prefix("shot=")?.to_owned();
-                    Some((
-                        name,
-                        Shot {
-                            weapon: s["weapon"].as_str().unwrap_or_default().to_owned(),
-                            missiles: count(&s["missiles"]),
-                            explosions: count(&s["explosions"]),
-                            stock: s
-                                .get("hud")
-                                .and_then(|h| h.get("weapon"))
-                                .and_then(|w| w.get("stock"))
-                                .and_then(Value::as_i64)
-                                .unwrap_or(-1),
-                        },
-                    ))
-                })
-                .collect()
-        })
+/// Saves the frame on screen as `<name>.png` and reads what it showed.
+fn shot(c: &mut Driven, name: &str) -> Result<Shot, String> {
+    c.capture(name)?;
+    let weapon = c
+        .lookup("player.weapon")?
+        .as_str()
         .unwrap_or_default()
+        .to_owned();
+    let entities = c.state("entities")?;
+    let missiles = entities["list"].as_array().map_or(0, |l| {
+        l.iter()
+            .filter(|e| e["kind"] == "missile" && e["actor"] != true)
+            .count()
+    }) as u64;
+    Ok(Shot {
+        weapon,
+        missiles,
+        explosions: count(&c.lookup("events.world.explosion")?),
+        stock: c.lookup("hud.report.weapon.stock")?.as_i64().unwrap_or(-1),
+    })
 }
 
-fn shot<'a>(shots: &'a [(String, Shot)], n: &str) -> Option<&'a Shot> {
-    shots.iter().find(|(k, _)| k == n).map(|(_, s)| s)
+/// Waits up to `limit` for the weapon in hand to be one whose name starts with `prefix` (`m16` is the rifle, `gl_m16`
+/// its launcher raised: a part anywhere in the name would take the rifle for the launcher, #375).
+fn until_weapon(c: &mut Driven, prefix: &str, limit: Duration, what: &str) -> Result<(), String> {
+    let end = Instant::now() + limit;
+    loop {
+        let have = c.lookup("player.weapon")?;
+        if have.as_str().is_some_and(|w| w.starts_with(prefix)) {
+            return Ok(());
+        }
+        if Instant::now() > end {
+            return Err(format!("{what}: {have} in hand"));
+        }
+        c.pause(Duration::from_millis(100))?;
+    }
 }
 
-/// How many missiles of `weapon` the client saw appear (`net.missiles_seen`).
-fn missiles_of(report: &Value, weapon: &str) -> u64 {
-    report["net"]["missiles_seen"]
-        .get(weapon)
-        .and_then(Value::as_u64)
-        .unwrap_or(0)
+/// Holds `key` down for a second, as a hand presses it. A key the profile binds to nothing fails instead of reporting
+/// a press that went nowhere.
+fn hold(c: &mut Driven, key: &str) -> Result<(), String> {
+    let bound = c.lookup(&format!("binds.{key}"))?;
+    if bound.as_str().is_none_or(str::is_empty) {
+        return Err(format!("{key} is not bound"));
+    }
+    c.key(key, "down")?;
+    c.pause(Duration::from_secs(1))?;
+    c.key(key, "up")
 }
 
-/// One client run: the stock menu path to the class, then `steps`.
+/// The stock menu path from the main menu to the spawn with `class` picked, each item clicked with the pointer.
+fn start_server(c: &mut Driven, class: &str) -> Result<(), String> {
+    let secs = Duration::from_secs;
+    c.step("Start New Server", |c| {
+        c.until(
+            json!({"menu.open": {"contains": "main"}}),
+            secs(90),
+            "the main menu did not open",
+        )?;
+        c.click("Start New Server")?;
+        c.until(
+            json!({"menu.open": {"contains": "createserver"}}),
+            secs(20),
+            "Start New Server did not open the createserver menu",
+        )?;
+        c.click("Start")?;
+        Ok(())
+    })?;
+    join(c, "auto_assign", class)
+}
+
+/// Assault: the rifle in hand, key 5 for the launcher, then a shot with the attack button.
+fn launcher(c: &mut Driven) -> Result<[Shot; 3], String> {
+    let secs = Duration::from_secs;
+    c.step("the rifle in hand", |c| {
+        until_weapon(c, "m16", secs(20), "the Assault class did not hold the m16")
+    })?;
+    c.pause(secs(2))?;
+    let rifle = shot(c, "gl_rifle")?;
+    c.step("key 5 raises the launcher", |c| {
+        hold(c, "5")?;
+        until_weapon(c, "gl_", secs(20), "key 5 did not raise the launcher")
+    })?;
+    c.pause(secs(2))?;
+    let raised = shot(c, "gl_selected")?;
+    c.step("the attack button fires the launcher", |c| {
+        hold(c, "mouse1")
+    })?;
+    c.pause(secs(3))?;
+    let fired = shot(c, "gl_fired")?;
+    Ok([rifle, raised, fired])
+}
+
+/// Spec Ops: the C4 in hand (key 5, its action slot), planted with the throw button (mouse2, the stock ADS bind) and
+/// set off with the attack button.
+fn c4(c: &mut Driven) -> Result<[Shot; 3], String> {
+    let secs = Duration::from_secs;
+    c.step("key 5 raises the C4", |c| {
+        hold(c, "5")?;
+        until_weapon(c, "c4", secs(20), "key 5 did not raise the C4")
+    })?;
+    c.pause(secs(2))?;
+    let hand = shot(c, "c4_hand")?;
+    c.step("the throw button plants the C4", |c| hold(c, "mouse2"))?;
+    c.pause(secs(2))?;
+    let planted = shot(c, "c4_planted")?;
+    c.step("the attack button sets the C4 off", |c| hold(c, "mouse1"))?;
+    c.pause(secs(3))?;
+    let blown = shot(c, "c4_detonated")?;
+    Ok([hand, planted, blown])
+}
+
+/// How many missiles of `weapon` the client saw appear (`net.missiles_seen` of the run's state).
+fn missiles_of(state: &Value, weapon: &str) -> u64 {
+    count(&state["net"]["missiles_seen"][weapon])
+}
+
+/// One class's play after the spawn: its three captures, in order.
+type Play = fn(&mut Driven) -> Result<[Shot; 3], String>;
+
+/// One client run in `dir`: the stock menu path to `class`, then `play`. The shots it took, and the state it ended in
+/// as [`verdict`] reads it (`session_report`, kept as `state.json`).
 fn run_once(
     client: &Path,
     install: &Path,
-    base: &Path,
-    label: &str,
-    steps: &str,
-) -> Result<Value, String> {
-    let dir = base.join(label);
-    run_client(
-        client,
-        install,
-        &dir,
-        &dir.join("config"),
-        ARGS,
-        steps,
-        Duration::from_secs(240),
-    )
+    dir: &Path,
+    class: &str,
+    play: Play,
+) -> Result<([Shot; 3], Value), String> {
+    let mut c = Driven::start(client, install, dir, ARGS)?;
+    let played = start_server(&mut c, class).and_then(|()| play(&mut c));
+    let state = session_report(&mut c, "state.json");
+    let status = c.finish(Duration::from_secs(30));
+    let shots = played?;
+    let state = state?;
+    if !status.is_some_and(|s| s.success()) {
+        return Err(format!("the client did not exit successfully: {status:?}"));
+    }
+    Ok((shots, state))
 }
 
 pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
@@ -114,57 +188,40 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let mut out = StageReport::new(NAME, Status::Passed);
     let mut problems = Vec::new();
     let mut notes = Vec::new();
-    for (label, steps, files) in [
+    for (label, class, play, files) in [
         (
             "gl",
-            ASSAULT,
-            ["gl_rifle", "gl_selected", "gl_fired"].as_slice(),
+            "Assault",
+            launcher as Play,
+            ["gl_rifle", "gl_selected", "gl_fired"],
         ),
         (
             "c4",
-            SPECOPS,
-            ["c4_hand", "c4_planted", "c4_detonated"].as_slice(),
+            "Spec Ops",
+            c4 as Play,
+            ["c4_hand", "c4_planted", "c4_detonated"],
         ),
     ] {
-        out.files.push(format!("{label}/ui-script.json"));
+        out.files.push(format!("{label}/state.json"));
         for f in files {
             out.files.push(format!("{label}/{f}.png"));
         }
-        let report = match run_once(&client, install, &ctx.dir, label, &format!("{MENU}{steps}")) {
-            Ok(report) => report,
+        let (shots, state) = match run_once(&client, install, &ctx.dir.join(label), class, play) {
+            Ok(run) => run,
             Err(e) => {
-                return Ok(out
-                    .with_status(Status::Failed)
-                    .with_reason(format!("{label}: {e}")));
+                problems.push(format!("{label}: {e}"));
+                continue;
             }
         };
-        if let Some(w) = verdict(&report) {
+        if let Some(w) = verdict(&state) {
             problems.push(format!("{label}: {w}"));
             continue;
         }
-        let steps = shots(&report);
         if label == "gl" {
-            let (Some(rifle), Some(raised)) =
-                (shot(&steps, "gl_rifle"), shot(&steps, "gl_selected"))
-            else {
-                problems.push("gl: the raise and the shot were not reached".into());
-                continue;
-            };
-            out.metrics.insert(
-                "launcher_shells".into(),
-                missiles_of(&report, &raised.weapon) as f64,
-            );
-            if raised.weapon == rifle.weapon {
-                problems.push(format!(
-                    "key 5 left {:?} in hand instead of raising the launcher",
-                    raised.weapon
-                ));
-            } else if !raised.weapon.contains("gl") {
-                problems.push(format!(
-                    "key 5 raised {:?}, not the launcher",
-                    raised.weapon
-                ));
-            } else if missiles_of(&report, &raised.weapon) == 0 {
+            let [rifle, raised, _] = &shots;
+            let shells = missiles_of(&state, &raised.weapon);
+            out.metrics.insert("launcher_shells".into(), shells as f64);
+            if shells == 0 {
                 problems.push(format!(
                     "no {} shell reached the client after the shot",
                     raised.weapon
@@ -176,19 +233,10 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                 ));
             }
         } else {
-            let (Some(hand), Some(planted), Some(blown)) = (
-                shot(&steps, "c4_hand"),
-                shot(&steps, "c4_planted"),
-                shot(&steps, "c4_detonated"),
-            ) else {
-                problems.push("c4: the plant and the detonation were not reached".into());
-                continue;
-            };
+            let [hand, planted, blown] = &shots;
             out.metrics
                 .insert("explosions".into(), blown.explosions as f64);
-            if !hand.weapon.contains("c4") {
-                problems.push(format!("the C4 was not in hand but {:?}", hand.weapon));
-            } else if planted.missiles == 0 && missiles_of(&report, "c4_mp") == 0 {
+            if planted.missiles == 0 && missiles_of(&state, "c4_mp") == 0 {
                 problems.push("the C4 was never planted: no pack in the world".into());
             } else if planted.stock >= hand.stock {
                 problems.push(format!(
@@ -202,8 +250,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                 ));
             } else {
                 notes.push(format!(
-                    "the C4 was planted with the throw button ({} packs left) and set off with the attack button",
-                    planted.stock
+                    "the C4 ({}) was planted with the throw button ({} packs left) and set off with the attack button",
+                    hand.weapon, planted.stock
                 ));
                 if blown.missiles > 0 {
                     notes.push(format!("{} missile(s) still in the world", blown.missiles));

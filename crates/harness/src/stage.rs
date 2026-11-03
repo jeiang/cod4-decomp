@@ -620,6 +620,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::control_channel::run),
     },
     StageDef {
+        name: "server-control",
+        description: "the real headless server's dev control channel (#378): map and cvar state, bots added through its console, authoritative clients waited for and asserted, no script errors, and a clean channel quit",
+        needs_install: false,
+        timeout: Duration::from_secs(8 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::server_control::run),
+    },
+    StageDef {
         name: "client-host-console",
         description: "the host of a listen server at the console (#366, #370): status, kick and map_restart reach the server of this process from the host's console; without sv_cheats noclip, ufo, god, give, take and setviewpos are refused in the player's language; after devmap typed at the console they act, as the server's own client state shows",
         needs_install: false,

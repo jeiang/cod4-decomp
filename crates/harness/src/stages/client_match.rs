@@ -286,6 +286,21 @@ fn misses(what: &str, list: &Value, allowed: &[&str]) -> Option<String> {
     (!names.is_empty()).then(|| format!("{} names missing: {}", what, names.join(", ")))
 }
 
+/// Why the effect names were not all in the gamestate (#553): stock's `CG_RegisterGraphics` registers every
+/// `loadfx` effect from `CS_EFFECT_NAMES` before the first snapshot (KisakCOD `cgame_mp/cg_main_mp.cpp:1914`), so a
+/// `playfx` right after joining has its name. `loadfx` works only while the level initializes, so every effect the
+/// match ever named (`names`) was named when the gamestate completed (`names_at_gamestate`); fewer then means the
+/// rest arrived later, behind snapshots that may already play them.
+fn unnamed_gamestate_effects(fx: &Value) -> Option<String> {
+    match (fx["names_at_gamestate"].as_u64(), fx["names"].as_u64()) {
+        (Some(at), Some(all)) if at > 0 && at >= all => None,
+        _ => Some(format!(
+            "the gamestate did not name every effect: {} named when it completed, {} by the end",
+            fx["names_at_gamestate"], fx["names"]
+        )),
+    }
+}
+
 /// The runtime error the stock scripts raise for a player their own frag killed (#539): the stock damage callback
 /// (`_globallogic`) sets `explosiveInfo["suicideGrenadeKill"]` only for damage from someone else, and the stock kill
 /// challenges (`_missions::ch_kills`) test it in their frag branch, so the original's VM raises the same error there
@@ -730,6 +745,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         ));
     }
     failures.extend(misses("effect", &fx["missing"], ALLOWED_MISSING_EFFECTS));
+    failures.extend(unnamed_gamestate_effects(fx));
     let skin_faults = c.get(&["skin_faults"]);
     if skin_faults > 0.0 {
         failures.push(format!(
@@ -868,6 +884,19 @@ mod tests {
         );
         assert_eq!(frag_suicide_errors(&srv(vec![other], 3)), 0);
         assert_eq!(frag_suicide_errors(&json!({"script_errors": 1})), 0);
+    }
+
+    #[test]
+    fn effects_named_after_the_gamestate_fail() {
+        let check = |at: Value, all: Value| {
+            unnamed_gamestate_effects(&json!({"names_at_gamestate": at, "names": all}))
+        };
+        assert_eq!(check(json!(32), json!(32)), None);
+        // Main before #553: 10 names in the gamestate, the other 22 announced behind the snapshots.
+        assert!(check(json!(10), json!(32)).is_some());
+        assert!(check(json!(0), json!(0)).is_some());
+        assert!(check(Value::Null, json!(32)).is_some());
+        assert!(unnamed_gamestate_effects(&json!({})).is_some());
     }
 
     #[test]

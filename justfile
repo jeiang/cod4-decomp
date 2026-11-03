@@ -67,6 +67,18 @@ budget-table *args:
 evidence-report *args:
     python3 scripts/evidence-report.py "$@"
 
+# Print the stages a diff can affect (scripts/stage-map.txt), e.g. `just slot 1 HEAD "$(just stages-for)"`
+stages-for base="origin/main" head="HEAD":
+    @python3 scripts/stages-for.py "$1" "$2"
+
+# Merge PR n only if its head is sha, windows and every other check passed and it is MERGEABLE; dry run unless CONFIRM=yes
+merge-pr n sha:
+    python3 scripts/merge-pr.py "$1" "$2"
+
+# Show what PR n's own change gained since the reviewed head old (merges from main left out)
+review-delta n old:
+    python3 scripts/review-delta.py "$1" "$2"
+
 # Fetch and build the SM3 cross-check drivers
 crosscheck-tools *args:
     scripts/build-crosscheck-tools.sh "$@"
@@ -75,10 +87,15 @@ crosscheck-tools *args:
 wavelet-tables exe:
     python3 scripts/gen-wavelet-tables.py "$@"
 
-# Test scripts/slot-guard.py and scripts/remote-linux.sh's logs locally (no host needed)
+# Test scripts/slot-guard.py, scripts/remote-linux.sh's logs, scripts/host-run.sh's queue, scripts/stages-for.py and the coordinator scripts locally (no host needed)
 script-tests:
     python3 scripts/slot-guard.test.py
     python3 scripts/remote-linux.test.py
+    python3 scripts/host-run.test.py
+    python3 scripts/stages-for.test.py
+    python3 scripts/serial-log.test.py
+    python3 scripts/merge-pr.test.py
+    python3 scripts/review-delta.test.py
 
 # Linux test host
 
@@ -102,6 +119,10 @@ slot-exec n ref +cmd:
 serial ref stages="":
     COD4E_LINUX_HOST={{host}} scripts/remote-linux.sh "$1" -- ${2:+--stage "$2"}
 
+# `just serial` with the whole output and exit status kept in bundles/serial-logs/ (COD4E_LINUX_CHECKS=1 adds host checks)
+serial-log ref stages="":
+    scripts/serial-log.sh "$1" "$2"
+
 # Install scripts/slot-guard.py as the Linux host's ~/Projects/cod4e/bin/slot-guard, with a GC-rooted python3
 slot-guard-install:
     #!/usr/bin/env bash
@@ -117,6 +138,10 @@ slot-guard-install:
     mv -f $b/.slot-guard.new $b/slot-guard
     $b/slot-guard version
     EOF
+
+# Put a GC-rooted Chromium for the web-* stages on the Linux host (~/Projects/cod4e/bin/chromium), so a GC cannot skip them
+chromium-install:
+    ssh {{host}} "bash -c 'mkdir -p ~/Projects/cod4e/bin && nix build --out-link ~/Projects/cod4e/bin/chromium nixpkgs#chromium && ~/Projects/cod4e/bin/chromium/bin/chromium --version'"
 
 # Lease slot n to an owner (coordinator); prints a new token unless COD4E_SLOT_TOKEN gives one
 slot-lease n owner *args:
@@ -140,7 +165,7 @@ host +cmd:
 host-shell:
     ssh -t {{host}} 'cd ~/Projects/cod4e; exec bash -l'
 
-# Show slots, serial lock, harness processes, VRAM, model servers and disk on the Linux host
+# Show slots, serial lock, queued and running host runs, harness processes, VRAM, model servers and disk on the Linux host
 host-status:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -151,6 +176,9 @@ host-status:
       if flock -n $r/.slot-$n.lock true; then echo "slot $n free"; else echo "slot $n busy"; fi
     done
     if [ -x $r/bin/slot-guard ]; then $r/bin/slot-guard version; $r/bin/slot-guard status; else echo "slot-guard not installed"; fi
+    EOF
+    ssh {{host}} bash -s -- --queue < scripts/host-run.sh
+    ssh {{host}} bash -s <<'EOF'
     pgrep -af 'cod4e-harness|cod4e-server|/cod4e |sway|chromium|iw3mp' || echo "no harness processes"
     echo "VRAM used: $(( $(cat /sys/class/drm/card1/device/mem_info_vram_used) / 1048576 )) MiB"
     echo "embed: $(curl -s -m 5 http://127.0.0.1:8189/health || echo down)"

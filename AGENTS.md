@@ -11,6 +11,7 @@ Read first: `README.md` (what the engine does, feature by feature),
 
 ## Environment
 
+- Host, run, bundle and known-flake facts: `docs/host-notes.md`.
 - Run every repository command through the flake: `nix develop -c <cmd>`.
   `rust-toolchain.toml` is the one toolchain pin.
 - Repository tools are `just` recipes (`just --list`); run them as
@@ -73,8 +74,9 @@ Read first: `README.md` (what the engine does, feature by feature),
 
 - Before a PR: `cargo fmt --check`, `cargo clippy --workspace -- -D
   warnings`, `cargo test --workspace`, and
-  `cargo check -p client --target wasm32-unknown-unknown`. CI runs the same
-  on Windows.
+  `cargo check -p client --target wasm32-unknown-unknown`. A `slot-full`,
+  `remote` or `serial` run on the Linux host covers fmt, clippy and test; the
+  `windows` CI check covers the wasm check (`docs/host-notes.md`).
 - A PR that adds or changes runtime behaviour adds or extends a harness stage
   or scenario in the default suite that asserts pass or fail, not only
   records (issue #1). Drive it through the player's path (input, menus,

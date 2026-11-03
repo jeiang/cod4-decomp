@@ -5,16 +5,16 @@
 //! stage captures shadows on/off at one held pose and checks that neither capture shows the black cards in the crown.
 use super::client_flythrough::locate_client;
 use super::client_models::{decode, no_display};
-use super::client_session::{gpu_problem, render_problem, run_client, steps_problem};
+use super::client_session::{gpu_problem, render_problem};
+use crate::control::Driven;
 use crate::stage::{StageCtx, StageReport, Status};
 use std::io;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const NAME: &str = "client-foliage";
-const LIMIT: Duration = Duration::from_secs(180);
-const STEPS_ON: &str = "renderer,wait=2,gfxis=shadows 1,shot=foliage-on";
-const STEPS_OFF: &str = "renderer,wait=2,gfxis=shadows 0,shot=foliage-off";
+/// How long the flythrough may take to bring its renderer up and report the shadow mode asked for.
+const RENDERER: Duration = Duration::from_secs(60);
 /// The middle of the crown, including the black cutout cards of #358. Fractions of the picture, left/top to
 /// right/bottom, so the check does not depend on the window size.
 const CANOPY: (f32, f32, f32, f32) = (0.20, 0.00, 0.80, 0.35);
@@ -112,7 +112,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let mut out = StageReport::new(NAME, Status::Passed);
     // Flythrough has no gameplay shell to apply vid_restart. Start each held pose with the public shadow-mode
     // option instead, and assert the renderer's actual setting before capturing it.
-    for (mode, steps) in [("on", STEPS_ON), ("off", STEPS_OFF)] {
+    for (mode, want) in [("on", "1"), ("off", "0")] {
         let mut args = vec![
             "--map",
             "mp_farm",
@@ -128,41 +128,62 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             args.extend(["--shadows", "off"]);
         }
         let dir = ctx.dir.join(mode);
-        match run_client(
-            &client,
-            install,
-            &dir,
-            &dir.join("config"),
-            &args,
-            steps,
-            LIMIT,
-        ) {
-            Ok(report) => {
-                out.files.extend([
-                    format!("{mode}/ui-script.json"),
-                    format!("{mode}/foliage-{mode}.png"),
-                ]);
-                if let Some(problem) = gpu_problem(&report["gpu_health"])
-                    .or_else(|| render_problem(&report))
-                    .or_else(|| steps_problem(&report))
-                {
-                    out.status = Status::Failed;
-                    out.reason = Some(problem);
-                    return Ok(out);
-                }
-            }
-            Err(e) => {
-                out.status = Status::Failed;
-                out.reason = Some(e);
-                return Ok(out);
-            }
+        if let Err(e) = held_pose(&client, install, &dir, &args, mode, want) {
+            out.status = Status::Failed;
+            out.reason = Some(e);
+            return Ok(out);
         }
+        out.files.extend([
+            format!("{mode}/control-run.json"),
+            format!("{mode}/foliage-{mode}.png"),
+        ]);
     }
     if let Err(e) = foliage_verdict(&ctx.dir, &mut out) {
         out.status = Status::Failed;
         out.reason = Some(e);
     }
     Ok(out)
+}
+
+/// One held pose: waits for the renderer to report shadows `want`, captures `foliage-<mode>`, then checks the run's
+/// graphics device and render record.
+fn held_pose(
+    client: &Path,
+    install: &Path,
+    dir: &Path,
+    args: &[&str],
+    mode: &str,
+    want: &str,
+) -> Result<(), String> {
+    let mut c = Driven::start(client, install, dir, args)?;
+    let result = (|| {
+        let end = Instant::now() + RENDERER;
+        loop {
+            let have = c.state("gfx")?["shadows"].clone();
+            if have.as_str() == Some(want) {
+                break;
+            }
+            if Instant::now() > end {
+                return Err(format!("shadows are {have}, want {want}"));
+            }
+            c.pause(Duration::from_millis(500))?;
+        }
+        // Two seconds on the held pose, as the streamed images settle.
+        c.pause(Duration::from_secs(2))?;
+        c.capture(&format!("foliage-{mode}"))?;
+        c.report("control-run.json", &["client", "render"])
+    })();
+    let status = c.finish(Duration::from_secs(30));
+    let report = result?;
+    if let Some(problem) =
+        gpu_problem(&report["client"]["gpu_health"]).or_else(|| render_problem(&report))
+    {
+        return Err(problem);
+    }
+    if !status.is_some_and(|s| s.success()) {
+        return Err(format!("the client did not exit successfully: {status:?}"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

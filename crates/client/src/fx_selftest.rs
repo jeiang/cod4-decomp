@@ -193,6 +193,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
         let mut fx = Effects::new(&lib.content, data.world.clone());
         fx.event(
             &ClientEvent::BulletImpact {
+                source: crate::events::ImpactSource::Selftest,
                 origin: at,
                 normal,
                 surface,
@@ -558,7 +559,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
             e.model = 1;
             e.pm_flags = 1000;
             let mut names = crate::events::Events::default();
-            names.take_commands(&mut vec![format!("fx 1 {name}")]);
+            names.sync_fx_names(|i| if i == 1 { name.as_str() } else { "" });
             let names = &names;
             let (mut live_max, mut played) = (0, 0);
             for step in 1..=60 {
@@ -732,7 +733,7 @@ fn bolted(
     let number = game.spawn(entity)?;
     let ent = game.entity_value(&mut vm, number);
     let mut events = crate::events::Events::default();
-    events.take_commands(&mut vec![format!("fx 1 {effect_name}")]);
+    events.sync_fx_names(|i| if i == 1 { effect_name } else { "" });
     // The client sees the script model before the effect is played on it, as a player in the match would: a
     // script model first seen starts from its current event sequence (`CG_ResetEntity`) and replays nothing.
     let mut seen = net::Snapshot::empty();
@@ -1724,6 +1725,7 @@ fn elements(
                 let mut fx = Effects::new(&lib.content, data.world.clone());
                 fx.event(
                     &ClientEvent::BulletImpact {
+                        source: crate::events::ImpactSource::Selftest,
                         origin: c.to_array(),
                         normal: n.to_array(),
                         surface,

@@ -167,6 +167,15 @@ impl Gpu {
         std::mem::take(&mut *self.health.errors.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
+    /// The errors [`Gpu::take_errors`] would take now, left in place.
+    pub fn pending_errors(&self) -> Vec<String> {
+        self.health
+            .errors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     /// A buffer holding `contents`, or why it could not be made: larger than the device's `max_buffer_size`, the
     /// device lost, or the creation rejected (the reported errors are named).
     pub fn buffer_init(

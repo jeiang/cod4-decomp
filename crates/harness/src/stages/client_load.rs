@@ -1,26 +1,32 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! `client-load`: loading a map must not freeze the window. The real client starts a match on `mp_crash` and on the
-//! largest map zone of the install from a script step (the menus' `Start New Server` path: the map loads on a worker
-//! thread while the loading screen draws) and reports the longest gap between two presented frames from the start of
-//! the load until the player spawned. The gap must stay under [`MAX_GAP_MS`] (best of [`ATTEMPTS`] runs per map).
-//! Needs a display and the install; skips without.
+//! `client-load`: loading a map must not freeze the window. The real client, driven through the control channel
+//! (#378) as a player plays it (#376), starts a match on `mp_crash` and on the largest map zone of the install with
+//! `map` typed at the console (the map loads on a worker thread while the loading screen draws), and the player
+//! answers the team and class menus with the pointer. The client's own record of the load (`client.load`) gives the
+//! longest gap between two presented frames from the start of the load until the player spawned. The gap must stay
+//! under [`MAX_GAP_MS`] (best of [`ATTEMPTS`] runs per map). Needs a display and the install; skips without.
 use super::asset_load::mp_zones;
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
-use super::client_session::run_client;
+use crate::control::Driven;
 use crate::stage::{StageCtx, StageReport, Status};
+use serde_json::{Value, json};
 use std::io;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const NAME: &str = "client-load";
 /// The longest the window may go without presenting during a map load.
 const MAX_GAP_MS: f64 = 100.0;
 /// Tries per map; see the loop.
 const ATTEMPTS: usize = 3;
-/// A load takes seconds; a client that has not spawned by now is hung.
+/// A load takes seconds; a client that has not spawned this long after the map was typed is hung.
 const LIMIT: Duration = Duration::from_secs(90);
 const SMALL: &str = "mp_crash";
+/// The listen server's menus the player answers, and the flags of each run beside the harness's.
+const TEAM_MENU: &str = "team_marinesopfor";
+const CLASS_MENU: &str = "changeclass";
+const ARGS: &[&str] = &["--bots", "3"];
 
 /// The biggest `mp_*` map zone (not its `_load` screen zone), by file size.
 fn largest_map(install: &Path) -> Option<String> {
@@ -34,6 +40,76 @@ fn largest_map(install: &Path) -> Option<String> {
         })
         .max()
         .map(|(_, stem)| stem)
+}
+
+/// The load of `map` as the player starts it: `map` typed at the console of the main menu, the team and class menus
+/// answered with the pointer, and the client's record of the load once the player spawned.
+fn load(c: &mut Driven, map: &str) -> Result<Value, String> {
+    let secs = Duration::from_secs;
+    c.step("main menu", |c| {
+        c.until(
+            json!({"menu.open": {"contains": "main"}}),
+            secs(90),
+            "the main menu did not open",
+        )
+        .map(drop)
+    })?;
+    let typed = Instant::now();
+    let left = || LIMIT.saturating_sub(typed.elapsed());
+    c.step(&format!("map {map} at the console"), |c| {
+        c.console(&format!("map {map}"))
+    })?;
+    c.step("team menu", |c| {
+        c.until(
+            json!({"menu.open": {"contains": TEAM_MENU}}),
+            left(),
+            "the team menu did not open after the load",
+        )?;
+        c.click("auto_assign")?;
+        c.until(
+            json!({"menu.open": {"contains": CLASS_MENU}}),
+            secs(30),
+            "the class menu did not open after the team was picked",
+        )
+        .map(drop)
+    })?;
+    c.step("class menu", |c| {
+        c.pause(secs(1))?;
+        c.click("Assault").map(drop)
+    })?;
+    c.step("spawn", |c| {
+        // The client closes its record of the load on the frame the player spawns.
+        c.until(
+            json!({
+                "net.spawned": true,
+                "player.alive": true,
+                "client.load.max_frame_gap_ms": {"exists": true},
+            }),
+            left(),
+            "the player did not spawn",
+        )?;
+        let load = c.lookup("client.load")?;
+        if load["map"] != json!(map) {
+            return Err(format!("the client's last load was not of {map}: {load}"));
+        }
+        Ok(load)
+    })
+}
+
+/// One attempt at `map` with a fresh client, its steps written to `control-run.json`: the client's record of the
+/// load, or what went wrong.
+fn attempt(client: &Path, install: &Path, dir: &Path, map: &str) -> Result<Value, String> {
+    let mut c = Driven::start(client, install, dir, ARGS)?;
+    let played = load(&mut c, map);
+    let written = c.report("control-run.json", &["client", "net"]);
+    let status = c.finish(Duration::from_secs(30));
+    let load = played?;
+    written.map_err(|e| format!("the run's report could not be written: {e}"))?;
+    match status {
+        Some(s) if s.success() => Ok(load),
+        Some(s) => Err(format!("the client exited {s}")),
+        None => Err("the client did not quit and was killed".into()),
+    }
 }
 
 pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
@@ -60,38 +136,28 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         // (a lock held, a first frame that builds a world) is there in every attempt. The best attempt counts.
         let mut best: Option<(f64, f64)> = None;
         let mut why = String::new();
-        for attempt in 0..ATTEMPTS {
-            let dir = ctx.dir.join(format!("{map}-{attempt}"));
-            let steps = format!("start={map},ingame=80,wait=1");
-            let report = match run_client(
-                &client,
-                install,
-                &dir,
-                &dir.join("config"),
-                &["--bots", "3"],
-                &steps,
-                LIMIT,
-            ) {
-                Ok(r) => r,
+        for attempt_no in 0..ATTEMPTS {
+            let dir = ctx.dir.join(format!("{map}-{attempt_no}"));
+            let result = attempt(&client, install, &dir, map);
+            if dir.join("control-run.json").is_file() {
+                out.files
+                    .push(format!("{map}-{attempt_no}/control-run.json"));
+            }
+            let load = match result {
+                Ok(l) => l,
                 Err(e) => {
                     why = e;
                     continue;
                 }
             };
-            out.files.push(format!("{map}-{attempt}/ui-script.json"));
-            let load = &report["load"];
             let (Some(gap), Some(ms)) =
                 (load["max_frame_gap_ms"].as_f64(), load["load_ms"].as_f64())
             else {
-                why = "the client reported no load".into();
+                why = format!("the client reported no load: {load}");
                 continue;
             };
-            if report["net"]["spawned"] != serde_json::Value::Bool(true) {
-                why = "the player never spawned".into();
-                continue;
-            }
             out.notes.push(format!(
-                "{map} attempt {attempt}: loaded in {ms:.0} ms, longest frame gap {gap:.0} ms, slow frames {}",
+                "{map} attempt {attempt_no}: loaded in {ms:.0} ms, longest frame gap {gap:.0} ms, slow frames {}",
                 load["slow_gaps_ms"]
             ));
             if best.is_none_or(|(g, _)| gap < g) {

@@ -8,6 +8,17 @@
 //!
 //! Adding an entry is a review decision: say why the event is expected (a stock data hole, a known open issue) and
 //! keep `contains` narrow, so a different failure of the same code still shows up.
+//!
+//! The rules an entry works by:
+//! - The first entry, in list order, whose `stages` is empty or names the stage and whose `contains` all match a line
+//!   takes the line; an entry for another stage never does.
+//! - `max` is per stage, measured on the default suite on the Linux host, plus a margin of 25% or more, with the
+//!   measurement and date in a comment. `max: None` is for this module's tests only.
+//! - The reason names an issue when the event is a known gap.
+//! - An entry reaches every stage it lists (every stage when `stages` is empty), so a change to one is checked by
+//!   running those stages, the default suite for an empty list, in a serial run.
+//! - A passed stage also fails when its `logs` directory is missing, empty or unreadable, or a log reached its size
+//!   cap: an unread log is not a clean one.
 
 use crate::stage::{StageReport, Status};
 use std::collections::BTreeMap;
@@ -160,8 +171,9 @@ pub const ALLOWED: &[Allow] = &[
     },
     Allow {
         contains: &["cod4e::voice", "microphone cannot be opened", "#488"],
-        reason: "client-hud holds +talk and shows the record meter on a host with no capture device (#488)",
-        stages: &["client-hud"],
+        reason: "client-hud holds +talk and shows the record meter, and client-frontend opens Options > Voice Chat (the \
+                 record meter), on a host with no capture device (#488)",
+        stages: &["client-hud", "client-frontend"],
         max: Some(6), // measured 1 with +talk alone on the Linux host, 2026-11-01; the meter adds an open (5 s retry)
     },
     Allow {
