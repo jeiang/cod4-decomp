@@ -258,10 +258,11 @@ pub const ALLOWED: &[Allow] = &[
             "at=\"maps\\\\mp\\\\gametypes\\\\_missions::ch_kills line 545\"",
         ],
         reason: "a player their own frag killed: the stock _missions::ch_kills reads explosiveInfo[\"suicideGrenadeKill\"], \
-                 which the stock damage callback sets only for damage from someone else (#539); client-match fails \
-                 unless the server counted a frag suicide for each such error",
-        stages: &["client-match"],
-        max: Some(4), // a 90 s match; the stage itself caps the errors by the frag suicides the server counted
+                 which the stock damage callback sets only for damage from someone else (#539); client-match and \
+                 client-gfx (whose bots play on its listen servers, #557) fail unless the server counted a frag \
+                 suicide for each such error",
+        stages: &["client-match", "client-gfx"],
+        max: Some(4), // a 90 s match; each stage itself caps the errors by the frag suicides the server counted
     },
     Allow {
         contains: &[
@@ -270,9 +271,9 @@ pub const ALLOWED: &[Allow] = &[
             "cause=\"cannot cast undefined to bool\"",
             "at=\"maps\\\\mp\\\\gametypes\\\\_missions::ch_kills line 545\"",
         ],
-        reason: "the listen server's log line for the same stock frag-suicide error (#539)",
-        stages: &["client-match"],
-        max: Some(4), // one per error; the stage caps the errors by the frag suicides the server counted
+        reason: "the listen server's log line for the same stock frag-suicide error (#539, #557)",
+        stages: &["client-match", "client-gfx"],
+        max: Some(4), // one per error; each stage caps the errors by the frag suicides the server counted
     },
 ];
 
@@ -519,10 +520,11 @@ mod tests {
         }
     }
 
-    /// The two lines the stock frag-suicide error logs pass client-match (#539), as a serial run logged them; the
-    /// same error at another site, another error at that site, or the lines in another stage still fail.
+    /// The two lines the stock frag-suicide error logs pass client-match (#539) and client-gfx (#557), as a serial run
+    /// logged them; the same error at another site, another error at that site, or the lines in another stage still
+    /// fail.
     #[test]
-    fn only_the_stock_frag_suicide_error_lines_pass_client_match() {
+    fn only_the_stock_frag_suicide_error_lines_pass_the_listen_server_stages() {
         let lines = |cause: &str, at: &str| {
             format!(
                 "2026-11-02T16:41:00.692267Z  WARN server::server: script runtime error: {cause} seen=1 at=\"{at}\"\n\
@@ -538,15 +540,19 @@ mod tests {
             r.status
         };
         let stock = lines("cannot cast undefined to bool", site);
-        assert_eq!(gate(&stock, "client-match"), Status::Passed);
+        for stage in ["client-match", "client-gfx"] {
+            assert_eq!(gate(&stock, stage), Status::Passed, "{stage}");
+        }
         assert_eq!(gate(&stock, "net-match"), Status::Failed);
         let other_site = lines(
             "cannot cast undefined to bool",
             r"maps\\mp\\gametypes\\_missions::ch_kills line 546",
         );
-        assert_eq!(gate(&other_site, "client-match"), Status::Failed);
         let other_error = lines("cannot cast undefined to int", site);
-        assert_eq!(gate(&other_error, "client-match"), Status::Failed);
+        for stage in ["client-match", "client-gfx"] {
+            assert_eq!(gate(&other_site, stage), Status::Failed, "{stage}");
+            assert_eq!(gate(&other_error, stage), Status::Failed, "{stage}");
+        }
     }
 
     #[test]

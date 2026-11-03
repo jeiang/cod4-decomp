@@ -153,7 +153,6 @@ message), is a real failure. `N` and `M` stand for any number. "Reason" is the s
 
 | Signature | Stage(s) | Issue | Owner | Slot reruns | Serial reruns | Remove when |
 |---|---|---|---|---|---|---|
-| Log: `script runtime error: cannot cast undefined to bool` in `_missions::ch_kills` line 545, with `script error on the listen server` for the same error (a bot killed by its own frag). The #539 allowance covers it only in client-match | client-gfx | #557 | author of #557's fix PR | 1 | 1 | #557 fixed |
 | Reason: `effect names missing: ` with an empty name, `net.fx.missing` `[""]` (a `play_fx` before its effect name reached the client) | client-match | #553 | author of #556 | 0 (timing set) | 1 | #556 merged |
 | Reason: `bullet_impact_noblood played 3 times since the mark, want 1` (before #542: `fx:bullet_impact_noblood is +3`); live bots' flesh hits inside the 1 s blood window | client-gfx | #553, fixed by #556 | author of #556 | 1 | 1 | #556 merged |
 | Reason: `shell_eject played N times since the mark, want 0` (before #542: `cgis=fx:shell_eject 0` returned N) | client-gfx | #511 (fixed by #513) | the coordinator's 10-run confirmation of #511 | 1 | 1 | 10 consecutive runs pass and #511 closes |

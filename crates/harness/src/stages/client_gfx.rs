@@ -28,6 +28,7 @@
 //! `bot_idle 0` afterwards, so real bot hits cannot contaminate injected-hit counts; the result notes retain each
 //! `fx.impacts` entry of that window with its source, entity and weapon.
 use super::client_flythrough::locate_client;
+use super::client_match::FRAG_SUICIDE_ERROR;
 use super::client_models::no_display;
 use super::client_session::verdict;
 use crate::control::Driven;
@@ -1167,13 +1168,53 @@ fn devmap_window(c: &mut Driven) -> Result<(), String> {
     })
 }
 
-/// The whole run, step by step.
+/// A listen server's script errors (its `script` state: `[map, VM text]` pairs and the frag suicides it counted):
+/// how many there were, and how many of them are excused, being the stock `ch_kills` error a frag suicide raises
+/// ([`FRAG_SUICIDE_ERROR`], #539) with a counted suicide behind each, as `client-match` excuses them. The text's first
+/// line is the message, its first `at` the innermost site, as the listen report reads them.
+fn frag_suicide_errors(script: &Value) -> (u64, u64) {
+    let errors = script["errors"].as_array().map_or(&[][..], Vec::as_slice);
+    let seen = errors
+        .iter()
+        .filter(|e| {
+            let mut lines = e[1]
+                .as_str()
+                .unwrap_or("")
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with("*******"));
+            lines.next() == Some(FRAG_SUICIDE_ERROR.0)
+                && lines.find_map(|l| l.strip_prefix("at ")) == Some(FRAG_SUICIDE_ERROR.1)
+        })
+        .count() as u64;
+    let suicides = script["frag_suicides"].as_u64().unwrap_or(0);
+    (errors.len() as u64, seen.min(suicides))
+}
+
+/// The listen server's script errors are all the stock `ch_kills` error with a frag suicide behind each (#557): a
+/// bot's frag can kill its thrower, and the stock scripts then raise that error as the original's VM does, so
+/// `logcheck` lets its two lines through in this stage up to a bound, and this fails on any error not so explained.
+fn frag_suicides_explain_errors(c: &mut Driven) -> Result<(), String> {
+    let script = c.ask(json!({"cmd": "server", "op": "state", "what": "script"}))?;
+    match frag_suicide_errors(&script) {
+        (errors, excused) if errors <= excused => Ok(()),
+        (errors, excused) => Err(format!(
+            "{errors} script errors on the listen server, {} not the stock ch_kills error behind a counted frag \
+             suicide",
+            errors - excused
+        )),
+    }
+}
+
+/// The whole run, step by step. Each listen server's script errors are checked before the next match replaces it.
 fn play(c: &mut Driven, notes: &mut Vec<String>) -> Result<(), String> {
     front_end(c)?;
     menu_match(c)?;
+    frag_suicides_explain_errors(c)?;
     devmap_renderer(c)?;
     devmap_cgame(c, notes)?;
-    devmap_window(c)
+    devmap_window(c)?;
+    frag_suicides_explain_errors(c)
 }
 
 /// The run's report in the shape the session verdict reads (the steps, `gpu_health`, `render`, the match's `net`
@@ -1287,7 +1328,35 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
 
 #[cfg(test)]
 mod tests {
-    use super::{brightened_share, crop, mean_luma, value_matches, white_share};
+    use super::{
+        brightened_share, crop, frag_suicide_errors, mean_luma, value_matches, white_share,
+    };
+    use serde_json::json;
+
+    /// Only the stock `ch_kills` frag-suicide error is excused, read from the VM text with or without its banner, and
+    /// only up to the server's counted frag suicides; every other script error is unexplained (#557).
+    #[test]
+    fn only_stock_ch_kills_errors_beyond_the_frag_suicides_are_unexplained() {
+        let stock = "cannot cast undefined to bool\n  at maps\\mp\\gametypes\\_missions::ch_kills line 545\n  \
+                     at maps\\mp\\gametypes\\_missions::domissioncallback line 1153\n";
+        let bannered = format!("******* script runtime error *******\n{stock}");
+        let other_site = "cannot cast undefined to bool\n  at maps\\mp\\gametypes\\_missions::ch_kills line 546\n";
+        let other_error = "cannot cast undefined to int\n  at maps\\mp\\gametypes\\_missions::ch_kills line 545\n";
+        let stock_only = |suicides: u64| json!({"errors": [["mp_crash", stock], ["mp_crash", bannered]], "frag_suicides": suicides});
+        assert_eq!(frag_suicide_errors(&stock_only(2)), (2, 2));
+        assert_eq!(frag_suicide_errors(&stock_only(3)), (2, 2));
+        assert_eq!(frag_suicide_errors(&stock_only(1)), (2, 1));
+        assert_eq!(frag_suicide_errors(&json!({"errors": []})), (0, 0));
+        assert_eq!(
+            frag_suicide_errors(&json!({"errors": [["mp_backlot", stock]]})),
+            (1, 0)
+        );
+        for other in [other_site, other_error] {
+            let script =
+                json!({"errors": [["mp_crash", stock], ["mp_crash", other]], "frag_suicides": 5});
+            assert_eq!(frag_suicide_errors(&script), (2, 1));
+        }
+    }
 
     #[test]
     fn white_share_counts_the_middle_third_only() {
