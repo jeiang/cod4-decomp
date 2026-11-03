@@ -227,9 +227,13 @@ impl Cvars {
         let unchanged = self.vars.get(&key(name)).is_some_and(|v| v.value == value);
         let r = self.try_set(name, value, external);
         match &r {
-            // The original prints the refusal too; one that would not change the value (the command line's `set` lines
-            // run again after boot, `+set fs_game` among them) loses nothing.
-            Err(why @ (Refused::ReadOnly(_) | Refused::WriteProtected(_))) if unchanged => {
+            // Stock Dvar_SetVariant (1.7 0x56b1b0) prints cheat refusals through ordinary Com_Printf,
+            // even for unchanged values. Unchanged ROM/INIT startup replays also remain ordinary messages.
+            Err(why)
+                if matches!(why, Refused::CheatProtected(_))
+                    || (unchanged
+                        && matches!(why, Refused::ReadOnly(_) | Refused::WriteProtected(_))) =>
+            {
                 logging::dedup!(
                     INFO,
                     "refused",
@@ -513,6 +517,30 @@ mod tests {
         assert!(!ok);
         let w = events.iter().find(|e| e.level == tracing::Level::WARN);
         assert_eq!(w.and_then(|e| e.field("cvar")), Some("logtest_rom"));
+    }
+
+    #[test]
+    fn cheat_refusals_are_info_and_keep_the_value_even_for_archived_replays() {
+        let mut c = Cvars::new();
+        c.register("sv_cheats", "0", SYSTEMINFO | INIT);
+        c.register("logtest_cheat", "0", CHEAT | ARCHIVE);
+        for requested in ["1", "0"] {
+            let (result, events) = logging::capture(|| c.set_external("logtest_cheat", requested));
+            assert_eq!(result, Err(Refused::CheatProtected("logtest_cheat".into())));
+            assert_eq!(c.string("logtest_cheat"), "0");
+            let refusals: Vec<_> = events
+                .iter()
+                .filter(|event| event.field("cvar") == Some("logtest_cheat"))
+                .collect();
+            assert_eq!(refusals.len(), 1);
+            let event = refusals[0];
+            assert_eq!(event.level, tracing::Level::INFO);
+            assert_eq!(event.field("external"), Some("true"));
+            assert_eq!(
+                event.message,
+                "cvar set refused: logtest_cheat is cheat protected."
+            );
+        }
     }
 
     #[test]
