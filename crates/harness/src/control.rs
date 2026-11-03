@@ -381,6 +381,12 @@ impl Driven {
     /// leave within `grace` and was killed.
     pub fn finish(mut self, grace: Duration) -> Option<ExitStatus> {
         let _ = self.ask(json!({"cmd": "quit"}));
+        self.wait_exit(grace)
+    }
+
+    /// Waits for a client that is leaving on its own (the player confirmed Quit), sending it nothing: its exit
+    /// status, or `None` for one still running after `grace`, which is then killed.
+    pub fn wait_exit(self, grace: Duration) -> Option<ExitStatus> {
         let mut child = self.child?;
         let end = Instant::now() + grace;
         loop {

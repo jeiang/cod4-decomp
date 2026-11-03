@@ -1,158 +1,121 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! `client-gfx`: the graphics settings of the options menus reach the window and the renderer. The real client sets
-//! the dvars the menu writes, applies them with `vid_restart` (vsync off, a 4:3 screen), starts a match (the most
-//! antialiasing the adapter has when asked for 16x, lowered normal and specular map quality, no soft smoke edges or water
-//! animation, no specular, depth of field, glow or shadows, four dynamic lights, the texture filter options; with it
-//! on, aiming down the sights must blur the picture, and a hip-fired view must not), then turns the match's settings
-//! back with a second `vid_restart` in the running match. Every `gfxis=` check reads the renderer's and the surface's
-//! own state. A frame with a bright test light in front of the player must also be clearly brighter than the same
-//! frame without it (the dynamic light pass). At the end the graphics device is destroyed under the match, as a driver
-//! reset does it, and the client must make a new one and draw the world again. Last, a test laser sight in the mp_crash
-//! garage, aimed at the floor, must draw its post light (`gfx_laser_light`, #516) only with `cg_laserLight` on, and
-//! that light must brighten the floor where the laser strikes.
+//! `client-gfx`: the graphics settings of the options menus reach the window and the renderer. The real client is
+//! driven through the control channel (#378) as a player plays it (#376): every setting is typed at the console opened
+//! with its key, the match is started with the pointer through Start New Server, and the team and class menus are
+//! clicked. The stage sets the dvars the menu writes, applies them with `vid_restart` (vsync off, a 4:3 screen),
+//! starts a match (the most antialiasing the adapter has when asked for 16x, lowered normal and specular map quality,
+//! no soft smoke edges or water animation, no specular, depth of field, glow or shadows, four dynamic lights, the
+//! texture filter options; with it on, aiming down the sights must blur the picture, and a hip-fired view must not),
+//! then turns the match's settings back with a second `vid_restart` in the running match. Every graphics check reads
+//! the renderer's and the surface's own state (the `gfx` section of the state document), every cgame check what the
+//! cgame drew or played (`cgame`, `fx.played`). A frame with a bright test light in front of the player must also be
+//! clearly brighter than the same frame without it (the dynamic light pass). At the end the graphics device is
+//! destroyed under the match, as a driver reset does it, and the client must make a new one and draw the world again.
+//! Last, a test laser sight in the mp_crash garage, aimed at the floor, must draw its post light (`gfx_laser_light`,
+//! #516) only with `cg_laserLight` on, and that light must brighten the floor where the laser strikes.
 //!
 //! The cgame and renderer dvars of #369 are checked on the way: untouched registration defaults are observed before
-//! writes, and the menu-started match resets cheat dvars and refuses protected writes. A `devmap` match then checks
-//! live near/far/depthhack, outdoor, sun, film, glow and blur settings without restarting the renderer, including
-//! sun-flare source defaults, overrides and persistence after their gate closes, and the `r_blur` filter shaped for
-//! the 4:3 `r_aspectRatio` (`RB_VirtualToSceneRadius`, #402). In that match walking bobs the eye, and after
-//! `set bg_bobMax 0` on the host walking does not (#408). The view model, HUD, shellshock, unlit scene, frame counter,
-//! subtitles, blood and brass retain their player-path checks. The blood checks count the impacts of their own
-//! injected hits, so the match's bots stand still from there on (`bot_idle 1`): a bot's real hit on a player inside
-//! a check's second played one more. Needs a display and the install; skips without.
+//! writes, and the menu-started match resets cheat dvars and refuses protected writes. A match started with `devmap`
+//! typed at the console then checks live near/far/depthhack, outdoor, sun, film, glow and blur settings without
+//! restarting the renderer, including sun-flare source defaults, overrides and persistence after their gate closes,
+//! and the `r_blur` filter shaped for the 4:3 `r_aspectRatio` (`RB_VirtualToSceneRadius`, #402). In that match walking
+//! bobs the eye, and after `set bg_bobMax 0` on the host walking does not (#408). The view model, HUD, shellshock,
+//! unlit scene, frame counter, subtitles, blood and brass retain their player-path checks. What no key reaches (a
+//! subtitle, a shellshock, a bullet striking flesh, the test light, an effect played in front of the player, the
+//! device loss, the bob and frame-pace probes) is set up with the channel's `dev` hooks, each followed by what the
+//! player sees. Needs a display and the install; skips without.
+//! The host sets `bot_idle 1` and waits before blood checks so real bot hits cannot contaminate injected-hit counts;
+//! the result notes retain each impact in that window with its source, entity and weapon.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
-use super::client_session::{run_client, verdict};
+use super::client_session::verdict;
+use crate::control::Driven;
 use crate::stage::{StageCtx, StageReport, Status};
+use serde_json::{Value, json};
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const NAME: &str = "client-gfx";
-const LIMIT: Duration = Duration::from_secs(300);
+/// The listen server's menus a menu-started match opens for the player to answer.
+const TEAM_MENU: &str = "team_marinesopfor";
+const CLASS_MENU: &str = "changeclass";
 
-const STEPS: &str = "cvaris=r_znear 4,cvaris=r_znear_depthhack 0.1,cvaris=r_zfar 0,\
-cvaris=r_outdoor 1,cvaris=r_outdoorAwayBias 32,cvaris=r_outdoorDownBias 0,cvaris=r_outdoorFeather 8,\
-cvaris=r_filmUseTweaks 0,cvaris=r_filmTweakEnable 0,cvaris=r_filmTweakBrightness 0,cvaris=r_filmTweakContrast 1.4,\
-cvaris=r_filmTweakDesaturation 0.2,cvaris=r_filmTweakInvert 0,\
-cvaris=r_filmTweakLightTint 1.1 1.05 0.85,cvaris=r_filmTweakDarkTint 0.7 0.85 1,\
-cvaris=r_glowUseTweaks 0,cvaris=r_glowTweakEnable 0,cvaris=r_glowTweakRadius0 5,\
-cvaris=r_glowTweakBloomIntensity0 1,cvaris=r_glowTweakBloomCutoff 0.5,cvaris=r_blur 0,\
-cvaris=r_sun_from_dvars 0,cvaris=r_lightTweakSunLight 1,cvaris=r_lightTweakSunColor 0 1 0 1,\
-cvaris=r_lightTweakSunDirection 0 0 0,cvaris=r_lightTweakAmbient 0.1,cvaris=r_lightTweakAmbientColor 1 0 0 1,\
-cvaris=r_lightTweakDiffuseFraction 0.5,cvaris=r_lightTweakSunDiffuseColor 0 0 1 1,\
-cvaris=r_sunsprite_shader sun,cvaris=r_sunsprite_size 16,cvaris=r_sunflare_shader sun_flare,\
-cvaris=r_sunflare_min_size 0,cvaris=r_sunflare_max_size 2500,cvaris=r_sunflare_max_alpha 1,\
-cvaris=r_sunflare_fadein 1,cvaris=r_sunflare_fadeout 1,cvaris=r_sun_fx_position 0 0 0,\
-cgis=window_position 40 60,set=set r_vsync 0,set=set r_aspectRatio standard,set=set r_aaSamples 16,\
-set=set r_picmip_manual 1,set=set r_picmip 0,set=set r_picmip_bump 1,set=set r_picmip_spec 1,set=set r_zFeather 0,set=set r_drawWater 0,\
-set=set r_specular 0,set=set r_dof_enable 0,set=set r_glow_allowed 0,set=set sm_enable 0,set=set r_dlightLimit 4,\
-set=set r_texFilterAnisoMin 2,set=set r_texFilterMipMode 2,\
-vidrestart,wait=1,gfxis=uncapped 1,gfxis=aspect 1.33,\
-set=set snd_khz 22,sawreply='22' is not a valid value for dvar 'snd_khz':5,\
-set=set snd_enableEq 0,sawreply='0' is not a valid value for dvar 'snd_enableEq':5,\
-set=set cg_drawLagometer 1,sawreply='1' is not a valid value for dvar 'cg_drawLagometer':5,\
-set=set cg_drawGun 0,set=set r_znear 0.5,cvaris=r_znear 0.5,\
-set=set ui_netGametypeName war,click=Start New Server,menu=createserver:20,click=Start,\
-menu=team_marinesopfor:90,click=auto_assign,menu=changeclass:30,wait=1,click=Assault,ingame=120,wait=2,\
-gfxis=aa max,gfxis=picmip 0 1 1,gfxis=zfeather 0,gfxis=water 0,gfxis=specular 0,gfxis=dof 0,gfxis=blur 0,gfxis=glow 0,gfxis=shadows 0,\
-gfxis=aniso 2 4,gfxis=mipmode 2,shot=gfx-on,\
-gfxis=nearfar 4 0,gfxis=depthhack_near 0.1,gfxis=outdoor 1 32 0 8,gfxis=blur_radius 0,cvaris=r_znear 4,\
-set=set r_znear 0.5,sawreply=r_znear is cheat protected.:5,cvaris=r_znear 4,gfxis=nearfar 4 0,\
-set=set r_zfar 2000,sawreply=r_zfar is cheat protected.:5,cvaris=r_zfar 0,\
-set=set r_znear_depthhack 0.25,sawreply=r_znear_depthhack is cheat protected.:5,gfxis=depthhack_near 0.1,\
-set=set r_blur 3,sawreply=r_blur is cheat protected.:5,gfxis=blur_radius 0,\
-set=set r_filmUseTweaks 1,sawreply=r_filmUseTweaks is cheat protected.:5,cvaris=r_filmUseTweaks 0,\
-set=set r_glowUseTweaks 1,sawreply=r_glowUseTweaks is cheat protected.:5,cvaris=r_glowUseTweaks 0,\
-set=set r_sun_from_dvars 1,sawreply=r_sun_from_dvars is cheat protected.:5,cvaris=r_sun_from_dvars 0,\
-set=set r_lightTweakAmbient 0.9,sawreply=r_lighttweakambient is read only.:5,\
-cgis=gun 1,set=set cg_drawGun 0,sawreply=cg_drawGun is cheat protected.:5,wait=1,cgis=gun 1,\
-set=set sv_cheats 1,sawreply=sv_cheats is write protected.:5,\
-cgis=fps 0,set=set cg_drawFPS 1,wait=1,cgis=fps 1,shot=fps,set=set cg_drawFPS Off,wait=1,cgis=fps 0,\
-subtitle=MP_WAITING,wait=0.5,cgis=subtitle 1,wait=4,cgis=subtitle 0,\
-set=set cg_subtitles 0,subtitle=MP_WAITING,wait=0.5,cgis=subtitle 0,set=set cg_subtitles 1,\
-devmap=mp_crash,ingame=120,console=god,wait=1,\
-gfxis=nearfar 4 0,gfxis=depthhack_near 0.1,gfxis=outdoor 1 32 0 8,\
-set=set r_znear 0.5,set=set r_zfar 2000,set=set r_znear_depthhack 0.25,\
-set=set r_outdoor 0,set=set r_outdoorAwayBias 4,set=set r_outdoorDownBias 2,set=set r_outdoorFeather 16,\
-set=set r_sun_from_dvars 1,wait=1,gfxis=sun_flare 1 16 0 1250 1 1000 1000 sun sun_flare,\
-set=set r_lightTweakSunLight 4,set=set r_lightTweakSunColor 0 0 2,set=set r_lightTweakSunDirection 10 20 0,\
-wait=1,gfxis=nearfar 0.5 2000,gfxis=depthhack_near 0.25,gfxis=outdoor 0 4 2 16,\
-gfxis=sun_tweak 4 0 0 1 10 20 0,\
-set=set r_znear 1,set=set r_zfar 4000,set=set r_znear_depthhack 0.2,\
-set=set r_outdoor 1,set=set r_outdoorAwayBias 12,set=set r_outdoorDownBias 3,set=set r_outdoorFeather 6,\
-set=set r_lightTweakSunLight 3,set=set r_lightTweakSunColor 1 0 0,set=set r_lightTweakSunDirection 0 90 0,\
-wait=1,gfxis=nearfar 1 4000,gfxis=depthhack_near 0.2,gfxis=outdoor 1 12 3 6,gfxis=sun_tweak 3 1 0 0 0 90 0,\
-set=set r_lightTweakSunLight 1,set=set r_lightTweakSunColor 1 1 1,set=set r_lightTweakSunDirection 0 0 0,\
-set=set r_sunsprite_shader sun,set=set r_sunflare_shader sun_flare,set=set r_sunsprite_size 24,\
-set=set r_sunflare_min_size 8,set=set r_sunflare_max_size 1200,set=set r_sunflare_max_alpha 0.6,\
-set=set r_sunflare_fadein 0.25,set=set r_sunflare_fadeout 0.5,set=set r_sun_fx_position 0 90 0,\
-wait=1,gfxis=sun_flare 1 24 4 600 0.6 250 500 sun sun_flare,gfxis=sun_fx_position 0 1 0,\
-set=set r_sun_from_dvars 0,set=set r_sunsprite_size 40,set=set r_sunflare_max_size 1800,\
-wait=1,gfxis=sun_flare 1 24 4 600 0.6 250 500 sun sun_flare,gfxis=sun_fx_position 0 1 0,\
-set=set r_znear 4,set=set r_zfar 0,set=set r_znear_depthhack 0.1,\
-set=set r_outdoorAwayBias 32,set=set r_outdoorDownBias 0,set=set r_outdoorFeather 8,\
-wait=1,gfxis=nearfar 4 0,gfxis=depthhack_near 0.1,gfxis=outdoor 1 32 0 8,\
-gfxis=blur_radius 0,set=set r_blur 3,wait=1,gfxis=blur_radius 3,gfxis=blur_shape 1.33,\
-set=set r_blur 4,wait=1,gfxis=blur_radius 4,set=set r_blur 0,wait=1,gfxis=blur_radius 0,\
-cgis=gun 1,set=set cg_drawGun 0,wait=1,cgis=gun 0,shot=no-gun,set=set cg_drawGun 1,wait=1,cgis=gun 1,\
-cgis=hud2d 1,set=set cg_draw2D 0,wait=1,cgis=hud2d 0,shot=no-2d,set=set cg_draw2D 1,wait=1,cgis=hud2d 1,\
-shock=8000,wait=1,cgis=shock 1,set=set cg_drawShellshock 0,wait=1,cgis=shock 0,set=set cg_drawShellshock 1,wait=1,cgis=shock 1,\
-server=set bot_idle 1,wait=1,fxmark,set=set cg_blood 0,hitflesh,wait=1,cgis=fx:bullet_impact_noblood +1,cgis=fx:bullet_impact_flesh +0,\
-set=set cg_blood 1,hitflesh,wait=1,cgis=fx:bullet_impact_flesh +1,cgis=fx:bullet_impact_noblood +1,\
-set=set cg_brass 0,wait=0.1,fxmark,holdkey=mouse1,wait=1,releasekey=mouse1,cgis=fx:shell_eject +0,set=set cg_brass 1,\
-cgis=fullbright 0,set=set r_fullbright 1,wait=1,cgis=fullbright 1,shot=fullbright,set=set r_fullbright 0,wait=1,cgis=fullbright 0,\
-cgis=centertime 3000,set=set cg_centertime 1.5,wait=1,cgis=centertime 1500,set=set cg_centertime 3,\
-set=set cg_crosshairAlpha 0,set=set cg_crosshairAlphaMin 0,wait=1,cgis=crosshair_alpha 0.00,\
-set=set cg_crosshairAlphaMin 0.75,wait=1,cgis=crosshair_alpha 0.75,holdkey=mouse2,releasekey=mouse2,wait=1,cgis=crosshair_alpha hidden,\
-holdkey=mouse2,releasekey=mouse2,wait=1,cgis=crosshair_alpha 0.75,set=set cg_crosshairAlpha 1,set=set cg_crosshairAlphaMin 0.5,\
-cgis=heli_camera -1000 50 15 0 1900 2100 2400 4 2,\
-set=set cg_heliKillCamDist 500,set=set cg_heliKillCamFov 40,set=set cg_heliKillCamZDist 80,\
-set=set cg_heliKillCamNearBlurStart 10,set=set cg_heliKillCamNearBlurEnd 200,\
-set=set cg_heliKillCamFarBlurStart 150,set=set cg_heliKillCamFarBlurDist 400,\
-set=set cg_heliKillCamNearBlur 6,set=set cg_heliKillCamFarBlur 3,wait=1,cgis=heli_camera -500 80 40 10 1300 1650 2050 6 3,\
-set=set cg_airstrikeKillCamDist 300,set=set cg_airstrikeKillCamFov 60,set=set cg_airstrikeKillCamCloseZDist 40,\
-set=set cg_airstrikeKillCamNearBlurStart 20,set=set cg_airstrikeKillCamNearBlurEnd 120,\
-set=set cg_airstrikeKillCamFarBlurStart 200,set=set cg_airstrikeKillCamFarBlurDist 500,\
-set=set cg_airstrikeKillCamNearBlur 7,set=set cg_airstrikeKillCamFarBlur 5,wait=1,cgis=air_camera 340 60 20 220 540 1040 7 5,\
-set=set r_brightness 0.25,wait=1,cgis=brightness 0.25,set=set r_brightness 0,wait=1,cgis=brightness 0.00,\
-set=set r_contrast 2,set=set r_desaturation 0,wait=1,cgis=film_sample 0.00 2.00 0.25,\
-set=set r_desaturation 2,wait=1,cgis=film_sample 0.00 2.00 0.75,\
-set=set r_contrast 1,set=set r_desaturation 1,wait=1,cgis=film_sample 0.00 1.00 0.50,\
-set=set r_filmUseTweaks 1,set=set r_filmTweakEnable 1,wait=1,\
-gfxis=film_tweak 0 1.4 0.2 0 1.1 1.05 0.85 0.7 0.85 1,\
-set=set r_filmTweakContrast 1.5,set=set r_filmTweakBrightness 0.1,set=set r_filmTweakDesaturation 0.25,set=set r_filmTweakInvert 1,\
-set=set r_filmTweakLightTint 0.5 1 2,set=set r_filmTweakDarkTint 0 0 0,wait=1,\
-gfxis=film_tweak 0.1 1.5 0.25 1 0.5 1 2 0 0 0,cgis=film_sample 0.10 1.50 0.25,\
-set=set r_filmUseTweaks 0,set=set r_filmTweakEnable 0,\
-set=set r_glowUseTweaks 1,set=set r_glowTweakEnable 1,wait=1,gfxis=glow_tweak 1 5 1 0.5,\
-set=set r_glowTweakRadius0 7,set=set r_glowTweakBloomIntensity0 1.5,set=set r_glowTweakBloomCutoff 0.3,wait=1,\
-gfxis=glow_tweak 1 7 1.5 0.3,\
-set=set r_glowTweakRadius0 3,set=set r_glowTweakBloomIntensity0 2,set=set r_glowTweakBloomCutoff 0.6,wait=1,\
-gfxis=glow_tweak 1 3 2 0.6,set=set r_glowUseTweaks 0,set=set r_glowTweakEnable 0,\
-fxmark,set=set cg_bloodLimitMsec 2000,set=set cg_bloodLimit 1,hitflesh,hitflesh,wait=1,cgis=fx:bullet_impact_flesh +1,\
-hitflesh,wait=1.2,cgis=fx:bullet_impact_flesh +1,hitflesh,cgis=fx:bullet_impact_flesh +2,\
-set=set cg_bloodLimitMsec 1,wait=0.1,hitflesh,wait=0.1,hitflesh,cgis=fx:bullet_impact_flesh +4,set=set cg_bloodLimit 0,set=set cg_bloodLimitMsec 330,\
-set=set cl_noprint 1,wait=1,console=echo hidden_print_369,wait=1,notsaw=hidden_print_369,\
-set=set cl_noprint 0,wait=1,console=echo visible_print_369,saw=visible_print_369:5,\
-set=set vid_xpos 40,set=set vid_ypos 60,vidrestart,wait=2,cgis=window_position 40 60,set=set vid_xpos 10000,set=set vid_ypos -10000,vidrestart,wait=2,cgis=window_position 4096 -4096,set=set vid_xpos 40,set=set vid_ypos 60,\
-set=set com_maxfps 20,wait=1,pacereset,wait=2,gfxis=pace 1,set=set com_maxfps 0,\
-set=set r_fullscreen 1,vidrestart,wait=2,gfxis=fullscreen 1,\
-set=set r_gamma 0.5,wait=1,shot=gamma-lo,set=set r_gamma 2,wait=1,shot=gamma-hi,set=set r_gamma 0.8,\
-set=set r_fullscreen 0,vidrestart,wait=2,gfxis=fullscreen 0,\
-fxdemo=distortion/distortion_tank_muzzleflash,wait=2,shotd=distort-on,\
-set=set r_distortion 0,vidrestart,wait=2,shot=distort-off,set=set r_distortion 1,vidrestart,wait=2,fxdemo=off,\
-dlight=0,wait=1,shot=dlight-off,dlight=1,wait=1,gfxis=dlights 1+,shot=dlight-on,dlight=0,\
-set=set r_aaSamples 1,set=set r_specular 1,set=set r_dof_enable 1,set=set r_glow_allowed 1,set=set sm_enable 1,\
-set=set r_zFeather 1,set=set r_drawWater 1,set=set r_texFilterAnisoMin 1,set=set r_texFilterMipMode Unchanged,\
-set=set r_aspectRatio auto,vidrestart,wait=2,gfxis=zfeather 1,gfxis=water 1,\
-gfxis=aa 1,gfxis=specular 1,gfxis=dof 1,gfxis=blur 0,holdkey=mouse2,releasekey=mouse2,wait=2,gfxis=blur 1,\
-holdkey=mouse2,releasekey=mouse2,wait=1,gfxis=glow 1,gfxis=shadows 1,gfxis=aspect 0.00,shot=gfx-off,\
-bobmark,holdkey=w,wait=1.5,releasekey=w,holdkey=s,wait=1.5,releasekey=s,cgis=eyebob 1,\
-console=set bg_bobMax 0,wait=1,bobmark,holdkey=w,wait=1.5,releasekey=w,holdkey=s,wait=1.5,releasekey=s,cgis=eyebob 0,\
-console=set bg_bobMax 8,wait=1,\
-losedevice,renderer=90,ingame=120,wait=2,gfxis=aa 1,shot=recovered,\
-console=setviewpos 200.8 2267.5 323.5 175.3 20,wait=1,laser=1,set=set cg_laserLight 0,wait=1,gfxis=postlights 0,\
-shot=laser-off,set=set cg_laserLight 1,wait=1,gfxis=postlights 1+,shot=laser-on,laser=0";
+/// Registration defaults observed before any write (#369).
+const DEFAULTS: &[(&str, &str)] = &[
+    ("r_znear", "4"),
+    ("r_znear_depthhack", "0.1"),
+    ("r_zfar", "0"),
+    ("r_outdoor", "1"),
+    ("r_outdoorAwayBias", "32"),
+    ("r_outdoorDownBias", "0"),
+    ("r_outdoorFeather", "8"),
+    ("r_filmUseTweaks", "0"),
+    ("r_filmTweakEnable", "0"),
+    ("r_filmTweakBrightness", "0"),
+    ("r_filmTweakContrast", "1.4"),
+    ("r_filmTweakDesaturation", "0.2"),
+    ("r_filmTweakInvert", "0"),
+    ("r_filmTweakLightTint", "1.1 1.05 0.85"),
+    ("r_filmTweakDarkTint", "0.7 0.85 1"),
+    ("r_glowUseTweaks", "0"),
+    ("r_glowTweakEnable", "0"),
+    ("r_glowTweakRadius0", "5"),
+    ("r_glowTweakBloomIntensity0", "1"),
+    ("r_glowTweakBloomCutoff", "0.5"),
+    ("r_blur", "0"),
+    ("r_sun_from_dvars", "0"),
+    ("r_lightTweakSunLight", "1"),
+    ("r_lightTweakSunColor", "0 1 0 1"),
+    ("r_lightTweakSunDirection", "0 0 0"),
+    ("r_lightTweakAmbient", "0.1"),
+    ("r_lightTweakAmbientColor", "1 0 0 1"),
+    ("r_lightTweakDiffuseFraction", "0.5"),
+    ("r_lightTweakSunDiffuseColor", "0 0 1 1"),
+    ("r_sunsprite_shader", "sun"),
+    ("r_sunsprite_size", "16"),
+    ("r_sunflare_shader", "sun_flare"),
+    ("r_sunflare_min_size", "0"),
+    ("r_sunflare_max_size", "2500"),
+    ("r_sunflare_max_alpha", "1"),
+    ("r_sunflare_fadein", "1"),
+    ("r_sunflare_fadeout", "1"),
+    ("r_sun_fx_position", "0 0 0"),
+];
+
+/// What the options menus write before the match: vsync off, a 4:3 screen, 16x antialiasing, the picmips, no soft
+/// smoke edges, water animation, specular, depth of field, glow or shadows, four dynamic lights, the texture filter.
+const MENU_SETTINGS: &[&str] = &[
+    "set r_vsync 0",
+    "set r_aspectRatio standard",
+    "set r_aaSamples 16",
+    "set r_picmip_manual 1",
+    "set r_picmip 0",
+    "set r_picmip_bump 1",
+    "set r_picmip_spec 1",
+    "set r_zFeather 0",
+    "set r_drawWater 0",
+    "set r_specular 0",
+    "set r_dof_enable 0",
+    "set r_glow_allowed 0",
+    "set sm_enable 0",
+    "set r_dlightLimit 4",
+    "set r_texFilterAnisoMin 2",
+    "set r_texFilterMipMode 2",
+];
+
+/// The menus' settings turned back in the running match.
+const MENU_SETTINGS_BACK: &[&str] = &[
+    "set r_aaSamples 1",
+    "set r_specular 1",
+    "set r_dof_enable 1",
+    "set r_glow_allowed 1",
+    "set sm_enable 1",
+    "set r_zFeather 1",
+    "set r_drawWater 1",
+    "set r_texFilterAnisoMin 1",
+    "set r_texFilterMipMode Unchanged",
+    "set r_aspectRatio auto",
+];
 
 /// Share of pixels a light must brighten, and by how much (of 255, in luma).
 const LIT_SHARE: f64 = 0.05;
@@ -189,25 +152,6 @@ fn brightened_share(off: &[u8], on: &[u8]) -> f64 {
     brightened(off, on, LIT_STEP) as f64 / (off.len() / 3).max(1) as f64
 }
 
-/// The frame with the test flash light brightens a real share of the picture compared with the frame without it.
-fn dynamic_light_lit(dir: &std::path::Path) -> Result<(), String> {
-    use super::client_models::decode;
-    let (w, h, off) = decode(&dir.join("dlight-off.png"))?;
-    let (w2, h2, on) = decode(&dir.join("dlight-on.png"))?;
-    if (w, h) != (w2, h2) {
-        return Err("dynamic light screenshots differ in size".into());
-    }
-    let share = brightened_share(&off, &on);
-    if share < LIT_SHARE {
-        return Err(format!(
-            "a dynamic light brightened only {:.1}% of the picture (need {:.0}%)",
-            share * 100.0,
-            LIT_SHARE * 100.0
-        ));
-    }
-    Ok(())
-}
-
 /// A laser sight with `cg_laserLight` on lights what it strikes (`gfx_laser_light`, #516): the frame with the post light
 /// brightens a patch of the floor where the laser strikes ([`LASER_STRIKE`]) against the same laser with
 /// `cg_laserLight` off. Returns the pixels it brightened.
@@ -238,6 +182,25 @@ fn crop(w: usize, h: usize, px: &[u8], [x0, x1, y0, y1]: [f64; 4]) -> Vec<u8> {
         .flat_map(|y| &px[(y * w + x0) * 3..(y * w + x1) * 3])
         .copied()
         .collect()
+}
+
+/// The frame with the test flash light brightens a real share of the picture compared with the frame without it.
+fn dynamic_light_lit(dir: &std::path::Path) -> Result<(), String> {
+    use super::client_models::decode;
+    let (w, h, off) = decode(&dir.join("dlight-off.png"))?;
+    let (w2, h2, on) = decode(&dir.join("dlight-on.png"))?;
+    if (w, h) != (w2, h2) {
+        return Err("dynamic light screenshots differ in size".into());
+    }
+    let share = brightened_share(&off, &on);
+    if share < LIT_SHARE {
+        return Err(format!(
+            "a dynamic light brightened only {:.1}% of the picture (need {:.0}%)",
+            share * 100.0,
+            LIT_SHARE * 100.0
+        ));
+    }
+    Ok(())
 }
 
 /// Mean luma (0..255) of packed RGB pixels.
@@ -322,6 +285,894 @@ fn distortion_samples_the_scene(dir: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Numbers compare within rounding and words exactly; a missing, extra or non-finite token fails. The comparison the
+/// client's `cvaris=` and `gfxis=` steps made.
+fn value_matches(have: &str, want: &str) -> bool {
+    let mut have = have.split_whitespace();
+    for want in want.split_whitespace() {
+        let Some(have) = have.next() else {
+            return false;
+        };
+        let ok = match (have.parse::<f32>(), want.parse::<f32>()) {
+            (Ok(h), Ok(w)) => h.is_finite() && w.is_finite() && (h - w).abs() <= 0.005,
+            _ => have == want,
+        };
+        if !ok {
+            return false;
+        }
+    }
+    have.next().is_none()
+}
+
+/// Types each line at the console, as the player does.
+fn typed(c: &mut Driven, lines: &[&str]) -> Result<(), String> {
+    for line in lines {
+        c.console(line)?;
+    }
+    Ok(())
+}
+
+/// A variable's value as the client holds it matches `want`.
+fn cvar_is(c: &mut Driven, name: &str, want: &str) -> Result<(), String> {
+    let r = c.ask(json!({"cmd": "cvar", "name": name}))?;
+    let have = r["value"].as_str().unwrap_or_default();
+    if value_matches(have, want) {
+        Ok(())
+    } else {
+        Err(format!("{name} is {have:?}, want {want:?}"))
+    }
+}
+
+/// One fact of a section of named facts (`gfx`, `cgame`) as its text; an error where it is unavailable.
+fn fact(c: &mut Driven, section: &str, name: &str) -> Result<String, String> {
+    let v = c.lookup(&format!("{section}.{name}"))?;
+    v.as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| format!("{section}.{name} is unavailable ({v})"))
+}
+
+/// What a graphics setting came to in the renderer or on the surface (`gfx`): `aa max` is the most samples the
+/// adapter offers, `1+` at least one.
+fn gfx_is(c: &mut Driven, name: &str, want: &str) -> Result<(), String> {
+    let have = fact(c, "gfx", name)?;
+    let want = if (name, want) == ("aa", "max") {
+        fact(c, "gfx", "aa_max")?
+    } else {
+        want.to_owned()
+    };
+    let ok = match want.strip_suffix('+') {
+        Some(min) => matches!(
+            (have.parse::<u64>(), min.parse::<u64>()),
+            (Ok(h), Ok(m)) if h >= m
+        ),
+        None => value_matches(&have, &want),
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("gfx {name} is {have:?}, want {want:?}"))
+    }
+}
+
+/// What the cgame drew last frame (`cgame`), exactly.
+fn cg_is(c: &mut Driven, name: &str, want: &str) -> Result<(), String> {
+    let have = fact(c, "cgame", name)?;
+    if have == want {
+        Ok(())
+    } else {
+        Err(format!("cgame {name} is {have:?}, want {want:?}"))
+    }
+}
+
+/// How often each effect kind has played (`fx.played`), to count what plays from now.
+fn fx_mark(c: &mut Driven) -> Result<Value, String> {
+    c.lookup("fx.played")
+}
+
+/// The effect `kind` played exactly `n` times since `mark` (so a wrong kind fails as much as a missing one).
+fn fx_since(c: &mut Driven, mark: &Value, kind: &str, n: u64) -> Result<(), String> {
+    let now = c
+        .lookup(&format!("fx.played.{kind}"))?
+        .as_u64()
+        .unwrap_or(0);
+    let delta = now.saturating_sub(mark[kind].as_u64().unwrap_or(0));
+    if delta == n {
+        Ok(())
+    } else {
+        Err(format!(
+            "{kind} played {delta} times since the mark, want {n}"
+        ))
+    }
+}
+
+/// The console's lines.
+fn console_lines(c: &mut Driven) -> Result<Vec<String>, String> {
+    Ok(c.lookup("console.lines")?
+        .as_array()
+        .map(|l| {
+            l.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// A console line with `text` within `limit`; with `reply`, not a typed line's echo (`] …`) but what the client or the
+/// server answered.
+fn saw(c: &mut Driven, text: &str, reply: bool, limit: Duration) -> Result<(), String> {
+    let end = Instant::now() + limit;
+    loop {
+        let seen = console_lines(c)?
+            .iter()
+            .any(|l| l.contains(text) && !(reply && l.starts_with("] ")));
+        if seen {
+            return Ok(());
+        }
+        if Instant::now() > end {
+            return Err(format!(
+                "no console line with {text:?} within {} s",
+                limit.as_secs_f32()
+            ));
+        }
+        c.pause(Duration::from_millis(100))?;
+    }
+}
+
+/// What the client or the server answered at the console.
+fn replied(c: &mut Driven, text: &str) -> Result<(), String> {
+    saw(c, text, true, Duration::from_secs(5))
+}
+
+/// No console line has `text` now.
+fn not_saw(c: &mut Driven, text: &str) -> Result<(), String> {
+    match console_lines(c)?.iter().find(|l| l.contains(text)) {
+        Some(l) => Err(format!("the console shows {l:?}")),
+        None => Ok(()),
+    }
+}
+
+/// One of the client's dev hooks: scenario setup no key or menu reaches.
+fn dev(c: &mut Driven, op: &str, arg: &str) -> Result<(), String> {
+    c.ask(json!({"cmd": "dev", "op": op, "arg": arg})).map(drop)
+}
+
+/// A mouse button pressed and let go, a frame apart.
+fn press(c: &mut Driven, button: &str) -> Result<(), String> {
+    c.button(button, "down")?;
+    c.button(button, "up")
+}
+
+/// Holds a key for `d`.
+fn hold(c: &mut Driven, key: &str, d: Duration) -> Result<(), String> {
+    c.key(key, "down")?;
+    c.pause(d)?;
+    c.key(key, "up")
+}
+
+/// The first frame from now that copied the scene for a distortion material, captured as `<name>.png`.
+fn capture_distortion(c: &mut Driven, name: &str) -> Result<(), String> {
+    let shot = c.ask(json!({"cmd": "capture", "after": "distortion"}))?;
+    let from = shot["path"]
+        .as_str()
+        .ok_or_else(|| format!("no capture path: {shot}"))?;
+    let to = c.dir.join(format!("{name}.png"));
+    std::fs::rename(from, &to).map_err(|e| format!("{from} -> {}: {e}", to.display()))
+}
+
+/// The listen server's team and class menus answered with the pointer, and the spawn.
+fn join(c: &mut Driven) -> Result<(), String> {
+    let secs = Duration::from_secs;
+    c.until(
+        json!({"menu.open": {"contains": TEAM_MENU}}),
+        secs(90),
+        "the team menu did not open",
+    )?;
+    c.click("auto_assign")?;
+    c.until(
+        json!({"menu.open": {"contains": CLASS_MENU}}),
+        secs(30),
+        "the class menu did not open after the team was picked",
+    )?;
+    c.pause(secs(1))?;
+    c.click("Assault")?;
+    c.until(
+        json!({"net.spawned": true, "player.alive": true}),
+        secs(120),
+        "the player did not spawn",
+    )?;
+    Ok(())
+}
+
+/// Walks forward and back with the movement keys.
+fn walk(c: &mut Driven) -> Result<(), String> {
+    hold(c, "w", Duration::from_millis(1500))?;
+    hold(c, "s", Duration::from_millis(1500))
+}
+
+/// The front end: registration defaults, the menus' settings applied with `vid_restart`, the values the dvars refuse,
+/// and a match started with the pointer through Start New Server.
+fn front_end(c: &mut Driven) -> Result<(), String> {
+    let secs = Duration::from_secs;
+    c.step("main menu", |c| {
+        c.until(
+            json!({"menu.open": {"contains": "main"}}),
+            secs(90),
+            "the main menu did not open",
+        )
+        .map(drop)
+    })?;
+    c.step("registered defaults", |c| {
+        for (name, want) in DEFAULTS {
+            cvar_is(c, name, want)?;
+        }
+        // The profile's `vid_xpos 40` and `vid_ypos 60` placed the window.
+        cg_is(c, "window_position", "40 60")
+    })?;
+    c.step("menu settings applied with vid_restart", |c| {
+        typed(c, MENU_SETTINGS)?;
+        c.console("vid_restart")?;
+        c.pause(secs(1))?;
+        gfx_is(c, "uncapped", "1")?;
+        gfx_is(c, "aspect", "1.33")
+    })?;
+    c.step("values the dvars refuse", |c| {
+        for (line, reply) in [
+            (
+                "set snd_khz 22",
+                "'22' is not a valid value for dvar 'snd_khz'",
+            ),
+            (
+                "set snd_enableEq 0",
+                "'0' is not a valid value for dvar 'snd_enableEq'",
+            ),
+            (
+                "set cg_drawLagometer 1",
+                "'1' is not a valid value for dvar 'cg_drawLagometer'",
+            ),
+        ] {
+            c.console(line)?;
+            replied(c, reply)?;
+        }
+        Ok(())
+    })?;
+    c.step("cheat dvars written before the match", |c| {
+        typed(c, &["set cg_drawGun 0", "set r_znear 0.5"])?;
+        cvar_is(c, "r_znear", "0.5")
+    })?;
+    c.step("Start New Server", |c| {
+        c.console("set ui_netGametypeName war")?;
+        c.click("Start New Server")?;
+        c.until(
+            json!({"menu.open": {"contains": "createserver"}}),
+            secs(20),
+            "Start New Server did not open the server settings",
+        )?;
+        c.click("Start")?;
+        join(c)?;
+        c.pause(secs(2))
+    })
+}
+
+/// The menu-started match (`sv_cheats` 0): the menus' settings in the renderer, the cheat dvars reset and their writes
+/// refused, the frame counter and subtitles.
+fn menu_match(c: &mut Driven) -> Result<(), String> {
+    let secs = Duration::from_secs;
+    c.step("the menus' settings in the match", |c| {
+        for (name, want) in [
+            ("aa", "max"),
+            ("picmip", "0 1 1"),
+            ("zfeather", "0"),
+            ("water", "0"),
+            ("specular", "0"),
+            ("dof", "0"),
+            ("blur", "0"),
+            ("glow", "0"),
+            ("shadows", "0"),
+            ("aniso", "2 4"),
+            ("mipmode", "2"),
+        ] {
+            gfx_is(c, name, want)?;
+        }
+        c.capture("gfx-on").map(drop)
+    })?;
+    c.step("cheat dvars reset by the match", |c| {
+        gfx_is(c, "nearfar", "4 0")?;
+        gfx_is(c, "depthhack_near", "0.1")?;
+        gfx_is(c, "outdoor", "1 32 0 8")?;
+        gfx_is(c, "blur_radius", "0")?;
+        cvar_is(c, "r_znear", "4")
+    })?;
+    c.step("protected writes refused", |c| {
+        c.console("set r_znear 0.5")?;
+        replied(c, "r_znear is cheat protected.")?;
+        cvar_is(c, "r_znear", "4")?;
+        gfx_is(c, "nearfar", "4 0")?;
+        c.console("set r_zfar 2000")?;
+        replied(c, "r_zfar is cheat protected.")?;
+        cvar_is(c, "r_zfar", "0")?;
+        c.console("set r_znear_depthhack 0.25")?;
+        replied(c, "r_znear_depthhack is cheat protected.")?;
+        gfx_is(c, "depthhack_near", "0.1")?;
+        c.console("set r_blur 3")?;
+        replied(c, "r_blur is cheat protected.")?;
+        gfx_is(c, "blur_radius", "0")?;
+        for name in ["r_filmUseTweaks", "r_glowUseTweaks", "r_sun_from_dvars"] {
+            c.console(&format!("set {name} 1"))?;
+            replied(c, &format!("{name} is cheat protected."))?;
+            cvar_is(c, name, "0")?;
+        }
+        c.console("set r_lightTweakAmbient 0.9")?;
+        replied(c, "r_lighttweakambient is read only.")?;
+        cg_is(c, "gun", "1")?;
+        c.console("set cg_drawGun 0")?;
+        replied(c, "cg_drawGun is cheat protected.")?;
+        c.pause(secs(1))?;
+        cg_is(c, "gun", "1")?;
+        c.console("set sv_cheats 1")?;
+        replied(c, "sv_cheats is write protected.")
+    })?;
+    c.step("frame counter", |c| {
+        cg_is(c, "fps", "0")?;
+        c.console("set cg_drawFPS 1")?;
+        c.pause(secs(1))?;
+        cg_is(c, "fps", "1")?;
+        c.capture("fps")?;
+        c.console("set cg_drawFPS Off")?;
+        c.pause(secs(1))?;
+        cg_is(c, "fps", "0")
+    })?;
+    c.step("subtitles", |c| {
+        dev(c, "subtitle", "MP_WAITING")?;
+        c.pause(Duration::from_millis(500))?;
+        cg_is(c, "subtitle", "1")?;
+        c.pause(secs(4))?;
+        cg_is(c, "subtitle", "0")?;
+        c.console("set cg_subtitles 0")?;
+        dev(c, "subtitle", "MP_WAITING")?;
+        c.pause(Duration::from_millis(500))?;
+        cg_is(c, "subtitle", "0")?;
+        c.console("set cg_subtitles 1")
+    })
+}
+
+/// The match started with `devmap` typed at the console: the live renderer dvars, without a renderer restart.
+fn devmap_renderer(c: &mut Driven) -> Result<(), String> {
+    let secs = Duration::from_secs;
+    c.step("devmap at the console", |c| {
+        c.console("devmap mp_crash")?;
+        join(c)?;
+        c.console("god")?;
+        c.pause(secs(1))
+    })?;
+    c.step("near/far, depth hack, outdoor and sun tweaks", |c| {
+        gfx_is(c, "nearfar", "4 0")?;
+        gfx_is(c, "depthhack_near", "0.1")?;
+        gfx_is(c, "outdoor", "1 32 0 8")?;
+        typed(
+            c,
+            &[
+                "set r_znear 0.5",
+                "set r_zfar 2000",
+                "set r_znear_depthhack 0.25",
+                "set r_outdoor 0",
+                "set r_outdoorAwayBias 4",
+                "set r_outdoorDownBias 2",
+                "set r_outdoorFeather 16",
+                "set r_sun_from_dvars 1",
+            ],
+        )?;
+        c.pause(secs(1))?;
+        gfx_is(c, "sun_flare", "1 16 0 1250 1 1000 1000 sun sun_flare")?;
+        typed(
+            c,
+            &[
+                "set r_lightTweakSunLight 4",
+                "set r_lightTweakSunColor 0 0 2",
+                "set r_lightTweakSunDirection 10 20 0",
+            ],
+        )?;
+        c.pause(secs(1))?;
+        gfx_is(c, "nearfar", "0.5 2000")?;
+        gfx_is(c, "depthhack_near", "0.25")?;
+        gfx_is(c, "outdoor", "0 4 2 16")?;
+        gfx_is(c, "sun_tweak", "4 0 0 1 10 20 0")?;
+        typed(
+            c,
+            &[
+                "set r_znear 1",
+                "set r_zfar 4000",
+                "set r_znear_depthhack 0.2",
+                "set r_outdoor 1",
+                "set r_outdoorAwayBias 12",
+                "set r_outdoorDownBias 3",
+                "set r_outdoorFeather 6",
+                "set r_lightTweakSunLight 3",
+                "set r_lightTweakSunColor 1 0 0",
+                "set r_lightTweakSunDirection 0 90 0",
+            ],
+        )?;
+        c.pause(secs(1))?;
+        gfx_is(c, "nearfar", "1 4000")?;
+        gfx_is(c, "depthhack_near", "0.2")?;
+        gfx_is(c, "outdoor", "1 12 3 6")?;
+        gfx_is(c, "sun_tweak", "3 1 0 0 0 90 0")
+    })?;
+    c.step("sun flare overrides", |c| {
+        typed(
+            c,
+            &[
+                "set r_lightTweakSunLight 1",
+                "set r_lightTweakSunColor 1 1 1",
+                "set r_lightTweakSunDirection 0 0 0",
+                "set r_sunsprite_shader sun",
+                "set r_sunflare_shader sun_flare",
+                "set r_sunsprite_size 24",
+                "set r_sunflare_min_size 8",
+                "set r_sunflare_max_size 1200",
+                "set r_sunflare_max_alpha 0.6",
+                "set r_sunflare_fadein 0.25",
+                "set r_sunflare_fadeout 0.5",
+                "set r_sun_fx_position 0 90 0",
+            ],
+        )?;
+        c.pause(secs(1))?;
+        gfx_is(c, "sun_flare", "1 24 4 600 0.6 250 500 sun sun_flare")?;
+        gfx_is(c, "sun_fx_position", "0 1 0")?;
+        // The overrides persist once their gate closes.
+        typed(
+            c,
+            &[
+                "set r_sun_from_dvars 0",
+                "set r_sunsprite_size 40",
+                "set r_sunflare_max_size 1800",
+            ],
+        )?;
+        c.pause(secs(1))?;
+        gfx_is(c, "sun_flare", "1 24 4 600 0.6 250 500 sun sun_flare")?;
+        gfx_is(c, "sun_fx_position", "0 1 0")
+    })?;
+    c.step("near/far and outdoor back", |c| {
+        typed(
+            c,
+            &[
+                "set r_znear 4",
+                "set r_zfar 0",
+                "set r_znear_depthhack 0.1",
+                "set r_outdoorAwayBias 32",
+                "set r_outdoorDownBias 0",
+                "set r_outdoorFeather 8",
+            ],
+        )?;
+        c.pause(secs(1))?;
+        gfx_is(c, "nearfar", "4 0")?;
+        gfx_is(c, "depthhack_near", "0.1")?;
+        gfx_is(c, "outdoor", "1 32 0 8")
+    })?;
+    c.step("r_blur shaped for 4:3", |c| {
+        gfx_is(c, "blur_radius", "0")?;
+        c.console("set r_blur 3")?;
+        c.pause(secs(1))?;
+        gfx_is(c, "blur_radius", "3")?;
+        gfx_is(c, "blur_shape", "1.33")?;
+        c.console("set r_blur 4")?;
+        c.pause(secs(1))?;
+        gfx_is(c, "blur_radius", "4")?;
+        c.console("set r_blur 0")?;
+        c.pause(secs(1))?;
+        gfx_is(c, "blur_radius", "0")
+    })
+}
+
+/// A cgame fact one dvar switches: `name` is `before` with the dvar as it is, `after` once `change` is typed (the frame
+/// captured as `shot` when given), and `before` again once `back` is.
+fn toggled(
+    c: &mut Driven,
+    name: &str,
+    [before, after]: [&str; 2],
+    [change, back]: [&str; 2],
+    shot: Option<&str>,
+) -> Result<(), String> {
+    let secs = Duration::from_secs;
+    cg_is(c, name, before)?;
+    c.console(change)?;
+    c.pause(secs(1))?;
+    cg_is(c, name, after)?;
+    if let Some(shot) = shot {
+        c.capture(shot)?;
+    }
+    c.console(back)?;
+    c.pause(secs(1))?;
+    cg_is(c, name, before)
+}
+
+/// The devmap match's cgame: view model, 2D, shellshock, blood and brass, unlit scene, centre prints, crosshair,
+/// killcam cameras and the film and glow output.
+fn devmap_cgame(c: &mut Driven, notes: &mut Vec<String>) -> Result<(), String> {
+    let secs = Duration::from_secs;
+    c.step("view model", |c| {
+        toggled(
+            c,
+            "gun",
+            ["1", "0"],
+            ["set cg_drawGun 0", "set cg_drawGun 1"],
+            Some("no-gun"),
+        )
+    })?;
+    c.step("2D", |c| {
+        toggled(
+            c,
+            "hud2d",
+            ["1", "0"],
+            ["set cg_draw2D 0", "set cg_draw2D 1"],
+            Some("no-2d"),
+        )
+    })?;
+    c.step("shellshock", |c| {
+        dev(c, "shock", "8000")?;
+        c.pause(secs(1))?;
+        toggled(
+            c,
+            "shock",
+            ["1", "0"],
+            ["set cg_drawShellshock 0", "set cg_drawShellshock 1"],
+            None,
+        )
+    })?;
+    c.step("blood and brass", |c| {
+        c.ask(json!({"cmd": "server", "op": "exec", "line": "set bot_idle 1"}))?;
+        c.pause(secs(1))?;
+        let impact_start = c.lookup("fx.impacts")?.as_array().map_or(0, Vec::len);
+        let result = (|| {
+            let mark = fx_mark(c)?;
+            c.console("set cg_blood 0")?;
+            dev(c, "hitflesh", "")?;
+            c.pause(secs(1))?;
+            fx_since(c, &mark, "bullet_impact_noblood", 1)?;
+            fx_since(c, &mark, "bullet_impact_flesh", 0)?;
+            c.console("set cg_blood 1")?;
+            dev(c, "hitflesh", "")?;
+            c.pause(secs(1))?;
+            fx_since(c, &mark, "bullet_impact_flesh", 1)?;
+            fx_since(c, &mark, "bullet_impact_noblood", 1)?;
+            c.console("set cg_brass 0")?;
+            c.pause(Duration::from_millis(100))?;
+            let mark = fx_mark(c)?;
+            hold(c, "mouse1", secs(1))?;
+            fx_since(c, &mark, "shell_eject", 0)?;
+            c.console("set cg_brass 1")
+        })();
+        let impacts = c.lookup("fx.impacts")?;
+        let window = impacts.as_array().map(|v| &v[impact_start.min(v.len())..]);
+        notes.push(format!("blood and brass impacts: {}", json!(window)));
+        result
+    })?;
+    c.step("unlit scene", |c| {
+        toggled(
+            c,
+            "fullbright",
+            ["0", "1"],
+            ["set r_fullbright 1", "set r_fullbright 0"],
+            Some("fullbright"),
+        )
+    })?;
+    c.step("centre print time", |c| {
+        cg_is(c, "centertime", "3000")?;
+        c.console("set cg_centertime 1.5")?;
+        c.pause(secs(1))?;
+        cg_is(c, "centertime", "1500")?;
+        c.console("set cg_centertime 3")
+    })?;
+    c.step("crosshair opacity", |c| {
+        typed(
+            c,
+            &["set cg_crosshairAlpha 0", "set cg_crosshairAlphaMin 0"],
+        )?;
+        c.pause(secs(1))?;
+        cg_is(c, "crosshair_alpha", "0.00")?;
+        c.console("set cg_crosshairAlphaMin 0.75")?;
+        c.pause(secs(1))?;
+        cg_is(c, "crosshair_alpha", "0.75")?;
+        // Down the sights the stock gates leave no reticle; back from them it shows again.
+        press(c, "mouse2")?;
+        c.pause(secs(1))?;
+        cg_is(c, "crosshair_alpha", "hidden")?;
+        press(c, "mouse2")?;
+        c.pause(secs(1))?;
+        cg_is(c, "crosshair_alpha", "0.75")?;
+        typed(
+            c,
+            &["set cg_crosshairAlpha 1", "set cg_crosshairAlphaMin 0.5"],
+        )
+    })?;
+    c.step("killcam cameras", |c| {
+        cg_is(c, "heli_camera", "-1000 50 15 0 1900 2100 2400 4 2")?;
+        typed(
+            c,
+            &[
+                "set cg_heliKillCamDist 500",
+                "set cg_heliKillCamFov 40",
+                "set cg_heliKillCamZDist 80",
+                "set cg_heliKillCamNearBlurStart 10",
+                "set cg_heliKillCamNearBlurEnd 200",
+                "set cg_heliKillCamFarBlurStart 150",
+                "set cg_heliKillCamFarBlurDist 400",
+                "set cg_heliKillCamNearBlur 6",
+                "set cg_heliKillCamFarBlur 3",
+            ],
+        )?;
+        c.pause(secs(1))?;
+        cg_is(c, "heli_camera", "-500 80 40 10 1300 1650 2050 6 3")?;
+        typed(
+            c,
+            &[
+                "set cg_airstrikeKillCamDist 300",
+                "set cg_airstrikeKillCamFov 60",
+                "set cg_airstrikeKillCamCloseZDist 40",
+                "set cg_airstrikeKillCamNearBlurStart 20",
+                "set cg_airstrikeKillCamNearBlurEnd 120",
+                "set cg_airstrikeKillCamFarBlurStart 200",
+                "set cg_airstrikeKillCamFarBlurDist 500",
+                "set cg_airstrikeKillCamNearBlur 7",
+                "set cg_airstrikeKillCamFarBlur 5",
+            ],
+        )?;
+        c.pause(secs(1))?;
+        cg_is(c, "air_camera", "340 60 20 220 540 1040 7 5")
+    })?;
+    c.step("brightness, contrast and desaturation", |c| {
+        c.console("set r_brightness 0.25")?;
+        c.pause(secs(1))?;
+        cg_is(c, "brightness", "0.25")?;
+        c.console("set r_brightness 0")?;
+        c.pause(secs(1))?;
+        cg_is(c, "brightness", "0.00")?;
+        typed(c, &["set r_contrast 2", "set r_desaturation 0"])?;
+        c.pause(secs(1))?;
+        cg_is(c, "film_sample", "0.00 2.00 0.25")?;
+        c.console("set r_desaturation 2")?;
+        c.pause(secs(1))?;
+        cg_is(c, "film_sample", "0.00 2.00 0.75")?;
+        typed(c, &["set r_contrast 1", "set r_desaturation 1"])?;
+        c.pause(secs(1))?;
+        cg_is(c, "film_sample", "0.00 1.00 0.50")
+    })?;
+    c.step("film tweaks", |c| {
+        typed(c, &["set r_filmUseTweaks 1", "set r_filmTweakEnable 1"])?;
+        c.pause(secs(1))?;
+        gfx_is(c, "film_tweak", "0 1.4 0.2 0 1.1 1.05 0.85 0.7 0.85 1")?;
+        typed(
+            c,
+            &[
+                "set r_filmTweakContrast 1.5",
+                "set r_filmTweakBrightness 0.1",
+                "set r_filmTweakDesaturation 0.25",
+                "set r_filmTweakInvert 1",
+                "set r_filmTweakLightTint 0.5 1 2",
+                "set r_filmTweakDarkTint 0 0 0",
+            ],
+        )?;
+        c.pause(secs(1))?;
+        gfx_is(c, "film_tweak", "0.1 1.5 0.25 1 0.5 1 2 0 0 0")?;
+        cg_is(c, "film_sample", "0.10 1.50 0.25")?;
+        typed(c, &["set r_filmUseTweaks 0", "set r_filmTweakEnable 0"])
+    })?;
+    c.step("glow tweaks", |c| {
+        typed(c, &["set r_glowUseTweaks 1", "set r_glowTweakEnable 1"])?;
+        c.pause(secs(1))?;
+        gfx_is(c, "glow_tweak", "1 5 1 0.5")?;
+        typed(
+            c,
+            &[
+                "set r_glowTweakRadius0 7",
+                "set r_glowTweakBloomIntensity0 1.5",
+                "set r_glowTweakBloomCutoff 0.3",
+            ],
+        )?;
+        c.pause(secs(1))?;
+        gfx_is(c, "glow_tweak", "1 7 1.5 0.3")?;
+        typed(
+            c,
+            &[
+                "set r_glowTweakRadius0 3",
+                "set r_glowTweakBloomIntensity0 2",
+                "set r_glowTweakBloomCutoff 0.6",
+            ],
+        )?;
+        c.pause(secs(1))?;
+        gfx_is(c, "glow_tweak", "1 3 2 0.6")?;
+        typed(c, &["set r_glowUseTweaks 0", "set r_glowTweakEnable 0"])
+    })?;
+    c.step("blood limit", |c| {
+        let mark = fx_mark(c)?;
+        typed(c, &["set cg_bloodLimitMsec 2000", "set cg_bloodLimit 1"])?;
+        // Two hits a frame apart: the second is within the limit.
+        dev(c, "hitflesh", "")?;
+        dev(c, "hitflesh", "")?;
+        c.pause(secs(1))?;
+        fx_since(c, &mark, "bullet_impact_flesh", 1)?;
+        // A third about a second later is still within it; a fourth past two seconds is not.
+        dev(c, "hitflesh", "")?;
+        c.pause(Duration::from_millis(1200))?;
+        fx_since(c, &mark, "bullet_impact_flesh", 1)?;
+        dev(c, "hitflesh", "")?;
+        fx_since(c, &mark, "bullet_impact_flesh", 2)?;
+        c.console("set cg_bloodLimitMsec 1")?;
+        c.pause(Duration::from_millis(100))?;
+        dev(c, "hitflesh", "")?;
+        c.pause(Duration::from_millis(100))?;
+        dev(c, "hitflesh", "")?;
+        fx_since(c, &mark, "bullet_impact_flesh", 4)?;
+        typed(c, &["set cg_bloodLimit 0", "set cg_bloodLimitMsec 330"])
+    })?;
+    c.step("cl_noprint", |c| {
+        c.console("set cl_noprint 1")?;
+        c.pause(secs(1))?;
+        c.console("echo hidden_print_369")?;
+        c.pause(secs(1))?;
+        not_saw(c, "hidden_print_369")?;
+        c.console("set cl_noprint 0")?;
+        c.pause(secs(1))?;
+        c.console("echo visible_print_369")?;
+        saw(c, "visible_print_369", false, secs(5))
+    })
+}
+
+/// The devmap match's window and surface: position, frame cap, fullscreen, gamma, distortion, the dynamic light, the
+/// menus' settings back, the eye bob and a lost device.
+fn devmap_window(c: &mut Driven) -> Result<(), String> {
+    let secs = Duration::from_secs;
+    c.step("window position", |c| {
+        typed(c, &["set vid_xpos 40", "set vid_ypos 60", "vid_restart"])?;
+        c.pause(secs(2))?;
+        cg_is(c, "window_position", "40 60")?;
+        typed(
+            c,
+            &["set vid_xpos 10000", "set vid_ypos -10000", "vid_restart"],
+        )?;
+        c.pause(secs(2))?;
+        cg_is(c, "window_position", "4096 -4096")?;
+        typed(c, &["set vid_xpos 40", "set vid_ypos 60"])
+    })?;
+    c.step("frame cap", |c| {
+        c.console("set com_maxfps 20")?;
+        c.pause(secs(1))?;
+        dev(c, "pacereset", "")?;
+        c.pause(secs(2))?;
+        gfx_is(c, "pace", "1")?;
+        c.console("set com_maxfps 0")
+    })?;
+    c.step("fullscreen and gamma", |c| {
+        typed(c, &["set r_fullscreen 1", "vid_restart"])?;
+        c.pause(secs(2))?;
+        gfx_is(c, "fullscreen", "1")?;
+        c.console("set r_gamma 0.5")?;
+        c.pause(secs(1))?;
+        c.capture("gamma-lo")?;
+        c.console("set r_gamma 2")?;
+        c.pause(secs(1))?;
+        c.capture("gamma-hi")?;
+        c.console("set r_gamma 0.8")?;
+        typed(c, &["set r_fullscreen 0", "vid_restart"])?;
+        c.pause(secs(2))?;
+        gfx_is(c, "fullscreen", "0")
+    })?;
+    c.step("distortion", |c| {
+        dev(c, "fxdemo", "distortion/distortion_tank_muzzleflash")?;
+        c.pause(secs(2))?;
+        capture_distortion(c, "distort-on")?;
+        typed(c, &["set r_distortion 0", "vid_restart"])?;
+        c.pause(secs(2))?;
+        c.capture("distort-off")?;
+        typed(c, &["set r_distortion 1", "vid_restart"])?;
+        c.pause(secs(2))?;
+        dev(c, "fxdemo", "off")
+    })?;
+    c.step("dynamic light", |c| {
+        dev(c, "dlight", "0")?;
+        c.pause(secs(1))?;
+        c.capture("dlight-off")?;
+        dev(c, "dlight", "1")?;
+        c.pause(secs(1))?;
+        gfx_is(c, "dlights", "1+")?;
+        c.capture("dlight-on")?;
+        dev(c, "dlight", "0")
+    })?;
+    c.step("menu settings back with vid_restart", |c| {
+        typed(c, MENU_SETTINGS_BACK)?;
+        c.console("vid_restart")?;
+        c.pause(secs(2))?;
+        for (name, want) in [
+            ("zfeather", "1"),
+            ("water", "1"),
+            ("aa", "1"),
+            ("specular", "1"),
+            ("dof", "1"),
+            ("blur", "0"),
+        ] {
+            gfx_is(c, name, want)?;
+        }
+        // Down the sights depth of field blurs the picture; hip-fired it does not.
+        press(c, "mouse2")?;
+        c.pause(secs(2))?;
+        gfx_is(c, "blur", "1")?;
+        press(c, "mouse2")?;
+        c.pause(secs(1))?;
+        gfx_is(c, "glow", "1")?;
+        gfx_is(c, "shadows", "1")?;
+        gfx_is(c, "aspect", "0.00")?;
+        c.capture("gfx-off").map(drop)
+    })?;
+    c.step("eye bob", |c| {
+        dev(c, "bobmark", "")?;
+        walk(c)?;
+        cg_is(c, "eyebob", "1")?;
+        c.console("set bg_bobMax 0")?;
+        c.pause(secs(1))?;
+        dev(c, "bobmark", "")?;
+        walk(c)?;
+        cg_is(c, "eyebob", "0")?;
+        c.console("set bg_bobMax 8")?;
+        c.pause(secs(1))
+    })?;
+    c.step("device lost and made again", |c| {
+        dev(c, "losedevice", "")?;
+        c.until(
+            json!({"client.in_world": true}),
+            secs(90),
+            "the world was not drawable again",
+        )?;
+        c.until(
+            json!({"net.spawned": true, "player.alive": true}),
+            secs(120),
+            "the match did not go on after the device was made again",
+        )?;
+        c.pause(secs(2))?;
+        gfx_is(c, "aa", "1")?;
+        c.capture("recovered").map(drop)
+    })?;
+    // A test laser sight aimed at the garage floor draws its post light only with `cg_laserLight` on (#516).
+    c.step("laser post light", |c| {
+        c.console("setviewpos 200.8 2267.5 323.5 175.3 20")?;
+        c.pause(secs(1))?;
+        dev(c, "laser", "1")?;
+        c.console("set cg_laserLight 0")?;
+        c.pause(secs(1))?;
+        gfx_is(c, "postlights", "0")?;
+        c.capture("laser-off")?;
+        c.console("set cg_laserLight 1")?;
+        c.pause(secs(1))?;
+        gfx_is(c, "postlights", "1+")?;
+        c.capture("laser-on")?;
+        dev(c, "laser", "0")
+    })
+}
+
+/// The whole run, step by step.
+fn play(c: &mut Driven, notes: &mut Vec<String>) -> Result<(), String> {
+    front_end(c)?;
+    menu_match(c)?;
+    devmap_renderer(c)?;
+    devmap_cgame(c, notes)?;
+    devmap_window(c)
+}
+
+/// The run's report in the shape the session verdict reads (the steps, `gpu_health`, `render`, the match's `net`
+/// counters and the HUD facts), written as `control-run.json` with the state it came from.
+fn assemble(c: &mut Driven) -> Result<Value, String> {
+    let written = c.report(
+        "control-run.json",
+        &["client", "render", "report", "hud", "gfx", "cgame"],
+    )?;
+    Ok(json!({
+        "steps": written["steps"],
+        "gpu_health": written["client"]["gpu_health"],
+        "render": written["render"],
+        "net": written["report"],
+        "hud": written["hud"]["report"],
+    }))
+}
+
 pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let Some(client) = locate_client() else {
         return Ok(StageReport::new(NAME, Status::Skipped)
@@ -333,78 +1184,91 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     if let Some(r) = no_display(&client, NAME)? {
         return Ok(r);
     }
-    let config_dir = ctx.dir.join("config");
-    let profile = config_dir.join("players/profiles/harness");
+    // `Driven` gives the run the harness profile under `<dir>/config`; the window starts where it places it.
+    let profile = ctx.dir.join("config/players/profiles/harness");
     std::fs::create_dir_all(&profile)?;
     std::fs::write(
         profile.join("config_mp.cfg"),
         "seta vid_xpos 40\nseta vid_ypos 60\n",
     )?;
     let mut out = StageReport::new(NAME, Status::Passed);
-    match run_client(
-        &client,
-        install,
-        &ctx.dir,
-        &config_dir,
-        &["--bots", "3"],
-        STEPS,
-        LIMIT,
-    ) {
-        Ok(report) => {
-            for f in [
-                "ui-script.json",
-                "gfx-on.png",
-                "gfx-off.png",
-                "dlight-off.png",
-                "dlight-on.png",
-                "gamma-lo.png",
-                "gamma-hi.png",
-                "distort-on.png",
-                "distort-off.png",
-                "recovered.png",
-                "fps.png",
-                "no-gun.png",
-                "no-2d.png",
-                "fullbright.png",
-                "laser-off.png",
-                "laser-on.png",
-            ] {
-                out.files.push(f.into());
-            }
+    let mut c = match Driven::start(&client, install, &ctx.dir, &["--bots", "3"]) {
+        Ok(c) => c,
+        Err(e) => {
+            out.status = Status::Failed;
+            out.reason = Some(e);
+            return Ok(out);
+        }
+    };
+    out.notes.push(format!("channel {}", c.addr));
+    let played = play(&mut c, &mut out.notes);
+    // Read before the run ends, played out or not: a failed step still says what the renderer and the device did.
+    let report = assemble(&mut c);
+    let status = c.finish(Duration::from_secs(30));
+    for f in [
+        "control-run.json",
+        "gfx-on.png",
+        "gfx-off.png",
+        "dlight-off.png",
+        "dlight-on.png",
+        "gamma-lo.png",
+        "gamma-hi.png",
+        "distort-on.png",
+        "distort-off.png",
+        "recovered.png",
+        "fps.png",
+        "no-gun.png",
+        "no-2d.png",
+        "fullbright.png",
+        "laser-off.png",
+        "laser-on.png",
+    ] {
+        if ctx.dir.join(f).is_file() {
+            out.files.push(f.into());
+        }
+    }
+    let mut laser_lit = None;
+    let problems: Vec<String> = match (played, report) {
+        (Err(e), _) => vec![e],
+        (Ok(()), Err(e)) => vec![format!("the run's report could not be read: {e}")],
+        (Ok(()), Ok(report)) => {
             let laser = laser_light_lit(&ctx.dir);
-            let problems: Vec<String> = verdict(&report)
+            laser_lit = laser.as_ref().ok().copied();
+            verdict(&report)
                 .into_iter()
                 .chain(dynamic_light_lit(&ctx.dir).err())
                 .chain(gamma_moves_brightness(&ctx.dir).err())
                 .chain(distortion_samples_the_scene(&ctx.dir).err())
                 .chain(device_recovers(&ctx.dir, &report).err())
-                .chain(laser.as_ref().err().cloned())
-                .collect();
-            if let Ok(lit) = laser {
-                out.notes.push(format!(
-                    "a laser sight's post light brightened {lit} pixels where it struck"
-                ));
-            }
-            if !problems.is_empty() {
-                out.status = Status::Failed;
-                out.reason = Some(problems.join("; "));
-            } else {
-                out.notes.push(
-                    "vsync, aspect, antialiasing, specular, depth of field, glow and shadows took the menu's values, in the menu and in a running match".into(),
-                );
-            }
+                .chain(laser.err())
+                .collect()
         }
-        Err(e) => {
-            out.status = Status::Failed;
-            out.reason = Some(e);
-        }
+    };
+    if let Some(lit) = laser_lit {
+        out.notes.push(format!(
+            "a laser sight's post light brightened {lit} pixels where it struck"
+        ));
+    }
+    if !problems.is_empty() {
+        out.status = Status::Failed;
+        out.reason = Some(problems.join("; "));
+    } else if !status.is_some_and(|s| s.success()) {
+        out.status = Status::Failed;
+        out.reason = Some(match status {
+            Some(s) => format!("the client exited {s}"),
+            None => "the client did not quit and was killed".to_owned(),
+        });
+    } else {
+        out.notes.push(
+            "vsync, aspect, antialiasing, specular, depth of field, glow and shadows took the menu's values, in the menu and in a running match".into(),
+        );
     }
     Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{brightened_share, crop, mean_luma, white_share};
+    use super::{brightened_share, crop, mean_luma, value_matches, white_share};
 
     #[test]
     fn white_share_counts_the_middle_third_only() {
@@ -425,6 +1289,17 @@ mod tests {
         let off = [10, 10, 10, 10, 10, 10, 200, 200, 200, 50, 50, 50];
         let on = [90, 90, 90, 20, 20, 20, 255, 255, 255, 50, 50, 50];
         assert_eq!(brightened_share(&off, &on), 0.5);
+    }
+
+    #[test]
+    fn renderer_values_compare_numerically_but_materials_exactly() {
+        assert!(value_matches("0.5 2000", "0.50 2000.0"));
+        assert!(value_matches("0 1 0", "0.0000001 0.9999999 0"));
+        assert!(value_matches("sun sun_flare", "sun sun_flare"));
+        assert!(!value_matches("sun sun_flare", "sun other"));
+        assert!(!value_matches("1 2", "1"));
+        assert!(!value_matches("1", "1 2"));
+        assert!(!value_matches("NaN", "NaN"));
     }
 
     #[test]

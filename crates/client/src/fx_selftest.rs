@@ -193,6 +193,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
         let mut fx = Effects::new(&lib.content, data.world.clone());
         fx.event(
             &ClientEvent::BulletImpact {
+                source: crate::events::ImpactSource::Selftest,
                 origin: at,
                 normal,
                 surface,
@@ -1724,6 +1725,7 @@ fn elements(
                 let mut fx = Effects::new(&lib.content, data.world.clone());
                 fx.event(
                     &ClientEvent::BulletImpact {
+                        source: crate::events::ImpactSource::Selftest,
                         origin: c.to_array(),
                         normal: n.to_array(),
                         surface,

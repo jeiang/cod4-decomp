@@ -25,11 +25,6 @@ pub struct Config {
     pub cheats: bool,
 }
 
-/// No listen server, so no objective counters: bombs planted, defused, airstrikes, helicopters, helicopter shots.
-pub fn objectives() -> (u64, u64, u64, u64, u64) {
-    (0, 0, 0, 0, 0)
-}
-
 /// No listen server, so no debug drawings.
 pub fn with_debug_draw(_f: impl FnOnce(&server::debugdraw::DebugDraw)) {}
 

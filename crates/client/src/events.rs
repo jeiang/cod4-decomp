@@ -15,11 +15,21 @@ use net::entity::{EntityState, etype};
 use server::tempev::{Earthquake, Physics, ev};
 use std::collections::HashMap;
 
+/// Where a bullet impact originated; network impacts retain their temporary event entity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImpactSource {
+    Network(u16),
+    Hitflesh,
+    Prop,
+    Selftest,
+}
+
 /// A happening in the world, at server time of the snapshot that first carried it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientEvent {
     /// A bullet struck something. `surface` is the surface type index (7 = flesh); `shooter` is a client number.
     BulletImpact {
+        source: ImpactSource,
         origin: [f32; 3],
         normal: [f32; 3],
         surface: u8,
@@ -344,6 +354,7 @@ impl Events {
                 }
             }
             ev::BULLET_IMPACT => ClientEvent::BulletImpact {
+                source: ImpactSource::Network(e.number),
                 origin: e.origin,
                 normal,
                 surface: e.event_parm,
@@ -676,6 +687,7 @@ mod tests {
         let first = ev.scan(&snap(std::slice::from_ref(&e)));
         assert_eq!(first.len(), 1);
         let ClientEvent::BulletImpact {
+            source,
             origin,
             normal,
             surface,
@@ -684,6 +696,7 @@ mod tests {
         else {
             panic!("{first:?}");
         };
+        assert_eq!(*source, ImpactSource::Network(960));
         assert_eq!((*origin, *surface), ([1.0, 2.0, 3.0], 7));
         assert!((normal[2] - 1.0).abs() < 1e-4, "{normal:?}");
         assert!(ev.scan(&snap(std::slice::from_ref(&e))).is_empty());
