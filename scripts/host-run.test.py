@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
-"""Behaviour of scripts/host-run.sh's host queue: `python3 scripts/host-run.test.py` (or `just script-tests`; needs
-`flock`, which the dev shell provides). The "host" is a temporary home directory on this machine; each run gets its
-own fake checkout (a copy of host-run.sh with stand-in display, network and web scripts), `cargo` is a stand-in that
-does nothing, and the stand-in harness prints `started <FAKE_ID>` and runs until the test creates release-<FAKE_ID>."""
+"""Behaviour of scripts/host-run.sh's host queue and its Chromium check: `python3 scripts/host-run.test.py` (or `just
+script-tests`; needs `flock`, which the dev shell provides). The "host" is a temporary home directory on this machine
+with a stand-in GC-rooted Chromium; each run gets its own fake checkout (a copy of host-run.sh and find-chromium.sh
+with stand-in display, network and web scripts), `cargo` is a stand-in that records its calls, and the stand-in
+harness prints `started <FAKE_ID>` and runs until the test creates release-<FAKE_ID>. PATH keeps no directory that
+holds a real Chromium."""
 
+import importlib.util
 import os
 import re
 import shutil
@@ -17,6 +20,12 @@ import unittest
 
 SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 HOST_RUN = os.path.join(SCRIPTS, "host-run.sh")
+FIND_CHROMIUM = os.path.join(SCRIPTS, "find-chromium.sh")
+CHROMIUM_NAMES = ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable")
+WEB_STAGES = "web-client web-join web-download web-match"
+STAGE_SPEC = importlib.util.spec_from_file_location("stages_for", os.path.join(SCRIPTS, "stages-for.py"))
+STAGES_FOR = importlib.util.module_from_spec(STAGE_SPEC)
+STAGE_SPEC.loader.exec_module(STAGES_FOR)
 
 PASS_THROUGH = """#!/usr/bin/env bash
 shift
@@ -25,6 +34,7 @@ exec "$@"
 """
 HARNESS = """#!/usr/bin/env bash
 echo "started $FAKE_ID" >> "$FAKE_EVENTS"
+echo "$FAKE_ID ${COD4E_CHROME:-none}" >> "$FAKE_DIR/chrome"
 for _ in $(seq 600); do
   [ -e "$FAKE_DIR/release-$FAKE_ID" ] && exit 0
   sleep 0.1
@@ -51,7 +61,11 @@ class HostQueue(unittest.TestCase):
         self.bin = os.path.join(self.dir, "bin")
         self.events = os.path.join(self.dir, "events")
         os.makedirs(self.root)
-        executable(os.path.join(self.bin, "cargo"), "#!/usr/bin/env bash\nexit 0\n")
+        executable(os.path.join(self.bin, "cargo"), '#!/usr/bin/env bash\necho "$FAKE_ID $*" >> "$FAKE_DIR/cargo"\n')
+        self.chromium = os.path.join(self.root, "bin", "chromium", "bin", "chromium")
+        executable(self.chromium, "#!/usr/bin/env bash\nexit 0\n")
+        self.path = os.pathsep.join([self.bin] + [d for d in os.environ["PATH"].split(os.pathsep) if d and not any(
+            os.path.exists(os.path.join(d, n)) for n in CHROMIUM_NAMES)])
         for n in (1, 2, 3):
             executable(os.path.join(self.root, f"slot-{n}", "target", "release", "cod4e-harness"), HARNESS)
         self.procs = []
@@ -65,7 +79,7 @@ class HostQueue(unittest.TestCase):
             p.stderr_file.close()
 
     def env(self, **extra):
-        env = dict(os.environ, HOME=self.home, PATH=self.bin + os.pathsep + os.environ["PATH"],
+        env = dict(os.environ, HOME=self.home, PATH=self.path,
                    FAKE_EVENTS=self.events, FAKE_DIR=self.dir, COD4E_HOST_WAIT_REPORT="1")
         for k in ("COD4E_SLOT", "COD4E_HOST_WAIT_TIMEOUT", "COD4E_BUILD_HASH"):
             env.pop(k, None)
@@ -78,8 +92,8 @@ class HostQueue(unittest.TestCase):
         shutil.copy(HOST_RUN, os.path.join(c, "scripts", "host-run.sh"))
         executable(os.path.join(c, "scripts", "virtual-display.sh"), PASS_THROUGH)
         executable(os.path.join(c, "scripts", "netns.sh"), PASS_THROUGH)
-        executable(os.path.join(c, "scripts", "find-chromium.sh"), "#!/usr/bin/env bash\nexit 0\n")
-        executable(os.path.join(c, "web", "build.sh"), "#!/usr/bin/env bash\nexit 0\n")
+        shutil.copy(FIND_CHROMIUM, os.path.join(c, "scripts", "find-chromium.sh"))
+        executable(os.path.join(c, "web", "build.sh"), '#!/usr/bin/env bash\necho "$FAKE_ID" >> "$FAKE_DIR/web"\n')
         executable(os.path.join(c, "target", "release", "cod4e-harness"), HARNESS)
         return c
 
@@ -224,6 +238,109 @@ class HostQueue(unittest.TestCase):
                 self.assertEqual(p.wait(timeout=30), 2)
                 self.assertIn("must be a whole number of seconds", self.stderr(p))
         self.assertEqual(self.started(), [])
+
+    def lines(self, name):
+        path = os.path.join(self.dir, name)
+        if not os.path.exists(path):
+            return []
+        with open(path) as f:
+            return f.read().splitlines()
+
+    def finish(self, name, *args, **env):
+        """Runs host-run.sh to its end (its harness, if it gets that far, exits at once); returns the process."""
+        open(os.path.join(self.dir, "release-" + name), "w").close()
+        p = self.start(name, *args, **env)
+        p.wait(timeout=60)
+        return p
+
+    def test_without_chromium_a_run_selecting_web_stages_refuses_to_start(self):
+        shutil.rmtree(os.path.join(self.root, "bin"))
+        refused = (("web", ["--", "--stage", "web-client"], "web-client"),
+                   ("webmixed", ["--", "--stage", "client-load,web-match"], "web-match"),
+                   ("suite", ["--"], WEB_STAGES),
+                   ("slot", ["--", "--stage", "web-join"], "web-join"),
+                   ("partial", ["--", "--allow-skip", "web-client"], "web-join web-download web-match"))
+        for name, args, stages in refused:
+            with self.subTest(args=args):
+                p = self.finish(name, *args, **({"COD4E_SLOT": "1"} if name == "slot" else {}))
+                self.assertEqual(p.returncode, 78, self.stderr(p))
+                self.assertIn(f"host-run: no Chromium for {stages} on this host; run `just chromium-install`",
+                              self.stderr(p))
+                self.assertNotIn(name, [line.split()[0] for line in self.lines("cargo")])
+        self.assertEqual(self.started(), [])
+        self.assertEqual(self.queue(), "no registered host runs\n")
+        runs = (("checks", []),
+                ("native", ["--", "--stage", "client-load"]),
+                ("allowed", ["--", "--stage", "client-gfx", "--allow-skip", "web-client"]),
+                ("script", ["--", "--stage", "client-gfx", "--script", "scenarios/web-x.cfg"]),
+                ("allskip", ["--", "--allow-skip", "web-client,web-join", "--allow-skip", "web-download,web-match"]))
+        for name, args in runs:
+            with self.subTest(args=args):
+                p = self.finish(name, *args)
+                self.assertEqual(p.returncode, 0, self.stderr(p))
+                self.assertNotIn("Chromium", self.stderr(p))
+        p = self.finish("exec", "--exec", "--", "true", COD4E_SLOT="2")
+        self.assertEqual(p.returncode, 0, self.stderr(p))
+        self.assertEqual(self.started(), ["native", "allowed", "script", "allskip"])
+        self.assertEqual(self.lines("chrome"), ["native none", "allowed none", "script none", "allskip none"])
+        self.assertEqual(self.lines("web"), ["allskip"])
+        self.assertIn("checks build --workspace", self.lines("cargo"))
+
+    def test_the_rooted_chromium_is_passed_to_the_harness(self):
+        for name, args in (("web", ["--", "--stage", "web-client"]), ("native", ["--", "--stage", "client-load"])):
+            p = self.finish(name, *args)
+            self.assertEqual(p.returncode, 0, self.stderr(p))
+        self.assertEqual(self.lines("chrome"), [f"web {self.chromium}", f"native {self.chromium}"])
+        self.assertEqual(self.lines("web"), ["web"])
+
+    def test_preflight_does_not_recognize_forms_the_harness_rejects(self):
+        shutil.rmtree(os.path.join(self.root, "bin"))
+        # A valid native selection suppresses the default suite. Unsupported arguments must not add web stages
+        # to preflight or trigger a web build. The stand-in harness ignores arguments; the real harness rejects them.
+        for name, args in (("equals", ["--stage=web-client"]),
+                           ("glob", ["--stage", "web-*"]),
+                           ("prefix", ["--stage", "web-client-extra"])):
+            p = self.finish(name, "--", "--stage", "client-load", *args)
+            self.assertEqual(p.returncode, 0, self.stderr(p))
+        self.assertEqual(self.lines("web"), [])
+        # An unsupported equals-form allow-skip must not authorize a real web selection.
+        p = self.finish("skip-equals", "--", "--stage", "web-client", "--allow-skip=web-client")
+        self.assertEqual(p.returncode, 78, self.stderr(p))
+
+    def test_preflight_web_stages_match_the_real_head(self):
+        shutil.rmtree(os.path.join(self.root, "bin"))
+        repo = os.path.dirname(SCRIPTS)
+
+        def assert_contract(cwd, name):
+            expected = [s.name for s in STAGES_FOR.stage_facts("HEAD", cwd=cwd)
+                        if s.default and STAGES_FOR.matches_stage("@web", s, None)]
+            p = self.finish(name, "--")
+            self.assertEqual(p.returncode, 78, self.stderr(p))
+            self.assertIn(f"no Chromium for {' '.join(expected)} on this host;", self.stderr(p))
+            for i, stage in enumerate(expected):
+                p = self.finish(f"{name}-{i}", "--", "--stage", stage)
+                self.assertEqual(p.returncode, 78, self.stderr(p))
+                self.assertIn(f"no Chromium for {stage} on this host;", self.stderr(p))
+
+        assert_contract(repo, "real-head")
+        # Negative control: a fifth default stage using the existing browser implementation must break the same
+        # contract. Build a temporary git snapshot so stage_facts reads it exactly as it reads the real HEAD.
+        scratch = os.path.join(self.dir, "fifth-web-stage")
+        stage_dir = os.path.join(scratch, "crates", "harness", "src")
+        shutil.copytree(os.path.join(repo, "crates", "harness", "src", "stages"),
+                        os.path.join(stage_dir, "stages"))
+        stage_rs = STAGES_FOR.git("show", "HEAD:" + STAGES_FOR.STAGE_RS, cwd=repo)
+        extra = ('    StageDef {\n        name: "web-fifth",\n        default: true,\n'
+                 '        kind: Kind::Builtin(crate::stages::web_client::run),\n    },\n')
+        end = stage_rs.index("\n];", stage_rs.index("pub static STAGES"))
+        with open(os.path.join(stage_dir, "stage.rs"), "w") as f:
+            f.write(stage_rs[:end] + "\n" + extra + stage_rs[end:])
+        STAGES_FOR.git("init", "-q", cwd=scratch)
+        STAGES_FOR.git("add", ".", cwd=scratch)
+        STAGES_FOR.git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                       "-c", "commit.gpgsign=false", "commit", "-qm", "Add fifth browser stage", cwd=scratch)
+        with self.assertRaisesRegex(AssertionError, "web-fifth"):
+            assert_contract(scratch, "negative-control")
 
 
 if __name__ == "__main__":

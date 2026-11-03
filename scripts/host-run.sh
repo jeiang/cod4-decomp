@@ -5,7 +5,9 @@
 # Runs on the Linux test host, inside a checkout and the dev shell (scripts/remote-linux.sh calls it). Builds the
 # workspace and, unless --no-checks, runs test/clippy/fmt. With `--` it then runs `cod4e-harness run --out bundles
 # <options>` (a bare `--` runs the default suite); with --exec it runs <command...> instead, with the release
-# binaries on PATH, writing into out/.
+# binaries on PATH, writing into out/. A harness run that selects a web-* stage (the default suite does) refuses to
+# start with exit 78, before queueing or building, when scripts/find-chromium.sh finds no Chromium, unless
+# --allow-skip names every such stage.
 # COD4E_SLOT=1..3 selects a harness slot: its own target dir, headless display (scripts/virtual-display.sh) and
 # loopback-only network namespace (scripts/netns.sh). Every run holds the host-wide stage lock shared from its build
 # on, so up to three slot runs work at once. Without a slot the run is serial: after its build it holds the stage lock
@@ -98,6 +100,44 @@ if [ -n "${COD4E_SLOT:-}" ]; then
 elif [ $exec_mode = 1 ]; then
   echo "--exec needs a slot" >&2
   exit 2
+fi
+
+# The web-* stages this harness run selects: those --stage names, or with no --stage and no --script the default
+# suite's four (crates/harness/src/stage.rs). On this host one that --allow-skip does not name needs a Chromium: the
+# run refuses to start without one rather than end, after the whole run, with the stages skipped.
+web_stages=()
+chrome=
+if [ $run = 1 ] && [ $exec_mode = 0 ]; then
+  selected=0 named=() allowed=,
+  # Match the harness's separate-token options and exact stage names, not equals forms or globs. Unsupported
+  # arguments stay unchanged for the harness to reject; preflight is not a second argument validator.
+  args=("$@")
+  i=0
+  while [ $i -lt ${#args[@]} ]; do
+    opt=${args[$i]}
+    case $opt in
+      --stage|--allow-skip|--script) val=${args[$((i + 1))]:-}; i=$((i + 2)) ;;
+      *) i=$((i + 1)); continue ;;
+    esac
+    case $opt in
+      --stage) selected=1; IFS=, read -ra parts <<< "$val"; named+=(${parts[@]+"${parts[@]}"}) ;;
+      --script) selected=1 ;;
+      --allow-skip) allowed="$allowed${val// /},"
+    esac
+  done
+  [ $selected = 1 ] || named=(web-client web-join web-download web-match)
+  for s in ${named[@]+"${named[@]}"}; do
+    case $s in web-client|web-join|web-download|web-match) web_stages+=("$s") ;; esac
+  done
+  chrome=$(scripts/find-chromium.sh)
+  unaccepted=()
+  for s in ${web_stages[@]+"${web_stages[@]}"}; do [[ $allowed == *",$s,"* ]] || unaccepted+=("$s"); done
+  if [ -z "$chrome" ] && [ ${#unaccepted[@]} -gt 0 ]; then
+    # shellcheck disable=SC2088 # the message names the path as the user would type it
+    echo "host-run: no Chromium for ${unaccepted[*]} on this host; run \`just chromium-install\` (a GC-rooted" \
+      "~/Projects/cod4e/bin/chromium), or name the stages in --allow-skip to accept their skips" >&2
+    exit 78
+  fi
 fi
 
 # Registration. The entry is written whole and renamed into place; its name orders serial turns.
@@ -336,14 +376,10 @@ if [ $exec_mode = 1 ]; then
   exit
 fi
 
-# The browser client is built only for a run that has a web-* stage or the full suite (no --stage given).
-case " $* " in
-  *" --stage "*|*" --stage="*) case " $* " in *web-*) nice -n 19 web/build.sh >/dev/null ;; esac ;;
-  *) nice -n 19 web/build.sh >/dev/null ;;
-esac
+# The browser client is built only for a run that selects a web-* stage.
+[ ${#web_stages[@]} = 0 ] || nice -n 19 web/build.sh >/dev/null
 nice -n 19 cargo build --release -p harness -p client -p server
 h="${CARGO_TARGET_DIR:-target}/release/cod4e-harness"
-chrome=$(scripts/find-chromium.sh)
 if [ -n "${COD4E_SLOT:-}" ]; then
   set_state running
   # shellcheck disable=SC2086 # $chrome is an optional COD4E_CHROME=<path> assignment

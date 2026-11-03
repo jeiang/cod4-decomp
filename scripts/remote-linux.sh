@@ -8,7 +8,7 @@
 # bundles are named (`local bundle: <path>`).
 # The release client and server are built next to the harness so the client stages can drive them; the browser
 # client (web/pkg) is built when a web-* stage (or the whole suite) is run, and a Chromium already on the host is
-# used (scripts/find-chromium.sh).
+# used (scripts/find-chromium.sh); without one such a run refuses to start (exit 78, naming `just chromium-install`).
 # Every invocation keeps its whole output in its own bundles/logs/remote-<UTC time>-<random> file, early failures
 # included, ending with `exit=<status>`; the path is printed last on stderr (`log: <path>`). The exit status is the
 # host run's (or the first local failure's), whatever the caller does with the output.

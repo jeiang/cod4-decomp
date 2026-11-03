@@ -19,6 +19,9 @@ tooling fact, or a flake's status changes, update this file in the same PR.
     `client_mp`, `server_mp` and `ui_mp`, effects under `EffectsCore` (names are case-sensitive). `grep -rn` over a
     directory works through `bash -s`.
   - `bin/`: GC-rooted tools: `chromium` (`just chromium-install`), `python3`, `slot-guard` (`just slot-guard-install`).
+    Without `bin/chromium` (or one on `PATH`) a harness run that selects a web-* stage, the default suite included,
+    refuses to start with exit 78 naming `just chromium-install`, unless `--allow-skip` names every such stage (#558).
+    An unrooted Chromium in the Nix store is never used.
   - `slot-1` to `slot-3`: each slot's own cargo target dir. `slot-guard/`: the leases.
   - `run-<mac host>-<pid>`: one directory per `remote-linux.sh` run, removed when the run ends. An interrupted run
     leaves its directory behind.
@@ -156,7 +159,6 @@ message), is a real failure. `N` and `M` stand for any number. "Reason" is the s
 | Reason: `shell_eject played N times since the mark, want 0` (before #542: `cgis=fx:shell_eject 0` returned N) | client-gfx | #511 (fixed by #513) | the coordinator's 10-run confirmation of #511 | 1 | 1 | 10 consecutive runs pass and #511 closes |
 | Log: `the window's surface gave no frame outcome=Validation` | client-gfx | #511 (fixed by #510) | the coordinator's 10-run confirmation of #511 | 1 | 1 | 10 consecutive runs pass and #511 closes |
 | Reason: `N of the M other players the server announced were ever drawn` | client-commands | #511 (fixed by #513) | the coordinator's 10-run confirmation of #511 | 1 | 1 | 10 consecutive runs pass and #511 closes |
-| Skipped: `no Chromium found (set COD4E_CHROME)` | web-client, web-join, web-download, web-match | #558 | the coordinator | 0 | 0 | #558 fixed. This is a skip, not a flake: reruns 0, fix the host (`just chromium-install`) |
 
 Fixed and closed, for reference: `ExecutableFileBusy` (ETXTBSY) in the harness's `cargo test` (#538, fixed by #543).
 Reported once and not filed: net-match `0 of 300 prediction passes clear`, possibly host load. If it recurs, file it
