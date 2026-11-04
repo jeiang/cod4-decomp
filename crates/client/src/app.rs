@@ -3541,7 +3541,7 @@ fn console_action(st: &mut State, line: &str) {
                 } else {
                     let qpath = crate::input::config::sun_qpath(&cmd[1]);
                     match st.input.save_sun(&cmd[1]) {
-                        SunSave::Written(_) | SunSave::TooLong => {}
+                        SunSave::Written | SunSave::TooLong => {}
                         SunSave::NoUserFolder => say_channel(
                             st,
                             8,

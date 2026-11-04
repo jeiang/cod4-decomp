@@ -205,8 +205,8 @@ struct DebugCounter {
 /// What `r_savesun` did ([`Input::save_sun`]).
 #[derive(Debug)]
 pub enum SunSave {
-    /// The file written.
-    Written(PathBuf),
+    /// The file was written.
+    Written,
     /// This native input has no user folder; browser files use page storage.
     NoUserFolder,
     /// The 21 values overflow stock's 8192-byte buffer, so `Com_SaveDvarsToBuffer` fails: nothing is written or
@@ -935,7 +935,7 @@ impl Input {
         let path = root
             .join(config::sanitize_qpath(&qpath).expect("a write path without `..`, `:` or NUL"));
         match write_config(&path, &text) {
-            Ok(()) => SunSave::Written(path),
+            Ok(()) => SunSave::Written,
             Err(_) => SunSave::Failed,
         }
     }
@@ -2516,10 +2516,8 @@ mod tests {
         let mut i = Input::detached();
         i.config_dir = Some(user.clone());
         i.cvars.set("r_sunflare_max_alpha", "0.6", false);
-        let SunSave::Written(saved) = i.save_sun("roundtrip") else {
-            panic!("r_savesun roundtrip wrote nothing");
-        };
-        assert_eq!(saved, user.join("sun/roundtrip.sun"));
+        assert!(matches!(i.save_sun("roundtrip"), SunSave::Written));
+        let saved = user.join("sun/roundtrip.sun");
         let text = std::fs::read_to_string(&saved).unwrap();
         assert_eq!(
             text.lines()
@@ -2554,10 +2552,8 @@ mod tests {
         }
         assert!(!dir.join("user/escape.sun").exists());
         // Stock writes `sun//lead.sun`, which is `sun/lead.sun`, and reads it back by either name.
-        let SunSave::Written(lead) = i.save_sun("/lead") else {
-            panic!("r_savesun /lead wrote nothing");
-        };
-        assert_eq!(lead, user.join("sun/lead.sun"));
+        assert!(matches!(i.save_sun("/lead"), SunSave::Written));
+        assert!(user.join("sun/lead.sun").exists());
         assert!(i.load_sun("\\lead").is_some() && i.load_sun("lead").is_some());
         assert!(i.config_path.is_none());
         assert!(!i.dirty);
