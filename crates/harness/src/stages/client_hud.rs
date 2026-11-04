@@ -1291,15 +1291,7 @@ fn play(
             secs(90),
             "the initial team menu did not open",
         )?;
-        c.console("devmap mp_crash")?;
-        let end = Instant::now() + secs(120);
-        while c.ask(json!({"cmd": "server", "op": "cvar", "name": "sv_cheats"}))?["value"] != "1" {
-            if Instant::now() > end {
-                return Err("devmap did not enable cheats on the listen server".into());
-            }
-            c.pause(Duration::from_millis(250))?;
-        }
-        Ok(())
+        c.console("devmap mp_crash")
     })?;
     // The server's team menu, answered with the pointer; then the class menu.
     c.step("team menu", |c| {
@@ -1330,6 +1322,11 @@ fn play(
             secs(120),
             "the player did not spawn",
         )?;
+        // The listen server is absent during asynchronous devmap loading; inspect it only after spawning.
+        let cheats = c.ask(json!({"cmd": "server", "op": "cvar", "name": "sv_cheats"}))?;
+        if cheats["value"] != "1" {
+            return Err(format!("devmap did not enable cheats: {cheats}"));
+        }
         Ok(c.lookup("client.seconds")?.as_f64().unwrap_or(0.0))
     })?;
     c.pause(secs(3))?;
