@@ -92,22 +92,39 @@ fn sun_files(c: &mut Driven, config: &Path) -> Result<(), String> {
         "r_loadsun stagesun",
         "You must have cheats enabled to use r_loadsun",
     )?;
+    // `FS_CreatePath` refuses the write (naming the OS path) and `FS_WriteFile` says it failed, both on `files`.
     typed(
         c,
         "r_savesun ../zz_escape",
-        "WARNING: couldn't save sun file 'sun/../zz_escape.sun': filename must stay inside the user folder",
+        "Failed to open sun/../zz_escape.sun",
     )?;
+    let refusal = lines(c)?.into_iter().rev().find(|l| {
+        l.starts_with("^3WARNING: refusing to create relative path \"")
+            && l.ends_with("sun/../zz_escape.sun\"")
+    });
+    if refusal.is_none() {
+        return Err(
+            "r_savesun ../zz_escape printed no stock `refusing to create relative path` warning"
+                .into(),
+        );
+    }
     if config.join("zz_escape.sun").exists() {
         return Err("r_savesun ../zz_escape wrote outside the sun folder".into());
     }
     cheats(c, "1")?;
-    typed(
-        c,
-        "r_loadsun ../zz_escape",
-        "WARNING: couldn't load sun file 'sun/../zz_escape.sun': filename must stay inside the user folder",
-    )?;
+    // `FS_SanitizeFilename` refuses a `../`, so the read fails with the plain stock line.
+    let escape = "WARNING: couldn't load sun file 'sun/../zz_escape.sun'";
+    typed(c, "r_loadsun ../zz_escape", escape)?;
+    if let Some(l) = lines(c)?.into_iter().rev().find(|l| l.contains(escape))
+        && !l.ends_with(escape)
+    {
+        return Err(format!(
+            "r_loadsun ../zz_escape added to the stock line: {l:?}"
+        ));
+    }
     c.console("set r_sunflare_max_alpha 0.37")?;
-    c.console("r_savesun stagesun")?;
+    // A leading separator stays inside `sun/`: stock writes `sun//stagesun.sun`, the file `r_loadsun stagesun` reads.
+    c.console("r_savesun /stagesun")?;
     c.pause(Duration::from_millis(500))?;
     let saved = config.join("sun/stagesun.sun");
     let text = std::fs::read_to_string(&saved)
@@ -146,8 +163,13 @@ fn sun_files(c: &mut Driven, config: &Path) -> Result<(), String> {
     typed(
         c,
         "r_loadsun stagepart",
-        "ERROR: the following dvars were not specified in file 'sun/stagepart.sun'",
+        "^1ERROR: the following dvars were not specified in file 'sun/stagepart.sun'",
     )?;
+    // `Com_PrintError` lines show on the `error` channel while `system` is hidden; each missing dvar is one.
+    c.console("con_showchannel error")?;
+    c.console("con_hidechannel system")?;
+    typed(c, "r_loadsun stagepart", "^1Error:   r_sunsprite_shader")?;
+    c.console("con_showchannel system")?;
     cvar_is(c, "r_sunflare_max_alpha", "0.9")?;
     c.frames(5)?;
     let alpha = flare_alpha(c)?;

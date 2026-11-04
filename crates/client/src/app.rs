@@ -8,7 +8,7 @@ use crate::Cli;
 use crate::display::{self, hor_plus, view_fov, zoom_sensitivity};
 use crate::flythrough;
 use crate::gfx::{self, Gfx};
-use crate::input::{Input, InputFrame, buttons};
+use crate::input::{Input, InputFrame, SunSave, buttons};
 use crate::listen::{self, Listen};
 use crate::loader::{self, Load};
 use crate::models::Library;
@@ -3539,24 +3539,26 @@ fn console_action(st: &mut State, line: &str) {
                         "USAGE: r_savesun <sunname>\n  sunname must not have an extension",
                     );
                 } else {
+                    let qpath = crate::input::config::sun_qpath(&cmd[1]);
                     match st.input.save_sun(&cmd[1]) {
-                        Ok(Some(_)) => {}
-                        Ok(None) => say_channel(
+                        SunSave::Written(_) | SunSave::TooLong => {}
+                        SunSave::NoUserFolder => say_channel(
                             st,
                             8,
-                            &format!(
-                                "WARNING: couldn't save sun file 'sun/{}.sun': no user folder",
-                                cmd[1]
-                            ),
+                            &format!("WARNING: couldn't save sun file '{qpath}': no user folder"),
                         ),
-                        Err(error) => say_channel(
-                            st,
-                            8,
-                            &format!(
-                                "WARNING: couldn't save sun file 'sun/{}.sun': {error}",
-                                cmd[1]
-                            ),
-                        ),
+                        // `FS_CreatePath`'s warning, then `FS_WriteFile`'s line, both on `files`.
+                        SunSave::Refused(os_path) => {
+                            say_warning(
+                                st,
+                                10,
+                                &format!(
+                                    "^3WARNING: refusing to create relative path \"{os_path}\""
+                                ),
+                            );
+                            say_channel(st, 10, &format!("Failed to open {qpath}"));
+                        }
+                        SunSave::Failed => say_channel(st, 10, &format!("Failed to open {qpath}")),
                     }
                 }
             }
@@ -3573,9 +3575,9 @@ fn console_action(st: &mut State, line: &str) {
                     say_channel(st, 8, "You can't r_loadsun while a map isn't loaded");
                 } else {
                     match st.input.load_sun(&cmd[1]) {
-                        Ok(Some(report)) => {
+                        Some(report) => {
                             for message in report.messages {
-                                say_channel(st, 16, &message);
+                                say_warning(st, 16, &message);
                             }
                             if report.complete
                                 && let Some(r) = st.renderer.as_mut()
@@ -3586,17 +3588,12 @@ fn console_action(st: &mut State, line: &str) {
                                 }
                             }
                         }
-                        Ok(None) => say_channel(
-                            st,
-                            8,
-                            &format!("WARNING: couldn't load sun file 'sun/{}.sun'", cmd[1]),
-                        ),
-                        Err(error) => say_channel(
+                        None => say_channel(
                             st,
                             8,
                             &format!(
-                                "WARNING: couldn't load sun file 'sun/{}.sun': {error}",
-                                cmd[1]
+                                "WARNING: couldn't load sun file '{}'",
+                                crate::input::config::sun_qpath(&cmd[1])
                             ),
                         ),
                     }
@@ -4626,6 +4623,13 @@ fn enter_level(
 /// Stock output channels still apply to app-owned commands.
 fn say_channel(st: &mut State, channel: usize, text: &str) {
     if st.input.channels.visible(channel) {
+        say(st, text);
+    }
+}
+
+/// A `Com_PrintWarning`/`Com_PrintError` line: shown on its channel or, when that is hidden, the `error` channel.
+fn say_warning(st: &mut State, channel: usize, text: &str) {
+    if st.input.channels.visible_error(channel) {
         say(st, text);
     }
 }

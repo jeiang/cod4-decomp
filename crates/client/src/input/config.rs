@@ -121,12 +121,34 @@ pub fn user_filename(name: &str) -> std::io::Result<String> {
     Ok(name)
 }
 
-/// Stock appends `.sun` even when the argument already has an extension.
-pub fn sun_filename(name: &str) -> std::io::Result<String> {
-    Ok(format!("sun/{}.sun", user_filename(name)?))
+/// `va("sun/%s.sun", name)`: stock appends `.sun` even when the argument already has an extension.
+pub fn sun_qpath(name: &str) -> String {
+    format!("sun/{name}.sun")
 }
 
-/// `Com_LoadDvarsFromBuffer`'s result. Messages belong on the system console channel.
+/// `FS_CreatePath` (KisakCOD com_files.cpp:452-459) never creates a path holding `..` or `::`, and prints
+/// `refusing to create relative path`. A drive (`:`) and NUL are refused with it, as the server's `writeconfig` does.
+pub fn refuses_write(qpath: &str) -> bool {
+    qpath.contains("..") || qpath.contains([':', '\0'])
+}
+
+/// `FS_SanitizeFilename` (com_files.cpp:644): `\` as `/`, leading and repeated separators collapsed (`sun//x.sun`
+/// is `sun/x.sun`) and `.` components skipped. `None` for a `../` (`FS_IsBackupSubStr`), a drive or NUL, which are
+/// never opened.
+pub fn sanitize_qpath(qpath: &str) -> Option<String> {
+    let qpath = qpath.replace('\\', "/");
+    if qpath.contains("../") || qpath.contains([':', '\0']) {
+        return None;
+    }
+    let parts: Vec<&str> = qpath
+        .split('/')
+        .filter(|p| !p.is_empty() && *p != ".")
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// `Com_LoadDvarsFromBuffer`'s result. Messages belong on the system console channel; every one is printed by
+/// `Com_PrintWarning` or `Com_PrintError`, so it carries their colour prefix and shows when the `error` channel does.
 /// Incomplete files still change the dvars, but must not be applied to the world sun.
 #[derive(Debug)]
 pub struct DvarLoad {
@@ -158,20 +180,23 @@ pub fn load_dvars(
             cvars.set(names[i], value, false);
             read[i] = true;
         } else {
+            // `Com_PrintWarning` adds `^3`.
             messages.push(format!(
-                "WARNING: unknown dvar '{name}' in file '{filename}'"
+                "^3WARNING: unknown dvar '{name}' in file '{filename}'"
             ));
         }
         rest = rest.find('\n').map_or("", |i| &rest[i + 1..]);
     }
     let complete = read.iter().all(|&r| r);
     if !complete {
+        // `Com_PrintError` adds `^1` to a format naming an error and `^1Error: ` to one that does not, so each
+        // `"  %s\n"` member line reads `^1Error:   <dvar>` (1.7 0x56d540 through 0x4fcc80).
         messages.push(format!(
-            "ERROR: the following dvars were not specified in file '{filename}'"
+            "^1ERROR: the following dvars were not specified in file '{filename}'"
         ));
         for (&name, read) in names.iter().zip(read) {
             if !read {
-                messages.push(format!("  {name}"));
+                messages.push(format!("^1Error:   {name}"));
             }
         }
     }
@@ -266,12 +291,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sun_names_append_the_extension_and_cannot_escape() {
-        assert_eq!(sun_filename("nested\\dawn").unwrap(), "sun/nested/dawn.sun");
-        assert_eq!(sun_filename("dawn.sun").unwrap(), "sun/dawn.sun.sun");
-        for name in ["", "../x", "/x", "\\x", "c:x", "a/../x", "x/", "x\0"] {
-            assert!(sun_filename(name).is_err(), "{name:?}");
+    fn sun_paths_follow_the_stock_write_refusal_and_read_sanitizer() {
+        assert_eq!(sun_qpath("dawn.sun"), "sun/dawn.sun.sun");
+        assert_eq!(
+            sanitize_qpath(&sun_qpath("nested\\dawn")).unwrap(),
+            "sun/nested/dawn.sun"
+        );
+        // `r_savesun /x` writes `sun//x.sun`, the file `r_loadsun x` and `r_loadsun \x` read.
+        assert_eq!(sanitize_qpath(&sun_qpath("/x")).unwrap(), "sun/x.sun");
+        assert_eq!(sanitize_qpath(&sun_qpath("\\\\x")).unwrap(), "sun/x.sun");
+        assert_eq!(
+            sanitize_qpath(&sun_qpath("./a..b")).unwrap(),
+            "sun/a..b.sun"
+        );
+        assert!(!refuses_write(&sun_qpath("/x")));
+        for name in ["../x", "a/../x", "..\\x", "c:x", "x\0"] {
+            assert!(refuses_write(&sun_qpath(name)), "{name:?}");
+            assert_eq!(sanitize_qpath(&sun_qpath(name)), None, "{name:?}");
         }
+        // `FS_CreatePath` refuses any `..`; the reader only a `../`.
+        assert!(refuses_write(&sun_qpath("a..b")));
     }
 
     #[test]
@@ -291,9 +330,9 @@ mod tests {
         assert_eq!(
             report.messages,
             [
-                "WARNING: unknown dvar 'alien' in file 'sun/test.sun'",
-                "ERROR: the following dvars were not specified in file 'sun/test.sun'",
-                "  r_sunflare_max_alpha",
+                "^3WARNING: unknown dvar 'alien' in file 'sun/test.sun'",
+                "^1ERROR: the following dvars were not specified in file 'sun/test.sun'",
+                "^1Error:   r_sunflare_max_alpha",
             ]
         );
     }
