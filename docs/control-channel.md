@@ -84,6 +84,8 @@ this explicit request.
 
 Paths a stage leans on: `menu.open` (the stack), `menu.server_rows` (the join menu's server list rows, counted from
 the answers already in without polling the network, so reading it changes nothing),
+`menu.list_icons[]` (text-list images actually painted last frame: `feeder`, `row`, `col`, `material`; cleared each
+frame; the hardware column is feeder 2, col 1),
 `menu.items[]` (`menu`, `name`, `text` as shown, `visible`, `owner_draw` (its owner-draw number, 0 for none),
 `choice` (a yes/no, multiple-choice or dvar-enum setting), and `rect` `[x, y, w, h]` in window pixels, the rectangle a
 click is tested against: a static text item's is its text's),

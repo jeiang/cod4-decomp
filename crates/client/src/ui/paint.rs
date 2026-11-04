@@ -260,6 +260,7 @@ impl Ui {
         self.now_ms = host.time_ms();
         self.blur_radius = 0.0;
         self.sound_loops.clear();
+        self.list_icons_drawn.clear();
         self.border_low_scale = host
             .dvar("ui_borderLowLightScale")
             .trim()
@@ -989,7 +990,14 @@ impl Ui {
         }
     }
 
-    fn paint_listbox(&self, host: &mut dyn Host, p: &mut Painter, m: usize, i: usize, d: &ItemDef) {
+    fn paint_listbox(
+        &mut self,
+        host: &mut dyn Host,
+        p: &mut Painter,
+        m: usize,
+        i: usize,
+        d: &ItemDef,
+    ) {
         let ItemData::ListBox(Some(l)) = &d.data else {
             return;
         };
@@ -1058,6 +1066,24 @@ impl Ui {
                         .rect(r.x + pos, y, eh, eh, r.horz_align, r.vert_align);
                     let im = p.named(&self.assets, &img);
                     p.pic(&im, px, [1.0; 4]);
+                    continue;
+                }
+                // UI_FeederItemText's optional handle is separate from picture-list images
+                // (KisakCOD ui_shared.cpp:6274-6320; 1.7 Item_ListBox_PaintTextElem 0x552aa0).
+                if l.element_style != 1
+                    && let Some(material) = host.feeder_item_icon(feeder, idx, ci)
+                {
+                    let at = self
+                        .place
+                        .rect(r.x + pos, y, *width, eh, r.horz_align, r.vert_align);
+                    let image = p.named(&self.assets, material);
+                    let alpha = if idx as i32 == it.list_cursor && selectable {
+                        self.menus[m].def.focus_color[3]
+                    } else {
+                        it.fore[3]
+                    };
+                    p.pic(&image, at, [1.0, 1.0, 1.0, alpha]);
+                    self.list_icons_drawn.push((feeder, idx, ci, material));
                     continue;
                 }
                 let mut text = host.feeder_text(feeder, idx, ci);

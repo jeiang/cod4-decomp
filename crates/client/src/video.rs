@@ -1,21 +1,25 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Harness video recorder: wgpu texture -> async readback -> background AV1 (rav1e) encode -> MP4.
 //!
-//! The render thread only records a texture->buffer copy and polls finished maps; scaling,
-//! RGB->YUV420 (BT.709, limited range) and encoding all run on the encoder thread. When the
-//! readback ring or the encoder queue is full the frame is dropped and counted, never queued.
+//! The GPU scales the completed presented image before its bounded asynchronous readback.
+//! RGB->YUV420 and AV1 encoding run off the render thread; saturation loses source slots,
+//! never blocks play. MP4 samples retain source-slot durations.
 
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use rav1e::prelude::*;
+
+#[path = "video_scale.rs"]
+mod video_scale;
+use video_scale::GpuScale;
 
 /// Staging buffers in flight on the GPU/readback side.
 const RING: usize = 4;
@@ -32,6 +36,18 @@ pub struct VideoStats {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    pub source_width: u32,
+    pub source_height: u32,
+    pub ring_full: u64,
+    pub queue_full: u64,
+    pub map_failed: u64,
+    pub gpu_reset: u64,
+    pub pacing_missed: u64,
+    pub first_slot: Option<u64>,
+    pub last_slot: Option<u64>,
+    pub first_encoded_slot: Option<u64>,
+    pub last_encoded_slot: Option<u64>,
+    pub duration_ticks: u64,
 }
 
 struct Frame8 {
@@ -43,7 +59,8 @@ struct Frame8 {
 
 struct Staging {
     buf: wgpu::Buffer,
-    ready: Arc<AtomicBool>,
+    /// 0 pending, 1 mapped, 2 failed. Every callback completes, including failure.
+    ready: Arc<AtomicU8>,
 }
 
 pub struct Recorder {
@@ -54,35 +71,69 @@ pub struct Recorder {
     stride: u32,
     format: Option<wgpu::TextureFormat>,
     bgra: bool,
+    scale: Option<GpuScale>,
     ring: Vec<Staging>,
     free: Vec<usize>,
     pending: VecDeque<(usize, u64)>,
     last_slot: Option<u64>,
+    first_slot: Option<u64>,
+    ring_full: u64,
+    queue_full: u64,
+    map_failed: u64,
+    gpu_reset: u64,
+    pacing_missed: u64,
+    failed: bool,
     dropped: u64,
     tx: SyncSender<Frame8>,
-    /// Readback buffers the encoder thread has finished with, and the channel it returns them over: a 5120x1440
-    /// frame is 30 MB, so allocating one per frame would page-fault the render thread for milliseconds.
+    /// Reusable recording-sized readback storage; both queues and this pool stay bounded.
     spare: Vec<Vec<u8>>,
     spare_rx: mpsc::Receiver<Vec<u8>>,
-    thread: JoinHandle<io::Result<(u64, u64)>>,
+    thread: JoinHandle<io::Result<Encoded>>,
 }
 
 fn other(e: impl std::fmt::Display) -> io::Error {
     io::Error::other(e.to_string())
 }
 
+fn output_size(src: (u32, u32), maximum: (u32, u32)) -> io::Result<(u32, u32)> {
+    if src.0 < 2 || src.1 < 2 || maximum.0 < 2 || maximum.1 < 2 {
+        return Err(other("invalid recorder dimensions"));
+    }
+    let scale = (maximum.0 as f64 / src.0 as f64)
+        .min(maximum.1 as f64 / src.1 as f64)
+        .min(1.0);
+    let out = (
+        (src.0 as f64 * scale) as u32 & !1,
+        (src.1 as f64 * scale) as u32 & !1,
+    );
+    if out.0 < 2 || out.1 < 2 {
+        return Err(other("recorder aspect is too extreme"));
+    }
+    Ok(out)
+}
+
+#[derive(Debug)]
+struct Encoded {
+    frames: u64,
+    bytes: u64,
+    first: Option<u64>,
+    last: Option<u64>,
+}
+
 impl Recorder {
-    /// `src` = size of the textures passed to `capture`; output height is `<= max_height`,
-    /// aspect is kept, both dimensions are even.
-    pub fn start(path: &Path, src: (u32, u32), max_height: u32, fps: u32) -> io::Result<Recorder> {
-        if src.0 == 0 || src.1 == 0 || fps == 0 || max_height < 2 {
-            return Err(other("invalid recorder size/fps"));
+    /// Preserve aspect within `maximum`, round down to even dimensions, never upscale.
+    pub fn start(
+        path: &Path,
+        src: (u32, u32),
+        maximum: (u32, u32),
+        fps: u32,
+    ) -> io::Result<Recorder> {
+        let (ow, oh) = output_size(src, maximum)?;
+        if fps == 0 {
+            return Err(other("invalid recorder fps"));
         }
-        let oh = (src.1.min(max_height)) & !1;
-        let ow =
-            (((src.0 as u64 * oh as u64 + src.1 as u64 / 2) / src.1 as u64) as u32).max(2) & !1;
         let path = path.with_extension("mp4");
-        let stride = (src.0 * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let stride = (ow * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
 
         let ctx = new_context(ow, oh, fps)?;
         let seq_header = ctx.container_sequence_header();
@@ -98,7 +149,6 @@ impl Recorder {
             mux,
             rx,
             spare: spare_tx,
-            src,
             out: (ow, oh),
             stride: stride as usize,
         };
@@ -114,10 +164,18 @@ impl Recorder {
             stride,
             format: None,
             bgra: false,
+            scale: None,
             ring: Vec::new(),
             free: Vec::new(),
             pending: VecDeque::new(),
             last_slot: None,
+            first_slot: None,
+            ring_full: 0,
+            queue_full: 0,
+            map_failed: 0,
+            gpu_reset: 0,
+            pacing_missed: 0,
+            failed: false,
             dropped: 0,
             tx,
             spare: Vec::new(),
@@ -131,10 +189,12 @@ impl Recorder {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn reset_gpu(&mut self) {
         self.dropped += self.pending.len() as u64;
+        self.gpu_reset += self.pending.len() as u64;
         self.pending.clear();
         self.free.clear();
         self.ring.clear();
         self.format = None;
+        self.scale = None;
     }
 
     /// Record at most one frame per `1/fps`; returns false when skipped (too soon, or the
@@ -146,15 +206,19 @@ impl Recorder {
         texture: &wgpu::Texture,
         elapsed: Duration,
     ) -> bool {
-        assert_eq!(
-            (texture.width(), texture.height()),
-            self.src,
-            "texture size != recorder source size"
-        );
+        if (texture.width(), texture.height()) != self.src {
+            // A resize suspends capture at the original dimensions. Release the old
+            // full-size GPU copy and retire pending maps, just as for device replacement.
+            self.reset_gpu();
+            return false;
+        }
         let slot = (elapsed.as_secs_f64() * self.fps as f64) as u64;
         if self.last_slot.is_some_and(|l| slot <= l) {
             return false;
         }
+        self.pacing_missed += self.last_slot.map_or(0, |last| slot - last - 1);
+        self.first_slot.get_or_insert(slot);
+        self.last_slot = Some(slot);
         if self.format.is_none() {
             let f = texture.format();
             assert!(
@@ -172,7 +236,8 @@ impl Recorder {
                 f,
                 wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
             );
-            let size = self.stride as u64 * self.src.1 as u64;
+            self.scale = Some(GpuScale::new(device, self.src, self.out, f));
+            let size = self.stride as u64 * self.out.1 as u64;
             for i in 0..RING {
                 self.ring.push(Staging {
                     buf: device.create_buffer(&wgpu::BufferDescriptor {
@@ -181,7 +246,7 @@ impl Recorder {
                         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                         mapped_at_creation: false,
                     }),
-                    ready: Arc::new(AtomicBool::new(false)),
+                    ready: Arc::new(AtomicU8::new(0)),
                 });
                 self.free.push(i);
             }
@@ -200,36 +265,35 @@ impl Recorder {
                 "the video readback ring is full; a frame was dropped"
             );
             self.dropped += 1;
+            self.ring_full += 1;
             return false;
         };
         let st = &self.ring[idx];
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("video copy"),
         });
+        let scaled = self.scale.as_ref().expect("initialized");
+        scaled.draw(&mut enc, texture);
         enc.copy_texture_to_buffer(
-            texture.as_image_copy(),
+            scaled.output.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
                 buffer: &st.buf,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(self.stride),
-                    rows_per_image: Some(self.src.1),
+                    rows_per_image: Some(self.out.1),
                 },
             },
             wgpu::Extent3d {
-                width: self.src.0,
-                height: self.src.1,
+                width: self.out.0,
+                height: self.out.1,
                 depth_or_array_layers: 1,
             },
         );
         queue.submit([enc.finish()]);
         let ready = st.ready.clone();
         st.buf.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-            if r.is_ok() {
-                ready.store(true, Ordering::Release);
-            } else if let Err(e) = r {
-                logging::dedup!(WARN, "video_map", error = %e, "a video frame could not be read back");
-            }
+            ready.store(if r.is_ok() { 1 } else { 2 }, Ordering::Release);
         });
         self.pending.push_back((idx, slot));
         self.last_slot = Some(slot);
@@ -245,8 +309,17 @@ impl Recorder {
             }
         }
         while let Some(&(idx, slot)) = self.pending.front() {
-            if !self.ring[idx].ready.load(Ordering::Acquire) {
+            let state = self.ring[idx].ready.load(Ordering::Acquire);
+            if state == 0 {
                 break;
+            }
+            if state == 2 {
+                self.pending.pop_front();
+                self.ring[idx].ready.store(0, Ordering::Release);
+                self.free.push(idx);
+                self.map_failed += 1;
+                self.dropped += 1;
+                continue;
             }
             self.pending.pop_front();
             let mapped = self.ring[idx].buf.slice(..).get_mapped_range().unwrap();
@@ -255,31 +328,32 @@ impl Recorder {
             data.extend_from_slice(&mapped);
             drop(mapped);
             self.ring[idx].buf.unmap();
-            self.ring[idx].ready.store(false, Ordering::Release);
+            self.ring[idx].ready.store(0, Ordering::Release);
             self.free.push(idx);
             let frame = Frame8 {
                 bgra: self.bgra,
                 slot,
                 data,
             };
-            if block {
-                if self.tx.send(frame).is_err() {
-                    tracing::error!("the video encoder is gone; a frame was lost");
-                }
-            } else if let Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) =
+            let result = if block {
+                self.tx
+                    .send(frame)
+                    .map_err(|e| TrySendError::Disconnected(e.0))
+            } else {
                 self.tx.try_send(frame)
-            {
-                // A recording is the harness's, and the encoder runs on whatever cores the host has left: the slots
-                // it loses follow the frame size and that load (0.6-1.7% at a 2536x1416 window, 34.9-37.8% at
-                // 5120x1440 with the host to itself, up to 56% at 1920x1080 beside two other runs). Each sample
-                // carries its own duration, so the file stays in sync; the count is in `finish`'s summary and in the
-                // stage's metrics.
-                logging::dedup!(
-                    DEBUG,
-                    "video_queue",
-                    "the video encoder is behind; a frame was dropped"
-                );
-                self.dropped += 1;
+            };
+            match result {
+                Ok(()) => {}
+                Err(TrySendError::Full(frame)) => {
+                    self.queue_full += 1;
+                    self.dropped += 1;
+                    if self.spare.len() < 2 {
+                        self.spare.push(frame.data);
+                    }
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    self.failed = true;
+                }
             }
         }
     }
@@ -294,17 +368,38 @@ impl Recorder {
         }
         let Recorder {
             path,
+            src,
             out,
             fps,
             tx,
             thread,
             dropped,
+            ring_full,
+            queue_full,
+            map_failed,
+            gpu_reset,
+            pacing_missed,
+            first_slot,
+            last_slot,
+            failed,
             ..
         } = self;
         drop(tx);
-        let (frames, bytes) = thread
+        let encoded = thread
             .join()
             .map_err(|_| other("encoder thread panicked"))??;
+        if failed {
+            return Err(other("video encoder disconnected"));
+        }
+        let Encoded {
+            frames,
+            bytes,
+            first: first_encoded_slot,
+            last: last_encoded_slot,
+        } = encoded;
+        let duration_ticks = first_encoded_slot
+            .zip(last_encoded_slot)
+            .map_or(0, |(a, b)| b - a + 1);
         tracing::info!(path = %path.display(), frames, dropped, bytes, "video recording finished");
         Ok(VideoStats {
             path,
@@ -314,6 +409,18 @@ impl Recorder {
             width: out.0,
             height: out.1,
             fps,
+            source_width: src.0,
+            source_height: src.1,
+            ring_full,
+            queue_full,
+            map_failed,
+            gpu_reset,
+            pacing_missed,
+            first_slot,
+            last_slot,
+            first_encoded_slot,
+            last_encoded_slot,
+            duration_ticks,
         })
     }
 }
@@ -353,17 +460,15 @@ struct EncodeJob {
     rx: mpsc::Receiver<Frame8>,
     /// Returns each frame's buffer to the recorder once converted, so the render thread reuses it.
     spare: mpsc::Sender<Vec<u8>>,
-    src: (u32, u32),
     out: (u32, u32),
     stride: usize,
 }
 
 impl EncodeJob {
-    /// Two stages so conversion overlaps encoding: a converter thread (scale + RGB->YUV,
-    /// itself banded across cores) feeds this thread, which owns rav1e and the muxer.
-    fn run(mut self) -> io::Result<(u64, u64)> {
+    /// Conversion overlaps encoding: a banded RGB->YUV thread feeds rav1e and the muxer.
+    fn run(mut self) -> io::Result<Encoded> {
         let (ow, oh) = (self.out.0 as usize, self.out.1 as usize);
-        let conv = Converter::new(self.src, self.out, self.stride);
+        let conv = Converter::new(self.stride);
         let rx = std::mem::replace(&mut self.rx, mpsc::sync_channel(0).1);
         let (ctx_tx, ctx_rx) = mpsc::sync_channel::<(u64, [Vec<u8>; 3])>(2);
         let spare = self.spare.clone();
@@ -397,16 +502,23 @@ impl EncodeJob {
             }
         }
         drop(ctx_rx);
-        if converter.join().is_err() {
-            tracing::error!("the video converter thread panicked");
-        }
+        converter
+            .join()
+            .map_err(|_| other("video converter thread panicked"))?;
         result?;
         self.ctx.flush();
         self.pump(&slots)?;
+        let first = self.mux.slots.first().copied();
+        let last = self.mux.slots.last().copied();
         let frames = self.mux.finish(&mut self.file)?;
         self.file.flush()?;
         let bytes = self.file.get_ref().metadata()?.len();
-        Ok((frames, bytes))
+        Ok(Encoded {
+            frames,
+            bytes,
+            first,
+            last,
+        })
     }
 
     fn pump(&mut self, slots: &[u64]) -> io::Result<()> {
@@ -430,6 +542,7 @@ impl EncodeJob {
 }
 
 /// Bilinear RGBA/BGRA -> packed RGB scaler.
+#[cfg(test)]
 struct Scaler {
     sw: usize,
     ow: usize,
@@ -441,6 +554,7 @@ struct Scaler {
     rgb: [usize; 3],
 }
 
+#[cfg(test)]
 impl Scaler {
     fn new(src: (u32, u32), out: (u32, u32), bgra: bool) -> Scaler {
         let axis = |s: u32, o: u32| -> Vec<(usize, usize, u32)> {
@@ -488,25 +602,17 @@ impl Scaler {
 /// Source RGBA/BGRA frame -> planar YUV 4:2:0, split into horizontal bands of output rows
 /// converted on scoped threads.
 struct Converter {
-    rgba: Scaler,
-    bgra: Scaler,
     stride: usize,
     bands: usize,
 }
 
 impl Converter {
-    fn new(src: (u32, u32), out: (u32, u32), stride: usize) -> Converter {
+    fn new(stride: usize) -> Converter {
         let bands = std::thread::available_parallelism().map_or(2, |n| n.get().clamp(1, 4));
-        Converter {
-            rgba: Scaler::new(src, out, false),
-            bgra: Scaler::new(src, out, true),
-            stride,
-            bands,
-        }
+        Converter { stride, bands }
     }
 
     fn convert(&self, data: &[u8], bgra: bool, w: usize, h: usize) -> [Vec<u8>; 3] {
-        let sc = if bgra { &self.bgra } else { &self.rgba };
         let mut y = vec![0u8; w * h];
         let mut u = vec![0u8; w * h / 4];
         let mut v = vec![0u8; w * h / 4];
@@ -521,7 +627,20 @@ impl Converter {
                 s.spawn(move || {
                     let rows = y.len() / w;
                     let mut rgb = vec![0u8; w * rows * 3];
-                    sc.scale(data, self.stride, row0, &mut rgb);
+                    let channels = if bgra { [2, 1, 0] } else { [0, 1, 2] };
+                    for (row, dst) in rgb.chunks_exact_mut(w * 3).enumerate() {
+                        let start = (row0 + row) * self.stride;
+                        for (pixel, out) in data[start..start + w * 4]
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .zip(dst.as_chunks_mut::<3>().0.iter_mut())
+                        {
+                            for c in 0..3 {
+                                out[c] = pixel[channels[c]];
+                            }
+                        }
+                    }
                     yuv420(&rgb, w, rows, y, u, v);
                 });
             }
@@ -800,6 +919,282 @@ mod tests {
     use super::*;
     use std::time::Instant;
 
+    #[test]
+    fn recording_rectangle_is_bounded_even_and_not_upscaled() {
+        for (src, want) in [
+            ((5120, 1440), (1280, 360)),
+            ((1920, 1080), (1280, 720)),
+            ((2536, 1416), (1280, 714)),
+            ((301, 203), (300, 202)),
+        ] {
+            assert_eq!(output_size(src, (1280, 720)).unwrap(), want);
+        }
+        assert!(output_size((1, 100), (1280, 720)).is_err());
+        assert!(output_size((10000, 2), (1280, 720)).is_err());
+    }
+
+    #[test]
+    fn gpu_scaling_preserves_encoded_colors_and_channels() {
+        let _lock = crate::GPU_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(gpu) = device() else { return };
+        let (d, q) = (&gpu.device, &gpu.queue);
+        for src in [(30, 18), (31, 19)] {
+            let out = (14, 8);
+            for format in [
+                wgpu::TextureFormat::Rgba8Unorm,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                wgpu::TextureFormat::Bgra8Unorm,
+                wgpu::TextureFormat::Bgra8UnormSrgb,
+            ] {
+                let bgra = matches!(
+                    format,
+                    wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+                );
+                let input = d.create_texture(&wgpu::TextureDescriptor {
+                    label: None,
+                    size: wgpu::Extent3d {
+                        width: src.0,
+                        height: src.1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                let data: Vec<u8> = (0..src.0 * src.1 * 4)
+                    .map(|i| (i.wrapping_mul(37) % 256) as u8)
+                    .collect();
+                q.write_texture(
+                    input.as_image_copy(),
+                    &data,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(src.0 * 4),
+                        rows_per_image: Some(src.1),
+                    },
+                    input.size(),
+                );
+                let scale = GpuScale::new(d, src, out, format);
+                let buffer = d.create_buffer(&wgpu::BufferDescriptor {
+                    label: None,
+                    size: 256 * out.1 as u64,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                });
+                let mut enc = d.create_command_encoder(&Default::default());
+                scale.draw(&mut enc, &input);
+                enc.copy_texture_to_buffer(
+                    scale.output.as_image_copy(),
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &buffer,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(256),
+                            rows_per_image: Some(out.1),
+                        },
+                    },
+                    scale.output.size(),
+                );
+                q.submit([enc.finish()]);
+                buffer
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, |r| r.unwrap());
+                d.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                let mapped = buffer.slice(..).get_mapped_range().unwrap();
+                let mut expected = vec![0; out.0 as usize * out.1 as usize * 3];
+                Scaler::new(src, out, bgra).scale(&data, src.0 as usize * 4, 0, &mut expected);
+                let channels = if bgra { [2, 1, 0] } else { [0, 1, 2] };
+                for y in 0..out.1 as usize {
+                    for x in 0..out.0 as usize {
+                        for c in 0..3 {
+                            let actual = mapped[y * 256 + x * 4 + channels[c]];
+                            let want = expected[(y * out.0 as usize + x) * 3 + c];
+                            assert!(
+                                actual.abs_diff(want) <= 1,
+                                "{format:?} ({x},{y}) channel {c}: {actual} != {want}"
+                            );
+                        }
+                    }
+                }
+                drop(mapped);
+                buffer.unmap();
+            }
+        }
+    }
+
+    #[test]
+    fn resize_releases_gpu_resources_and_original_size_resumes() {
+        let _lock = crate::GPU_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(gpu) = device() else { return };
+        let (d, q) = (&gpu.device, &gpu.queue);
+        let texture = |size: u32| {
+            d.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        };
+        let original = texture(16);
+        let resized = texture(8);
+        let path = std::env::temp_dir().join(format!("cod4e-resize-{}.mp4", std::process::id()));
+        let mut rec = Recorder::start(&path, (16, 16), (16, 16), 30).unwrap();
+        assert!(rec.capture(d, q, &original, Duration::ZERO));
+        assert!(rec.scale.is_some());
+        let pending = rec.pending.len() as u64;
+        assert_eq!(pending, 1);
+        assert!(!rec.capture(d, q, &resized, Duration::from_millis(34)));
+        assert!(rec.scale.is_none());
+        assert!(rec.format.is_none());
+        assert!(rec.pending.is_empty() && rec.ring.is_empty() && rec.free.is_empty());
+        assert_eq!((rec.gpu_reset, rec.dropped), (pending, pending));
+        // Repeated mismatched frames neither allocate GPU resources nor count losses twice.
+        assert!(!rec.capture(d, q, &resized, Duration::from_millis(67)));
+        assert_eq!(rec.gpu_reset, pending);
+        assert!(rec.scale.is_none());
+        assert!(rec.capture(d, q, &original, Duration::from_millis(100)));
+        assert!(rec.scale.is_some());
+        let stats = rec.finish(d).unwrap();
+        assert_eq!(stats.frames, 1);
+        assert_eq!(stats.gpu_reset, 1);
+        assert_eq!(stats.pacing_missed, 2);
+        assert_eq!(stats.frames + stats.dropped + stats.pacing_missed, 4);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn failed_maps_retire_and_encoder_disconnection_fails_recording() {
+        let _lock = crate::GPU_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(gpu) = device() else { return };
+        let path =
+            std::env::temp_dir().join(format!("cod4e-video-failure-{}.mp4", std::process::id()));
+        let mut rec = Recorder::start(&path, (16, 16), (16, 16), 30).unwrap();
+        rec.ring.push(Staging {
+            buf: gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: 256 * 16,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            ready: Arc::new(AtomicU8::new(2)),
+        });
+        rec.pending.push_back((0, 0));
+        rec.drain(false);
+        assert!(rec.pending.is_empty());
+        assert_eq!((rec.map_failed, rec.dropped, rec.free.len()), (1, 1, 1));
+        let (tx, rx) = mpsc::sync_channel(1);
+        drop(rx);
+        let old = std::mem::replace(&mut rec.tx, tx);
+        drop(old);
+        rec.ring.push(Staging {
+            buf: gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: 256 * 16,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: true,
+            }),
+            ready: Arc::new(AtomicU8::new(1)),
+        });
+        rec.pending.push_back((1, 1));
+        rec.drain(false);
+        assert!(rec.failed);
+        assert!(rec.finish(&gpu.device).is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn converter_panic_fails_encode_job() {
+        let path =
+            std::env::temp_dir().join(format!("cod4e-convert-failure-{}.mp4", std::process::id()));
+        let ctx = new_context(16, 16, 30).unwrap();
+        let mut file = BufWriter::new(File::create(&path).unwrap());
+        let mux = Mux::begin(&mut file, 16, 16, 30, &ctx.container_sequence_header()).unwrap();
+        let (tx, rx) = mpsc::sync_channel(1);
+        tx.send(Frame8 {
+            bgra: false,
+            slot: 0,
+            data: vec![],
+        })
+        .unwrap();
+        drop(tx);
+        let job = EncodeJob {
+            ctx,
+            file,
+            mux,
+            rx,
+            spare: mpsc::channel().0,
+            out: (16, 16),
+            stride: 64,
+        };
+        assert!(job.run().unwrap_err().to_string().contains("converter"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn encoder_errors_fail_encode_job() {
+        let path =
+            std::env::temp_dir().join(format!("cod4e-encode-failure-{}.mp4", std::process::id()));
+        let mut ctx = new_context(16, 16, 30).unwrap();
+        let mut file = BufWriter::new(File::create(&path).unwrap());
+        let mux = Mux::begin(&mut file, 16, 16, 30, &ctx.container_sequence_header()).unwrap();
+        ctx.flush();
+        let (tx, rx) = mpsc::sync_channel(1);
+        tx.send(Frame8 {
+            bgra: false,
+            slot: 0,
+            data: vec![128; 16 * 16 * 4],
+        })
+        .unwrap();
+        drop(tx);
+        let job = EncodeJob {
+            ctx,
+            file,
+            mux,
+            rx,
+            spare: mpsc::channel().0,
+            out: (16, 16),
+            stride: 64,
+        };
+        assert!(job.run().is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn mux_write_errors_propagate() {
+        struct Broken;
+        impl Write for Broken {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(other("injected write failure"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut file = io::Cursor::new(Vec::new());
+        let mut mux = Mux::begin(&mut file, 16, 16, 30, &[]).unwrap();
+        assert!(mux.push(&mut Broken, &[1, 2, 3], true, 0).is_err());
+        mux.push(&mut file, &[1], true, 10).unwrap();
+        mux.push(&mut file, &[2], false, 14).unwrap();
+        mux.finish(&mut file).unwrap();
+        let bytes = file.into_inner();
+        let i = bytes.windows(4).rposition(|w| w == b"mdhd").unwrap();
+        assert_eq!(
+            u32::from_be_bytes(bytes[i + 20..i + 24].try_into().unwrap()),
+            5
+        );
+    }
+
     /// A headless device, or `None` without an adapter. The `Gpu` keeps its instance alive for as long as the device
     /// is used (the instance is dropped first otherwise).
     fn device() -> Option<render::Gpu> {
@@ -815,7 +1210,7 @@ mod tests {
     /// Banded multithreaded conversion equals the single-band scalar reference.
     #[test]
     fn banded_convert_matches_scalar() {
-        let (sw, sh, ow, oh) = (301usize, 203usize, 150usize, 100usize);
+        let (sw, sh, ow, oh) = (150usize, 100usize, 150usize, 100usize);
         let stride = sw * 4 + 12;
         let mut data = vec![0u8; stride * sh];
         let mut x = 12345u32;
@@ -824,7 +1219,7 @@ mod tests {
             *b = (x >> 24) as u8;
         }
         for bgra in [false, true] {
-            let mut c = Converter::new((sw as u32, sh as u32), (ow as u32, oh as u32), stride);
+            let mut c = Converter::new(stride);
             let got = c.convert(&data, bgra, ow, oh);
             let sc = Scaler::new((sw as u32, sh as u32), (ow as u32, oh as u32), bgra);
             let mut rgb = vec![0u8; ow * oh * 3];
@@ -864,7 +1259,7 @@ mod tests {
         });
         let dir = std::env::temp_dir().join(format!("cod4e-video-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut rec = Recorder::start(&dir.join("t.out"), (w, h), 960, 30).unwrap();
+        let mut rec = Recorder::start(&dir.join("t.out"), (w, h), (1280, 720), 30).unwrap();
         // A handful of distinct frames, cycled, so the render loop outruns the 30 fps cap.
         let patterns: Vec<Vec<u8>> = (0..8u32)
             .map(|i| {
@@ -925,7 +1320,7 @@ mod tests {
             t_all,
             stats.frames as f64 / t_all.as_secs_f64()
         );
-        assert_eq!((stats.width, stats.height), (1706, 960));
+        assert_eq!((stats.width, stats.height), (1280, 720));
         let bytes = std::fs::read(&stats.path).unwrap();
         assert_eq!(bytes.len() as u64, stats.bytes);
         assert_eq!(stats.path.extension().unwrap(), "mp4");

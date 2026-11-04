@@ -42,6 +42,7 @@ crates/net/**                           @full +timing
 crates/server/src/netsv*                @full +timing
 scripts/host-run.sh                     @full
 scripts/remote-linux.sh                 @full
+scripts/host-ssh.py                     @full
 scripts/netns.sh                        @full
 scripts/virtual-display.sh              @full
 scripts/virtual-audio.sh                @full

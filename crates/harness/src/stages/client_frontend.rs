@@ -89,15 +89,22 @@ struct LanServer {
 
 impl LanServer {
     /// Starts one and waits until it has a map loaded; `None` when no standard port is free or it does not come up.
-    fn start(install: &Path) -> Option<Self> {
+    fn start(install: &Path, dedicated: bool) -> Option<Self> {
         let port = (28960..=28963).find(|p| std::net::UdpSocket::bind(("0.0.0.0", *p)).is_ok())?;
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = std::sync::mpsc::channel();
         let (flag, install) = (stop.clone(), install.to_path_buf());
         let thread = std::thread::spawn(move || {
-            let args: Vec<String> = ["+set", "net_port", &port.to_string()]
-                .map(Into::into)
-                .to_vec();
+            let args: Vec<String> = [
+                "+set",
+                "net_port",
+                &port.to_string(),
+                "+set",
+                "dedicated",
+                if dedicated { "2" } else { "0" },
+            ]
+            .map(Into::into)
+            .to_vec();
             let Ok(mut server) = server::server::Server::boot(&install, &args, false) else {
                 return;
             };
@@ -309,6 +316,34 @@ fn rows(c: &mut Driven, want: u64, at_least: bool, secs: u64) -> Result<(), Stri
     }
 }
 
+/// Observe the paint path, not merely the parsed hw values or the feeder's lookup.
+fn hardware_icons(c: &mut Driven) -> Result<(), String> {
+    let end = Instant::now() + Duration::from_secs(10);
+    loop {
+        let have = c.lookup("menu.list_icons")?;
+        let row_for = |material: &str| {
+            have.as_array()?.iter().find_map(|icon| {
+                (icon["feeder"] == 2 && icon["col"] == 1 && icon["material"] == material)
+                    .then(|| icon["row"].as_u64())
+                    .flatten()
+            })
+        };
+        if let (Some(dedicated), Some(listen)) = (
+            row_for("server_hardware_win_dedicated"),
+            row_for("server_hardware_win_listen"),
+        ) && dedicated != listen
+        {
+            return Ok(());
+        }
+        if Instant::now() > end {
+            return Err(format!(
+                "no distinct dedicated/listen hardware icons drawn: {have}"
+            ));
+        }
+        c.pause(Duration::from_millis(100))?;
+    }
+}
+
 fn open_by(c: &mut Driven, item: &str, menu: &str, secs: u64) -> Result<(), String> {
     c.click(item)?;
     until_top(c, menu, Duration::from_secs(secs)).map_err(|e| format!("clicking {item}: {e}"))?;
@@ -443,7 +478,9 @@ fn drive(c: &mut Driven, enable_console: &str) -> Result<(), String> {
         // servers, so a player would untick the one and set the other to either to see it, and so does the stage.
         c.console("set ui_browserShowPure 0")?;
         c.console("set ui_browserMod -1")?;
-        rows(c, 1, true, 15)?;
+        rows(c, 2, true, 15)?;
+        hardware_icons(c)?;
+        c.capture("join_hardware")?;
         click_owner(c, JOIN_GAME_TYPE)?;
         cvar_is(c, "ui_joinGameType", "1")?;
         c.console("set ui_joinGameType 0")?;
@@ -503,13 +540,17 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         Err(e) => return Ok(StageReport::new(NAME, Status::Failed).with_reason(e)),
     };
     let mut out = StageReport::new(NAME, Status::Passed);
-    let Some(lan) = LanServer::start(install) else {
+    let Some(lan) = LanServer::start(install, true) else {
         let mut r = StageReport::new(NAME, Status::Failed);
         r.reason = Some(
             "the stage's LAN server did not start, so the join menu's LAN list was never scanned"
                 .into(),
         );
         return Ok(r);
+    };
+    let Some(listen) = LanServer::start(install, false) else {
+        return Ok(StageReport::new(NAME, Status::Failed)
+            .with_reason("the stage's LAN listen server did not start"));
     };
     let problem = match Driven::start(&client, install, &ctx.dir, &[]) {
         Ok(mut c) => {
@@ -525,6 +566,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                 "options",
                 "options_multi",
                 "join",
+                "join_hardware",
                 "mode_war",
                 "mode_dm",
                 "mode_back",
@@ -550,6 +592,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         out.reason = Some(w);
     }
     drop(lan);
+    drop(listen);
     if snapshot(&players).ok().as_deref() != Some(before.as_slice()) {
         out.status = Status::Failed;
         out.reason = Some("the run changed the install's players folder".into());

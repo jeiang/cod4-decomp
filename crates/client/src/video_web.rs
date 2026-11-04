@@ -13,6 +13,18 @@ pub struct VideoStats {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    pub source_width: u32,
+    pub source_height: u32,
+    pub ring_full: u64,
+    pub queue_full: u64,
+    pub map_failed: u64,
+    pub gpu_reset: u64,
+    pub pacing_missed: u64,
+    pub first_slot: Option<u64>,
+    pub last_slot: Option<u64>,
+    pub first_encoded_slot: Option<u64>,
+    pub last_encoded_slot: Option<u64>,
+    pub duration_ticks: u64,
 }
 
 pub struct Recorder;
@@ -21,7 +33,7 @@ impl Recorder {
     pub fn start(
         _path: &Path,
         _src: (u32, u32),
-        _max_height: u32,
+        _maximum: (u32, u32),
         _fps: u32,
     ) -> io::Result<Recorder> {
         Err(io::ErrorKind::Unsupported.into())

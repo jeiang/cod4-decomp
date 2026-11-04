@@ -24,18 +24,72 @@ GUARD = os.path.join(SCRIPTS, "slot-guard.py")
 TOKEN = "lease-token-0123456789abcdef"
 
 SSH = f"""#!{sys.executable}
-import os, signal, subprocess, sys, time
+import json, os, signal, subprocess, sys, time
+# Match OpenSSH's closefrom(3): the session cannot retain a passed token FD.
+os.closerange(3, 1024)
 args = sys.argv[1:]
+with open(os.environ["FAKE_RECORD"] + ".ssh", "a") as log:
+    log.write(json.dumps(args) + "\\n")
 options = []
-while args and args[0] == "-o":
-    options.append(args[1])
-    args = args[2:]
-assert options == ["BatchMode=yes", "ConnectTimeout=10", "ServerAliveInterval=10", "ServerAliveCountMax=3"], options
+config = None
+control = None
+mode = None
+while args and args[0].startswith("-"):
+    flag = args.pop(0)
+    if flag in ("-o", "-F", "-O", "-p", "-l", "-i"):
+        value = args.pop(0)
+        if flag == "-o":
+            options.append(value)
+            if value.startswith("ControlPath="):
+                control = value.split("=", 1)[1]
+        elif flag == "-F":
+            config = value
+        elif flag == "-O":
+            mode = value
+    elif flag == "-G":
+        print("hostname " + args[0] + "\\nuser test\\nport 22")
+        sys.exit(0)
+    elif flag == "-Nf":
+        mode = "master"
+if mode == "check":
+    alive = os.path.exists(control)
+    if alive and os.environ.get("FAKE_MASTER_DIES"):
+        os.unlink(control)
+    sys.exit(0 if alive else 255)
+if mode == "master":
+    time.sleep(.03)
+    open(control, "w").close()
+    if os.environ.get("FAKE_MASTER_HOLD") and os.fork() == 0:
+        time.sleep(5)
+        os._exit(0)
+    with open(os.environ["FAKE_RECORD"] + ".masters", "a") as log:
+        log.write(control + "\\n")
+    sys.exit(0)
 if os.environ.get("FAKE_SSH_FAIL"):
     print("ssh: connect to host " + args[0] + ": Connection refused", file=sys.stderr)
     sys.exit(255)
+if control and not os.path.exists(control):
+    print("ssh: master disappeared; fallback disabled", file=sys.stderr)
+    sys.exit(255)
 os.environ["HOME"] = os.environ["FAKE_HOME"]
 cmd = " ".join(args[1:])
+if os.environ.get("FAKE_COMMAND_DELAY"):
+    import fcntl
+    counter = os.environ["FAKE_RECORD"] + ".active"
+    with open(counter, "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        lock.seek(0); active = int(lock.read() or "0") + 1
+        lock.seek(0); lock.truncate(); lock.write(str(active)); lock.flush()
+        with open(counter + ".seen", "a") as seen:
+            seen.write(str(active) + "\\n")
+    time.sleep(float(os.environ["FAKE_COMMAND_DELAY"]))
+    with open(counter, "r+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        active = int(lock.read()) - 1
+        lock.seek(0); lock.truncate(); lock.write(str(active))
+if ".host-transport poll " in cmd and os.environ.get("FAKE_POLL_FAIL"):
+    print("ssh: final poll diagnostic", file=sys.stderr)
+    sys.exit(int(os.environ["FAKE_POLL_FAIL"]))
 drop = os.environ.get("FAKE_DROP")
 marker = os.environ["FAKE_RECORD"] + ".dropped"
 matches = ((drop == "follow" and ".host-transport poll " in cmd and ".host-transport poll 0 0" not in cmd)
@@ -49,7 +103,7 @@ if matches and not os.path.exists(marker):
     open(marker, "w").write(cmd)
     sys.stdout.buffer.write(result.stdout[:len(result.stdout) // 2])
     sys.stdout.buffer.flush()
-    os.kill(os.getpid(), signal.SIGKILL)
+    sys.exit(255)
 os.execvp("bash", ["bash", "-c", cmd])
 """
 SETSID = f"""#!{sys.executable}
@@ -76,7 +130,7 @@ HOST_RUN = """#!/usr/bin/env bash
 echo start >> "$FAKE_RECORD.starts"
 echo "host stdout line"
 echo "host stderr line" >&2
-sleep "${FAKE_DELAY:-0}"
+/bin/sleep "${FAKE_DELAY:-0}"
 echo "host final stdout"
 echo "host final stderr" >&2
 mkdir -p bundles out
@@ -107,6 +161,12 @@ class RemoteLinux(unittest.TestCase):
         executable(os.path.join(self.bin, "ssh"), SSH)
         executable(os.path.join(self.bin, "setsid"), SETSID)
         executable(os.path.join(self.bin, "nix"), NIX)
+        executable(os.path.join(self.bin, "sleep"),
+                   f'#!{sys.executable}\nimport os, sys, time\n'
+                   'with open(os.environ["FAKE_RECORD"] + ".sleeps", "a") as f: f.write(sys.argv[1] + "\\n")\n'
+                   'time.sleep(.05)\n')
+        self.config = os.path.realpath(os.path.join(self.tmp, "ssh-config"))
+        Path(self.config).write_text("")
         executable(os.path.join(self.tmp, "host-run"), HOST_RUN)
         # The temp repo must not depend on the host's git config. Signing is turned off on the command line too: a
         # NixOS host's git carries `commit.gpgsign` in a config file GIT_CONFIG_NOSYSTEM does not turn off.
@@ -122,7 +182,8 @@ class RemoteLinux(unittest.TestCase):
 
     def remote_env(self, **env):
         full = dict(self.git_env, PATH=self.bin + os.pathsep + os.environ["PATH"], COD4E_LINUX_HOST="testhost",
-                    FAKE_HOME=self.home, FAKE_HOST_RUN=os.path.join(self.tmp, "host-run"), FAKE_RECORD=self.record)
+                    FAKE_HOME=self.home, FAKE_HOST_RUN=os.path.join(self.tmp, "host-run"), FAKE_RECORD=self.record,
+                    COD4E_LINUX_SSH_CONFIG=self.config)
         for k in ("COD4E_LINUX_SLOT", "COD4E_LINUX_SLOT_TOKEN", "COD4E_LINUX_EXEC", "COD4E_LINUX_CHECKS",
                   "COD4E_SLOT_GUARD_DIR", "COD4E_SLOT_TOKEN", "COD4E_HOST_WAIT_TIMEOUT", "COD4E_HOST_WAIT_REPORT"):
             full.pop(k, None)
@@ -278,6 +339,109 @@ class RemoteLinux(unittest.TestCase):
                 self.assertTrue(os.path.exists(self.record + ".dropped"))
                 os.unlink(self.record + ".dropped")
         self.assertEqual(Path(self.record + ".starts").read_text(), "start\nstart\n")
+
+    def test_poll_backoff_is_bounded_and_keeps_last_error_and_run(self):
+        r = self.remote("--", FAKE_POLL_FAIL="255")
+        self.assertEqual(r.returncode, 255, r.stderr)
+        self.assertIn("reconnect attempts exhausted", r.stderr)
+        self.assertIn("ssh: final poll diagnostic", r.stderr)
+        self.assertEqual(len(glob.glob(os.path.join(self.home, "Projects", "cod4e", "run-*"))), 1)
+        waits = [float(n) for n in Path(self.record + ".sleeps").read_text().splitlines() if float(n) >= 1]
+        self.assertEqual(len(waits), 4, waits)
+        for wait, base in zip(waits, (5, 10, 20, 30)):
+            self.assertGreaterEqual(wait, base)
+            self.assertLess(wait, base + 1)
+
+    def test_non_transport_error_is_not_retried(self):
+        r = self.remote("--", FAKE_POLL_FAIL="42")
+        self.assertEqual(r.returncode, 42, r.stderr)
+        self.assertNotIn("reconnecting", r.stderr)
+        self.assertTrue(all(float(n) < 1 for n in Path(self.record + ".sleeps").read_text().splitlines()))
+
+    def test_poll_interval_is_five_seconds(self):
+        r = self.remote("--", FAKE_DELAY="1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("5", Path(self.record + ".sleeps").read_text().splitlines())
+
+    def test_shared_detector_free_options(self):
+        import json
+        r = self.remote("--")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        calls = [json.loads(n) for n in Path(self.record + ".ssh").read_text().splitlines()]
+        paths = set()
+        for args in calls:
+            self.assertEqual(args[:2], ["-F", self.config])
+            for option in ("BatchMode=yes", "ConnectTimeout=10", "ServerAliveInterval=10",
+                           "ServerAliveCountMax=3"):
+                self.assertIn(option, args)
+            paths.update(n for n in args if n.startswith("ControlPath="))
+            if any(".host-transport poll " in n for n in args):
+                self.assertIn("ControlMaster=no", args)
+                self.assertIn("ProxyCommand=false", args)
+        self.assertEqual(len(paths), 1)
+        self.assertEqual(len(Path(self.record + ".masters").read_text().splitlines()), 1)
+        self.assertTrue(any("ControlPersist=600" in args for args in calls))
+
+    def test_concurrent_callers_share_master_and_recreate_after_death(self):
+        helper = os.path.join(SCRIPTS, "host-ssh.py")
+        env = self.remote_env()
+        calls = [subprocess.Popen([sys.executable, helper, "testhost", "true"], env=env)
+                 for _ in range(4)]
+        for p in calls:
+            self.assertEqual(p.wait(timeout=15), 0)
+        masters = Path(self.record + ".masters").read_text().splitlines()
+        self.assertEqual(len(masters), 1)
+        os.unlink(masters[0])
+        r = subprocess.run([sys.executable, helper, "-t", "testhost", "true"], env=env)
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(Path(self.record + ".masters").read_text().splitlines(), masters * 2)
+
+    def test_master_dying_before_command_fails_closed_without_replay(self):
+        helper = os.path.join(SCRIPTS, "host-ssh.py")
+        args = [sys.executable, helper, "testhost", "true"]
+        self.assertEqual(subprocess.run(args, env=self.remote_env()).returncode, 0)
+        r = subprocess.run(args, env=self.remote_env(FAKE_MASTER_DIES="1"), capture_output=True, text=True)
+        self.assertEqual(r.returncode, 255)
+        self.assertIn("fallback disabled", r.stderr)
+        self.assertEqual(len(Path(self.record + ".masters").read_text().splitlines()), 1)
+        self.assertEqual(subprocess.run(args, env=self.remote_env()).returncode, 0)
+        self.assertEqual(len(Path(self.record + ".masters").read_text().splitlines()), 2)
+
+    def test_command_channel_budget(self):
+        helper = os.path.join(SCRIPTS, "host-ssh.py")
+        env = self.remote_env(FAKE_COMMAND_DELAY=".5")
+        calls = [subprocess.Popen([sys.executable, helper, "testhost", "true"], env=env) for _ in range(12)]
+        for p in calls:
+            self.assertEqual(p.wait(timeout=15), 0)
+        counts = [int(n) for n in Path(self.record + ".active.seen").read_text().splitlines()]
+        self.assertLessEqual(max(counts), 8)
+        self.assertGreater(max(counts), 1)
+
+    def test_background_master_does_not_hold_caller_output_pipes(self):
+        helper = os.path.join(SCRIPTS, "host-ssh.py")
+        r = subprocess.run([sys.executable, helper, "testhost", "true"],
+                           env=self.remote_env(FAKE_MASTER_HOLD="1"),
+                           capture_output=True, text=True, timeout=3)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_killed_wrapper_keeps_token_until_fd_closing_ssh_exits(self):
+        helper = os.path.join(SCRIPTS, "host-ssh.py")
+        env = self.remote_env(FAKE_COMMAND_DELAY="2")
+        args = [sys.executable, helper, "testhost", "true"]
+        calls = [subprocess.Popen(args, env=env) for _ in range(8)]
+        active = Path(self.record + ".active")
+        self.wait_for(lambda: active.exists() and active.read_text() == "8")
+        calls[0].kill()
+        calls[0].wait(timeout=5)
+        ninth = subprocess.Popen(args, env=env)
+        time.sleep(.25)
+        self.assertIsNone(ninth.poll())
+        self.assertEqual(active.read_text(), "8")
+        for p in calls[1:]:
+            self.assertEqual(p.wait(timeout=10), 0)
+        self.assertEqual(ninth.wait(timeout=10), 0)
+        counts = [int(n) for n in Path(self.record + ".active.seen").read_text().splitlines()]
+        self.assertEqual(max(counts), 8)
 
     def wait_for(self, predicate):
         end = time.monotonic() + 15

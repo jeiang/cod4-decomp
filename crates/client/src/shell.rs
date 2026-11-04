@@ -2833,6 +2833,15 @@ impl Host for HostCx<'_> {
         }
     }
 
+    fn feeder_item_icon(&mut self, feeder: i32, row: usize, col: usize) -> Option<&'static str> {
+        if (feeder, col) != (2, 1) {
+            return None;
+        }
+        self.server_rows()
+            .get(row)
+            .and_then(|e| hardware_icon(e.hardware))
+    }
+
     fn owner_key(&mut self, ui: &Ui, id: i32, key: &UiKey) -> bool {
         // The pickers below step on a click or Enter, the right button back.
         let pick = matches!(key, UiKey::Mouse1 | UiKey::Mouse2 | UiKey::Enter);
@@ -3115,6 +3124,20 @@ fn show_refusal(ui: &mut Ui, h: &mut HostCx, why: &str) {
     }
 }
 
+/// KisakCOD ui_main_mp.cpp:4144-4149,4699-4704; 1.7 lookup 0x5484fc.
+/// Hardware has already passed through the server browser's unsigned byte storage.
+fn hardware_icon(hardware: i32) -> Option<&'static str> {
+    match hardware {
+        0 => Some("server_hardware_unknown"),
+        1 => Some("server_hardware_linux_dedicated"),
+        2 => Some("server_hardware_win_dedicated"),
+        3 => Some("server_hardware_mac_dedicated"),
+        6 => Some("server_hardware_win_listen"),
+        7 => Some("server_hardware_mac_listen"),
+        _ => None,
+    }
+}
+
 /// One cell of the stock server list (the columns of the original's join menu).
 fn server_cell(
     e: &crate::serverlist::Entry,
@@ -3124,18 +3147,7 @@ fn server_cell(
 ) -> String {
     match col {
         0 => mark(e.password),
-        // The original draws a `server_hardware_*` icon for `hw` here (`ui_main_mp.cpp:4699-4704`); not built (#502).
-        1 => {
-            static WARNED: std::sync::atomic::AtomicBool =
-                std::sync::atomic::AtomicBool::new(false);
-            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                tracing::warn!(
-                    issue = 502,
-                    "hardware icon column is not drawn (server_hardware_*)"
-                );
-            }
-            String::new()
-        }
+        1 => String::new(),
         2 if e.ping > 0 => e.hostname.chars().take(38).collect(),
         2 => e.addr.to_string(),
         3 => maps
@@ -4108,6 +4120,26 @@ mod tests {
         assert!(!h.st.servers.refreshing(Source::Lan));
         // The time of the refresh is kept for the "Refresh time" line of its source.
         assert!(!h.dvar("ui_lastServerRefresh_0").is_empty());
+    }
+
+    #[test]
+    fn hardware_materials_follow_the_stock_sparse_table() {
+        for (slot, suffix) in [
+            (0, "unknown"),
+            (1, "linux_dedicated"),
+            (2, "win_dedicated"),
+            (3, "mac_dedicated"),
+            (6, "win_listen"),
+            (7, "mac_listen"),
+        ] {
+            assert_eq!(
+                hardware_icon(slot),
+                Some(format!("server_hardware_{suffix}").as_str())
+            );
+        }
+        for slot in [4, 5, 8, 9, 10, 255, -1] {
+            assert_eq!(hardware_icon(slot), None);
+        }
     }
 
     /// The map list shows the maps the game mode can be played on, with the level shot of each row, and a pick sets

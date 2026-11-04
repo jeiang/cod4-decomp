@@ -410,6 +410,10 @@ pub trait Host: env::World {
     fn feeder_select(&mut self, feeder: i32, row: usize);
     /// The material of a list row's image column, or empty.
     fn feeder_image(&mut self, feeder: i32, row: usize, col: usize) -> String;
+    /// Optional material returned with a text-list cell, separate from picture-list images.
+    fn feeder_item_icon(&mut self, _feeder: i32, _row: usize, _col: usize) -> Option<&'static str> {
+        None
+    }
     /// A key on an owner-draw item (`ownerdraw` id); `true` if it was used.
     fn owner_key(&mut self, ui: &Ui, id: i32, key: &UiKey) -> bool;
     /// Draws the game message window an item of type 19 stands for (`d.game_msg_window_index`), anchored at `rect`
@@ -642,6 +646,8 @@ pub struct Ui {
     sound_loops: Vec<String>,
     /// The build number the last frame drew over the menus (`UI_DrawBuildNumber`), `None` when it drew none.
     pub build_drawn: Option<String>,
+    /// Text-list icons actually painted last frame: feeder, row, column, material.
+    pub list_icons_drawn: Vec<(i32, usize, usize, &'static str)>,
 }
 
 impl Ui {
@@ -692,6 +698,7 @@ impl Ui {
             border_low_scale: 0.6,
             sound_loops: Vec::new(),
             build_drawn: None,
+            list_icons_drawn: Vec::new(),
         }
     }
 
