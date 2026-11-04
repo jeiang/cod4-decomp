@@ -140,7 +140,8 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        std::fs::create_dir_all(root.join("main/images")).unwrap();
+        // A loose game folder: `main` itself must hold IWDs.
+        std::fs::create_dir_all(root.join("raw/images")).unwrap();
         // Deliberately no texel payload: listing must not invoke Image::parse.
         let mut header = [0u8; 28];
         header[..4].copy_from_slice(b"IWi\x06");
@@ -148,9 +149,9 @@ mod tests {
         header[6..8].copy_from_slice(&64u16.to_le_bytes());
         header[8..10].copy_from_slice(&32u16.to_le_bytes());
         header[10..12].copy_from_slice(&1u16.to_le_bytes());
-        std::fs::write(root.join("main/images/external.iwi"), header).unwrap();
+        std::fs::write(root.join("raw/images/external.iwi"), header).unwrap();
         let mut builder = assets::vfs::Builder::new(&root);
-        builder.add_game_dir("main").unwrap();
+        builder.add_game_dir("raw").unwrap();
         let vfs = builder.finish(0).unwrap();
         let mut image = image("external", 9, [1024; 2]);
         image.load_def = None;

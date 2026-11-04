@@ -2492,7 +2492,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let install = dir.join("install");
         let user = dir.join("user");
-        std::fs::create_dir_all(install.join("main/sun")).unwrap();
+        // A loose game folder: `main` itself must hold IWDs.
+        std::fs::create_dir_all(install.join("raw/sun")).unwrap();
         let mut i = Input::detached();
         i.config_dir = Some(user.clone());
         i.cvars.set("r_sunflare_max_alpha", "0.6", false);
@@ -2508,11 +2509,13 @@ mod tests {
         assert_eq!(text.lines().count(), 21);
         assert!(!text.contains("set "));
         std::fs::write(
-            install.join("main/sun/roundtrip.sun"),
+            install.join("raw/sun/roundtrip.sun"),
             text.replace("\"0.6\"", "\"0.2\""),
         )
         .unwrap();
-        i.vfs = Some(Vfs::open_stock(&install, 0).unwrap());
+        let mut files = assets::vfs::Builder::new(&install);
+        files.add_game_dir("raw").unwrap();
+        i.vfs = Some(files.finish(0).unwrap());
         i.cvars.set("r_sunflare_max_alpha", "0.9", false);
         assert!(i.load_sun("roundtrip").unwrap().unwrap().complete);
         assert_eq!(i.cvar("r_sunflare_max_alpha"), Some("0.6"));
