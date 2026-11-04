@@ -27,9 +27,10 @@
 //! `imagelist` lists the loaded images with their totals and `imagelist all` warns with #581, as its generated
 //! images are not listed; `reloadmaterialtextures` prints its usage, refuses a material nothing loaded and reloads
 //! a loaded one's images in the menus' texture cache (evicted, then loaded again); in the match `r_savesun` and
-//! `r_loadsun` print their usage, `r_loadsun` is refused without cheats and, with `sv_cheats` forced on at the
-//! server, a saved sun file loads back into the dvars and the world's flare, a missing one warns and an incomplete
-//! one sets the dvars it names but leaves the world's flare. Needs a display and the install; skips without.
+//! `r_loadsun` print their usage, `r_loadsun` is refused without cheats, a name leaving the user folder is refused
+//! and, with `sv_cheats` forced on at the server, a saved sun file loads back into the dvars and the world's flare,
+//! a missing one warns and an incomplete one sets the dvars it names but leaves the world's flare. Needs a display
+//! and the install; skips without.
 use super::client_custom_class::{HOME, localized, session_report, until_top};
 use super::client_flythrough::locate_client;
 use super::client_frontend::cvar_is;
@@ -80,9 +81,9 @@ fn cheats(c: &mut Driven, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// `r_savesun` and `r_loadsun` in the match: usage, the cheat refusal, then with cheats on a save and load round
-/// trip checked in the dvar and the world's flare, a missing file and an incomplete one (`stagepart`, written by
-/// [`run`]), which sets the dvars it names but must not reach the world.
+/// `r_savesun` and `r_loadsun` in the match: usage, the cheat refusal, a name leaving the user folder refused, then
+/// with cheats on a save and load round trip checked in the dvar and the world's flare, a missing file and an
+/// incomplete one (`stagepart`, written by [`run`]), which sets the dvars it names but must not reach the world.
 fn sun_files(c: &mut Driven, config: &Path) -> Result<(), String> {
     typed(c, "r_savesun", "USAGE: r_savesun <sunname>")?;
     typed(c, "r_loadsun", "USAGE: r_loadsun <sunname>")?;
@@ -91,7 +92,20 @@ fn sun_files(c: &mut Driven, config: &Path) -> Result<(), String> {
         "r_loadsun stagesun",
         "You must have cheats enabled to use r_loadsun",
     )?;
+    typed(
+        c,
+        "r_savesun ../zz_escape",
+        "WARNING: couldn't save sun file 'sun/../zz_escape.sun': filename must stay inside the user folder",
+    )?;
+    if config.join("zz_escape.sun").exists() {
+        return Err("r_savesun ../zz_escape wrote outside the sun folder".into());
+    }
     cheats(c, "1")?;
+    typed(
+        c,
+        "r_loadsun ../zz_escape",
+        "WARNING: couldn't load sun file 'sun/../zz_escape.sun': filename must stay inside the user folder",
+    )?;
     c.console("set r_sunflare_max_alpha 0.37")?;
     c.console("r_savesun stagesun")?;
     c.pause(Duration::from_millis(500))?;
