@@ -5402,8 +5402,10 @@ fn menu_state(st: &mut State) -> Value {
         }
     }
     let server_rows = sh.server_rows_shown(&mut st.input);
+    let list_icons: Vec<_> = sh.ui.list_icons_drawn.iter().map(|&(feeder, row, col, material)|
+        json!({"feeder": feeder, "row": row, "col": col, "material": material})).collect();
     json!({"open": open, "focused": focused, "items": items, "build": sh.ui.build_drawn,
-        "server_rows": server_rows})
+        "server_rows": server_rows, "list_icons": list_icons})
 }
 
 /// What the HUD drew and counted since the run began (`stats`), what it shows now (`report`, `live`), and the game
