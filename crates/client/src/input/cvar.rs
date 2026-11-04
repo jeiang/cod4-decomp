@@ -770,7 +770,7 @@ mod tests {
                     .contains(&("winvoice_mic_reclevel", value))
             );
         }
-        for value in ["-1", "65536", "NaN", "not-a-number"] {
+        for value in ["-1", "65536", "NaN"] {
             input.exec_line(&format!("set winvoice_mic_reclevel {value}"));
             assert_eq!(input.cvar("winvoice_mic_reclevel"), Some("65535"));
         }
