@@ -23,8 +23,8 @@ tooling fact, or a flake's status changes, update this file in the same PR.
     refuses to start with exit 78 naming `just chromium-install`, unless `--allow-skip` names every such stage (#558).
     An unrooted Chromium in the Nix store is never used.
   - `slot-1` to `slot-3`: each slot's own cargo target dir. `slot-guard/`: the leases.
-  - `run-<mac host>-<pid>`: one directory per `remote-linux.sh` run, removed when the run ends. An interrupted run
-    leaves its directory behind.
+  - `run-<mac host>-<UTC time>-<random>`: private detached run directory. Removed only after the host command
+    finishes and logs/bundles/output have been collected; stopping the Mac follower leaves it recoverable.
 - `objdump`, `rizin` and `python3` are not on the host's PATH. Use `nix shell nixpkgs#binutils -c objdump ...`
   and `~/Projects/cod4e/bin/python3/bin/python3` (`bin/python3` is a GC-rooted store directory, not the interpreter).
 - Git on the host is the Nix git 2.56, whose store-level gitconfig sets `commit.gpgsign true`. Commit there with
@@ -113,9 +113,8 @@ before a confirmed run. `just review-delta <n> <old>` shows what the PR's own ch
 - `scripts/remote-linux.sh` keeps each invocation's whole output in `bundles/logs/remote-<UTC time>-<random>`,
   whatever the caller does with stdout. The log starts with the ref, commit, host, run dir and slot, and ends with
   `exit=<status>`. The path is printed last on stderr (`log: <path>`). Report that exit status: a pipeline ending in
-  `tail` or `grep` does not carry it. A reader that closes early (`| head`) stops the log too. The coordinator's
-  serial logs (`bundles/serial-logs/serial-<sha12>-<time>.log`) come from a wrapper that is not in the repo yet
-  (#562 adds it).
+  `tail` or `grep` does not carry it. A reader that closes early (`| head`) stops the local log/follower, not the host
+  run. `just serial-log` keeps its additional log in `bundles/serial-logs/serial-<sha12>-<time>.log`.
 - Bundles come back to `./bundles/` as `cod4e-run-<YYYYMMDD>-<HHMMSS>.zip` (serial and remote runs) or
   `slot-<n>-cod4e-run-...zip` (slot runs). The run prints `local bundle: <path>` for each one. A slot-exec run's files
   come back in `./out/`.
@@ -135,6 +134,61 @@ before a confirmed run. `just review-delta <n> <old>` shows what the PR's own ch
 - Keep the bundle of a failing-before run (the negative control) even after you delete its scratch branch.
 - `just evidence-report --pr <n> --stage <stages> <bundle.zip>...` reports whether the bundles and the `windows`
   check cover the PR's current head. It is read only and does not approve a merge.
+
+### Detached runs: recovery and cancellation
+
+`remote-linux.sh` starts a host-owned `nohup setsid` session around the installed slot guard and the whole
+`host-run.sh` command. The queue PID/start identity, EXIT cleanup, FIFO/lock order, lease lifetime, Chromium
+preflight (78), queue give-up (76), and virtual audio path are unchanged. No daemon or new host installation is
+needed; detachment requires the host's `setsid`, `nohup` and `flock` (absence is an error, not a foreground fallback).
+
+The private run directory keeps `.host-stdout`, `.host-stderr`, `.host-identity` (supervisor PID, exact `ps -o lstart=`
+start time, process group), `.host-status` (atomically published command exit status), and `.host-slot`. Its
+`.host-cmd` may contain a lease token: never print or copy it into an issue/log. SSH has `ConnectTimeout=10`,
+`ServerAliveInterval=10`, `ServerAliveCountMax=3` and batch mode. A lost connection retries every 5 seconds; only
+complete log snapshots advance the follower's byte offsets. A command's exit 255 is read from `.host-status`,
+not confused with SSH's 255. A reachable host with a dead supervisor and no status is reported as incomplete
+(255) and retained for inspection.
+
+**Ctrl-C, TERM, HUP, a coordinator's `proc kill` of the local job, or a killed Mac stops only the follower.** The
+host run continues holding its lease and locks, including while queued. The local log already contains the host
+and run directory even when SIGKILL prevents an interruption message. Resume from any checkout with:
+
+```sh
+COD4E_LINUX_HOST=artemis.jeiang.vpn nix develop -c scripts/remote-linux.sh --attach '~/Projects/cod4e/run-<identity>'
+```
+
+Use the exact directory from the log. Attach neither ships a ref nor starts another command nor needs a token.
+A fresh attach replays the host logs from their beginning. Artifact transfers are retried before extraction, and
+the host directory is retained until collection succeeds; a killed follower during collection can attach again.
+
+For **intentional host cancellation**, first stop local followers (otherwise an attach may race inspection).
+Use the exact logged run directory, and send POSIX commands to bash, not the host's fish login shell:
+
+```sh
+ssh artemis.jeiang.vpn bash -s <<'EOF'
+run=$HOME/Projects/cod4e/run-<identity>
+{ read -r pid; IFS= read -r started; read -r pgid; } < "$run/.host-identity"
+test "$(ps -o lstart= -p "$pid")" = "$started" || exit 1
+test "$pid" = "$pgid" || exit 1
+# Inspect the command, entire descendant tree and lock holders BEFORE signalling anything.
+ps -eo pid,ppid,pgid,sid,args --forest
+lslocks --notruncate --output PID,COMMAND,PATH
+# After verifying that this is the intended run, signal its group, not just the supervisor or queue PID.
+kill -TERM -- "-$pgid"
+EOF
+```
+
+Save the verified run's descendant PIDs/groups from that tree first: commands that create their own process
+groups/sessions must also be terminated (for example `kill -TERM -- -<verified-descendant-pgid>`). Reinspect
+with the same `ps`/`lslocks` commands; if a verified group/tree survives TERM, use `kill -KILL -- -<verified-pgid>`
+for that group and its verified escaped descendants, not a broad name-based `pkill`. Do not reuse stale PIDs
+without rechecking their start identities. Killing only the supervisor/registry PID can strand children holding
+inherited lease and stage locks. From the Mac run `nix develop -c just host-status` and inspect host `lslocks`
+again: confirm this run, its descendants and its slot/stage/lease lock holders are gone **before releasing or
+reassigning the slot**. A killed supervisor may leave no `.host-status`; retain that directory's logs for
+diagnostics rather than treating cancellation as a completed harness result.
+
 
 ## Shared files
 
