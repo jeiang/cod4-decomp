@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Sun-file parsing follows KisakCOD (GPL-3.0, copyright the KisakCOD contributors and Activision):
-// universal/dvar.cpp (Com_LoadDvarsFromBuffer, Com_SaveDvarsToBuffer).
+// Sun-file parsing and sun-path handling follow KisakCOD (GPL-3.0, copyright the KisakCOD contributors and
+// Activision): universal/dvar.cpp (Com_LoadDvarsFromBuffer, Com_SaveDvarsToBuffer) and universal/com_files.cpp
+// (FS_SanitizeFilename, FS_IsBackupSubStr, FS_CreatePath).
 //! Config-file syntax: tokenizing command lines, quoting on write, and the platform config path.
 //!
 //! A line holds commands separated by `;`. Tokens are whitespace separated or `"quoted"`; inside quotes `\"`, `\\`
