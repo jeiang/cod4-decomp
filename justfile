@@ -20,6 +20,7 @@ check:
     cargo clippy --workspace -- -D warnings
     cargo test --workspace
     cargo check -p client --target wasm32-unknown-unknown
+    python3 -m unittest web.test_serve
 
 # Run the cod4e client (release)
 client *args:

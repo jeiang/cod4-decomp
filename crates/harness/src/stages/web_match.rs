@@ -10,6 +10,8 @@
 //! Every request goes `POST /control` to `serve.py`, which the page long-polls: the same JSON as the native channel's
 //! socket (`control_channel.rs`). The browser hosts no server, so the stage also opens Start New Server from the main
 //! menu before the join and asserts the popup that says so (`listen_web.rs`).
+//! Before that player path, an isolated page without `control` proves runtime readiness through CDP and must
+//! receive the HTTP 504 diagnostic only after the real 30-second timeout; `control-disabled.json` records it.
 //!
 //! Parity: after the browser match the native client plays the same map, gametype and bot count; the stage compares
 //! its measured movement, shots and HUD ownerdraw set with the browser's. A difference is a note, and the three a
@@ -68,6 +70,147 @@ fn http_post(path: &str, body: &str) -> Result<(u16, String), String> {
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| format!("bad HTTP status line: {head}"))?;
     Ok((status, rest.to_owned()))
+}
+
+/// Own the isolated bridge-off session on every exit path, including CDP and HTTP errors.
+struct DisabledBrowser {
+    child: Option<std::process::Child>,
+    profile: std::path::PathBuf,
+}
+
+impl DisabledBrowser {
+    fn cleanup(&mut self) -> Result<Value, String> {
+        let mut evidence = json!({"profile": self.profile});
+        if let Some(mut child) = self.child.take() {
+            evidence["process_group"] = json!(child.id());
+            #[cfg(unix)]
+            {
+                unsafe extern "C" {
+                    #[link_name = "kill"]
+                    fn kill_group(pid: i32, signal: i32) -> i32;
+                }
+                // The browser starts in its own process group. Kill its renderers/GPU processes too.
+                let result = unsafe { kill_group(-(child.id() as i32), 9) };
+                evidence["group_kill"] = json!(result == 0);
+            }
+            #[cfg(not(unix))]
+            let _ = child.kill();
+            let status = child
+                .wait()
+                .map_err(|e| format!("reap disabled browser: {e}"))?;
+            evidence["reaped"] = json!(true);
+            evidence["exit"] = json!(status.to_string());
+        }
+        match std::fs::remove_dir_all(&self.profile) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("remove disabled browser profile: {e}")),
+        }
+        evidence["profile_removed"] = json!(true);
+        Ok(evidence)
+    }
+}
+
+impl Drop for DisabledBrowser {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
+}
+
+/// A real running wasm page without `control` must leave a request unanswered for the real reply timeout.
+fn control_disabled(chrome: &Path, dir: &Path, report: &mut StageReport) -> Result<(), String> {
+    let url = format!(
+        "http://localhost:{PORT}/?dev-install=/install&autostart&debug&args=--no-autojoin%20--duration%20100000"
+    );
+    let mut evidence = json!({"url": url, "ready": false});
+    let mut browser = DisabledBrowser {
+        child: None,
+        profile: std::env::temp_dir()
+            .join(format!("cod4e-webmatch-disabled-{}", std::process::id())),
+    };
+    let outcome = (|| {
+        let log = std::fs::File::create(dir.join("control-disabled-browser.log"))
+            .map_err(|e| e.to_string())?;
+        let mut command = Command::new(chrome);
+        command
+            .env_remove("LD_LIBRARY_PATH")
+            .args(super::browser_cdp::CHROMIUM_FLAGS)
+            .arg("--autoplay-policy=no-user-gesture-required")
+            .arg(format!("--user-data-dir={}", browser.profile.display()))
+            .arg(&url)
+            .stdout(Stdio::null())
+            .stderr(log);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let mut cdp = super::browser_cdp::pipe(&mut command).map_err(|e| e.to_string())?;
+        browser.child = Some(command.spawn().map_err(|e| e.to_string())?);
+        // Bounded independently of the 25-minute stage watchdog, which cannot run destructors.
+        let deadline = Instant::now() + Duration::from_secs(180);
+        loop {
+            match cdp.page_readiness(PORT) {
+                Ok(state) => {
+                    evidence["readiness"] = state.clone();
+                    if state["error"].is_string() {
+                        return Err(format!("disabled page runtime failed: {}", state["error"]));
+                    }
+                    if state["url"] == url
+                        && state["document"] == "complete"
+                        && state["frames"].as_u64().is_some_and(|n| n > 0)
+                    {
+                        evidence["ready"] = json!(true);
+                        break;
+                    }
+                }
+                Err(e) => evidence["readiness_error"] = json!(e),
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("disabled page not ready within 180 s: {evidence}"));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let started = Instant::now();
+        // Reserve the largest numeric id, outside Page's sequence. This session ends before Page starts.
+        let (status, body) = http_post("/control", r#"{"id":18446744073709551615,"cmd":"state"}"#)?;
+        let elapsed = started.elapsed();
+        evidence["status"] = json!(status);
+        evidence["body"] = json!(body);
+        evidence["elapsed_seconds"] = json!(elapsed.as_secs_f64());
+        report
+            .metrics
+            .insert("control_disabled_seconds".into(), elapsed.as_secs_f64());
+        if status != 504 || body != "no reply from the page (is it open with ?control?)\n" {
+            return Err(format!(
+                "disabled control expected HTTP 504 diagnostic: {evidence}"
+            ));
+        }
+        if elapsed < Duration::from_secs(30) {
+            return Err(format!("disabled control replied before 30 s: {evidence}"));
+        }
+        Ok(())
+    })();
+    let cleanup = browser.cleanup();
+    evidence["cleanup"] = match &cleanup {
+        Ok(value) => value.clone(),
+        Err(e) => json!({"error": e}),
+    };
+    let outcome = outcome.and(cleanup.map(|_| ()));
+    evidence["passed"] = json!(outcome.is_ok());
+    if let Err(e) = &outcome {
+        evidence["error"] = json!(e);
+    }
+    std::fs::write(
+        dir.join("control-disabled.json"),
+        serde_json::to_vec_pretty(&evidence).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    report.files.push("web-match/control-disabled.json".into());
+    report
+        .files
+        .push("web-match/control-disabled-browser.log".into());
+    outcome
 }
 
 /// The page as the channel's other end: each request is posted on a thread while the server keeps running frames
@@ -413,6 +556,12 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         .spawn()?;
     let _py = Kill(py);
     std::thread::sleep(Duration::from_millis(800));
+    let mut report = StageReport::new(NAME, Status::Passed);
+    if let Err(e) = control_disabled(&chrome, &dir, &mut report) {
+        report.status = Status::Failed;
+        report.reason = Some(e);
+        return Ok(report);
+    }
 
     // No `--autoplay` and no autojoin: the menus are the stage's to answer, as a person's. `auto` picks WebGPU where
     // the browser has it and WebGL2 otherwise; the backend used goes in the notes.
@@ -443,7 +592,6 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     );
 
     let started = Instant::now();
-    let mut report = StageReport::new(NAME, Status::Passed);
     let mut page = Page { id: 0, requests: 0 };
     let outcome = play(&mut server, &mut page, &mut cdp, &mut report, &dir, started)
         .and_then(|()| native_parity(&client, &install, &dir, &mut report));
