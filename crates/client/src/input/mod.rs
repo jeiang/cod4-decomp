@@ -275,8 +275,10 @@ pub struct Input {
     pub ragdoll_defs: crate::ragdoll::Defs,
     pub ragdoll_revision: u64,
     pub ragdoll_reset_revision: u64,
-    /// Interned script strings from every client zone loaded so far (`SL_FindString`).
-    pub script_strings: std::collections::HashSet<Arc<str>>,
+    /// Script strings of the front-end zones currently loaded (`SL_FindString`'s zone-interned names).
+    pub ui_script_strings: Arc<std::collections::HashSet<Arc<str>>>,
+    /// Script strings of the match's currently loaded zones, replaced on each map load and emptied on disconnect.
+    pub match_script_strings: Arc<std::collections::HashSet<Arc<str>>>,
 }
 
 const MAX_EXEC_DEPTH: u32 = 8;
@@ -467,7 +469,8 @@ impl Input {
             ragdoll_defs: crate::ragdoll::Defs::default(),
             ragdoll_revision: 0,
             ragdoll_reset_revision: 0,
-            script_strings: Default::default(),
+            ui_script_strings: Default::default(),
+            match_script_strings: Default::default(),
         }
     }
 
@@ -1429,8 +1432,11 @@ impl Input {
                 | "ragdoll_baselerp_bone"
                 | "ragdoll_pin_bone"
         ) {
-            let strings = &self.script_strings;
-            match self.ragdoll_defs.apply(toks, |n| strings.contains(n)) {
+            let (ui, matched) = (&self.ui_script_strings, &self.match_script_strings);
+            match self
+                .ragdoll_defs
+                .apply(toks, |n| ui.contains(n) || matched.contains(n))
+            {
                 Ok(crate::ragdoll::Applied::Ignored) => {}
                 Ok(applied) => {
                     self.ragdoll_revision += 1;

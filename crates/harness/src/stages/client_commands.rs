@@ -407,6 +407,37 @@ fn ragdoll_commands(c: &mut Driven) -> Result<(), String> {
     if c.lookup("fx.ragdolls")?.as_u64() != Some(made) {
         return Err("a corpse created physics after ragdoll_clear".into());
     }
+    let cleared: [u64; 4] = ragdoll_counts(c, BODIES)?;
+    if cleared[0] != 0 {
+        return Err(format!(
+            "a body kept physics under a cleared definition: {cleared:?}"
+        ));
+    }
+    // Stock retries a body without a ragdoll every frame: both corpses (the one reset by the clear and the one made
+    // while it was empty) bind once the definition does again.
+    c.console("exec ragdoll.cfg")?;
+    ragdoll_wait(
+        c,
+        DEF,
+        "exec after the cleared corpse did not restore the startup shape",
+        |n: [u64; 5]| n == startup,
+    )?;
+    ragdoll_wait(
+        c,
+        BODIES,
+        "the corpses made without a definition gained no physics after exec ragdoll.cfg",
+        |n: [u64; 4]| n[0] >= 2,
+    )?;
+    if c.lookup("fx.ragdolls")?.as_u64().unwrap_or(0) < made + 2 {
+        return Err("exec ragdoll.cfg made no ragdolls for the bodies without one".into());
+    }
+    c.console("ragdoll_clear 1")?;
+    ragdoll_wait(
+        c,
+        DEF,
+        "second clear kept definition fields",
+        |n: [u64; 5]| n == [0; 5],
+    )?;
     c.console("ragdoll_bone 1 j_mainroot j_spinelower 4.5 0.5 20 0.7 -1 0 capsule")?;
     ragdoll_wait(c, DEF, "root bone not added", |n: [u64; 5]| {
         n == [1, 0, 0, 0, 0]

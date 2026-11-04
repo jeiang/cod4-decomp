@@ -39,32 +39,50 @@ pub(super) struct Body {
 impl NetPlay {
     /// The input layer owns definitions for the life of the client. Only an edit copies a definition; only stock's
     /// resetting commands re-capture bodies, including bodies which have settled or hit their simulation limit.
+    /// Stock retries a body without a ragdoll every frame (`CG_Corpse` → `Ragdoll_CreateRagdollForDObj`, which fails
+    /// while the definition does not bind); the attempt can only succeed after an edit, so it runs on edits only.
     pub fn sync_ragdolls(&mut self, input: &mut crate::input::Input) {
         if self.ragdoll_revision.is_none() {
-            input
-                .script_strings
-                .extend(self.lib.content.script_strings().iter().cloned());
-        }
-        if self.ragdoll_revision == Some(input.ragdoll_revision) {
+            // A new level's library: its zones' strings replace the previous map's for `ragdoll_pin_bone`.
+            input.match_script_strings = self.lib.content.script_strings().clone();
+        } else if self.ragdoll_revision == Some(input.ragdoll_revision) {
             return;
         }
         self.ragdoll_def = input.ragdoll_defs.get(1).clone();
         self.ragdoll_revision = Some(input.ragdoll_revision);
-        if self.ragdoll_reset_revision == input.ragdoll_reset_revision {
-            return;
-        }
+        let reset = self.ragdoll_reset_revision != input.ragdoll_reset_revision;
         self.ragdoll_reset_revision = input.ragdoll_reset_revision;
+        let enabled = self.switches.ragdoll;
         let tun = self.switches.ragdoll_tunables;
-        let mut running = 0;
+        let mut running = if reset {
+            0
+        } else {
+            self.corpses
+                .values()
+                .filter(|b| b.ragdoll.as_ref().is_some_and(|r| !r.at_rest()))
+                .count()
+        };
         for b in self.corpses.values_mut() {
-            let Some(old) = b.ragdoll.take() else {
-                continue;
-            };
-            self.ragdoll_resets += 1;
-            self.ragdoll_resting_resets += u64::from(old.at_rest());
-            b.at = old.root();
-            b.player.capture_ragdoll_pose(&old.bones(), old.yaw());
-            b.ragdoll = b.player.ragdoll(&self.ragdoll_def, b.at, [0.0; 3], tun);
+            match b.ragdoll.take() {
+                Some(old) if reset => {
+                    self.ragdoll_resets += 1;
+                    self.ragdoll_resting_resets += u64::from(old.at_rest());
+                    b.at = old.root();
+                    b.player.capture_ragdoll_pose(&old.bones(), old.yaw());
+                    b.ragdoll = b.player.ragdoll(&self.ragdoll_def, b.at, [0.0; 3], tun);
+                }
+                Some(old) => {
+                    b.ragdoll = Some(old);
+                    continue;
+                }
+                None if enabled => {
+                    b.ragdoll = b.player.ragdoll(&self.ragdoll_def, b.at, [0.0; 3], tun);
+                    if b.ragdoll.is_some() {
+                        self.c.ragdolls += 1;
+                    }
+                }
+                None => continue,
+            }
             if let Some(r) = &mut b.ragdoll {
                 if running >= tun.max_simulating {
                     r.freeze();

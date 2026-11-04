@@ -93,9 +93,8 @@ impl UiAssets {
         Ok(a)
     }
 
-    /// Case-sensitive script strings loaded before the frontend opens, including `ui_mp` and `mod.ff`.
-    /// Later UI zone loads add to this set; callers retain membership across UI replacement by unioning
-    /// it into the client's process-lifetime registry.
+    /// Case-sensitive script strings of the front-end zones these assets loaded, including `ui_mp` and `mod.ff`.
+    /// A reload ([`UiAssets::load`] again) builds a new set; the client replaces its copy with it.
     pub fn script_strings(&self) -> &HashSet<Arc<str>> {
         &self.script_strings
     }

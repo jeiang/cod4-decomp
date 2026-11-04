@@ -4777,6 +4777,8 @@ fn end_session(map_slot: &mut Option<MapData>, st: &mut State) {
         n.disconnect();
     }
     st.net = None;
+    // The match's zones unload with it, and their script strings with them.
+    st.input.match_script_strings = Default::default();
     st.input.set_fov_sensitivity_scale(1.0);
     st.roll = 0.0;
     st.loading = None;
