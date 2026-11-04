@@ -796,7 +796,7 @@ fn settled_record_level(c: &mut Driven) -> Result<f64, String> {
         .ok_or("missing voice.heard")?;
     c.until(
         json!({"voice.heard":{"ge":heard + 1}}),
-        secs(10),
+        Duration::from_secs(10),
         "the record meter received no fresh microphone block",
     )?;
     let marks = c
@@ -805,7 +805,7 @@ fn settled_record_level(c: &mut Driven) -> Result<f64, String> {
         .ok_or("missing record meter marks")?;
     c.until(
         json!({"hud.report.record_meter_marks":{"ge":marks + 6}}),
-        secs(10),
+        Duration::from_secs(10),
         "the record meter did not replace its six smoothing slots",
     )?;
     c.lookup("hud.report.record_level")?
