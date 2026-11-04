@@ -42,14 +42,16 @@ impl Talker {
     /// Takes what the microphone heard since the last call. The microphone is open while `talking` (the talk key held
     /// with voice on) or while the record meter is shown (`metering`): stock records whenever its UI runs
     /// (`CL_VoiceFrame`, `Voice_GetLocalVoiceData`), which only the meter can see, so this opens it only then. Each
-    /// block is scaled by `scaler` (`winvoice_mic_scaler`, clamped to 0.5..1.5 as `Voice_GetLocalVoiceData` does) and
-    /// measured for the meter before the talk key is looked at (`Record_QueueAudioDataForEncoding`); while `talking`
-    /// it is also returned as coded frames to send.
+    /// block is scaled by `scaler` (`winvoice_mic_scaler`, clamped to 0.5..1.5 as `Voice_GetLocalVoiceData` does)
+    /// and `rec_level / 65535`: software gain stands in for Voice_Init/Voice_Playback's OS microphone volume
+    /// (KisakCOD win32/win_voice.cpp:597-606,687-690; iw3mp.exe 1.7 0x57a8f0,0x57ae10). The meter and
+    /// encoded frames use the same scaled samples (`Record_QueueAudioDataForEncoding`).
     pub fn frames(
         &mut self,
         talking: bool,
         metering: bool,
         scaler: f32,
+        rec_level: f32,
         now: Instant,
     ) -> Vec<Frame> {
         if talking || metering {
@@ -79,7 +81,7 @@ impl Talker {
             self.current_level = 0.0;
             return Vec::new();
         };
-        let scale = 32767.0 * scaler.clamp(0.5, 1.5);
+        let scale = 32767.0 * scaler.clamp(0.5, 1.5) * (rec_level.clamp(0.0, 65535.0) / 65535.0);
         let mut out = Vec::new();
         let mut pcm = [0f32; FRAME_SAMPLES];
         while mic.waiting() >= FRAME_SAMPLES && mic.read(&mut pcm) {

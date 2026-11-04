@@ -788,6 +788,31 @@ fn synchronous_commands(c: &mut Driven, notes: &mut Vec<String>) -> Result<(), S
     }
 }
 
+/// Observe a new microphone block, then replace every slot of the six-draw meter before reading its level.
+fn settled_record_level(c: &mut Driven) -> Result<f64, String> {
+    let heard = c
+        .lookup("voice.heard")?
+        .as_u64()
+        .ok_or("missing voice.heard")?;
+    c.until(
+        json!({"voice.heard":{"ge":heard + 1}}),
+        secs(10),
+        "the record meter received no fresh microphone block",
+    )?;
+    let marks = c
+        .lookup("hud.report.record_meter_marks")?
+        .as_u64()
+        .ok_or("missing record meter marks")?;
+    c.until(
+        json!({"hud.report.record_meter_marks":{"ge":marks + 6}}),
+        secs(10),
+        "the record meter did not replace its six smoothing slots",
+    )?;
+    c.lookup("hud.report.record_level")?
+        .as_f64()
+        .ok_or_else(|| "missing record level".into())
+}
+
 /// The record meter's white outline (`UI_DrawRecordLevel`, KisakCOD `ui_mp/ui_main_mp.cpp:1524-1533`) must be on
 /// screen at the rectangle the meter last drew: most of its top and bottom edges near-white.
 fn meter_outline(shot: &Path, rect: &Value) -> Result<(), String> {
@@ -1313,6 +1338,11 @@ fn play(
         // a mean sample size of about 0.32 of full scale) the meter must rise; without one only its drawing is checked.
         let mic = crate::logcheck::test_mic_provided();
         let before = c.lookup("menu.open")?;
+        let saved_level = c.ask(json!({"cmd":"cvar","name":"winvoice_mic_reclevel"}))?["value"]
+            .as_str()
+            .ok_or("missing winvoice_mic_reclevel")?
+            .to_owned();
+        c.console("set winvoice_mic_reclevel 65535")?;
         c.console("openmenu options_voice")?;
         let result = c.until(
             json!({"hud.report.record_meter_marks":{"ge":1}}),
@@ -1331,9 +1361,31 @@ fn play(
                 secs(10),
                 "the record level stayed under 0.1 with the test tone on the microphone",
             )?;
+            let baseline = settled_record_level(c)?;
+            if baseline < 0.1 {
+                return Err(format!("settled full record level {baseline} is below 0.1"));
+            }
+            c.console("set winvoice_mic_reclevel 32767")?;
+            let half = settled_record_level(c)?;
+            if !(0.4 * baseline..=0.6 * baseline).contains(&half) {
+                return Err(format!(
+                    "half record level {half} is not 0.4-0.6 of baseline {baseline}"
+                ));
+            }
+            c.console("set winvoice_mic_reclevel 0")?;
+            let zero = settled_record_level(c)?;
+            if zero > 0.01 {
+                return Err(format!("zero record level {zero} exceeds 0.01"));
+            }
+            c.console("set winvoice_mic_reclevel 65535")?;
+            let recovered = settled_record_level(c)?;
+            if !(0.8 * baseline..=1.2 * baseline).contains(&recovered) {
+                return Err(format!(
+                    "recovered record level {recovered} is not near baseline {baseline}"
+                ));
+            }
             notes.push(format!(
-                "record level {}",
-                c.lookup("hud.report.record_level")?
+                "record level full={baseline}, half={half}, zero={zero}, recovered={recovered}"
             ));
             Ok(())
         });
@@ -1343,10 +1395,17 @@ fn play(
             notes.push(format!("record meter rect {rect}"));
             meter_outline(&shot, &rect)
         });
-        if result.is_err() {
-            notes.push(format!("open menus: {}", c.lookup("menu.open")?));
+        if result.is_err()
+            && let Ok(open) = c.lookup("menu.open")
+        {
+            notes.push(format!("open menus: {open}"));
         }
-        c.console("closemenu options_voice")?;
+        // Attempt both cleanup actions even if one fails, and preserve the assertion's failure.
+        let restore = c.console(&format!("set winvoice_mic_reclevel {saved_level}"));
+        let close = c.console("closemenu options_voice");
+        result.as_ref().map_err(Clone::clone)?;
+        restore?;
+        close?;
         result?;
         // The match's menus must be as they were, or the steps after play with a menu up.
         c.pause(Duration::from_millis(500))?;

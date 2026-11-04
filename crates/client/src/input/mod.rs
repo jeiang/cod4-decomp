@@ -819,11 +819,7 @@ impl Input {
                 format!("  Domain is {only} ({why})"),
             ]
         } else {
-            let changed = self.cvars.get(name) != Some(value);
             self.set_cvar(name, value);
-            if changed {
-                Self::warn_not_implemented(name, value);
-            }
             return true;
         };
         tracing::warn!(cvar = name, value, "a menu's dvar write was refused");
@@ -831,20 +827,6 @@ impl Input {
             self.say(line);
         }
         false
-    }
-
-    /// A write that changes a stock dvar this build keeps but does not act on says so, naming it (#372).
-    fn warn_not_implemented(name: &str, value: &str) {
-        if let Some(why) = cvar::Cvars::not_implemented(name) {
-            logging::dedup!(
-                WARN,
-                name,
-                cvar = name,
-                value,
-                why,
-                "dvar is not implemented"
-            );
-        }
     }
 
     /// `(min, max)` view pitch in degrees (positive = down).
@@ -1267,12 +1249,8 @@ impl Input {
             }
             None => value,
         };
-        let changed = self.cvars.get(name) != Some(value);
         self.cvars.set_by_command(name, value, archive);
         self.dirty = true;
-        if changed {
-            Self::warn_not_implemented(name, value);
-        }
         // The original has one dvar store for the client and the listen server it runs: a write to a variable the
         // server registers (`scr_war_scorelimit`, `g_gametype`, `sv_hostname`) is the server's too; it ignores the
         // client's own (#366).
