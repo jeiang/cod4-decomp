@@ -334,9 +334,172 @@ struct ModeJson {
 #[derive(Deserialize)]
 struct VideoJson {
     file: String,
-    #[serde(default)]
     frames: u64,
-    dropped: Option<u64>,
+    dropped: u64,
+    source_width: u32,
+    source_height: u32,
+    width: u32,
+    height: u32,
+    fps: u32,
+    ring_full: u64,
+    queue_full: u64,
+    map_failed: u64,
+    gpu_reset: u64,
+    pacing_missed: u64,
+    #[serde(deserialize_with = "Option::deserialize")]
+    first_slot: Option<u64>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    last_slot: Option<u64>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    first_encoded_slot: Option<u64>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    last_encoded_slot: Option<u64>,
+    duration_ticks: u64,
+}
+
+/// Source opportunities include pacing misses, not just frames admitted to readback.
+fn video_problems(
+    v: &VideoJson,
+    plan: &RunPlan,
+    secs: u64,
+    report: &mut StageReport,
+) -> Vec<String> {
+    let slug = &plan.slug;
+    let mut problems = Vec::new();
+    let scale = (1280.0 / f64::from(v.source_width))
+        .min(720.0 / f64::from(v.source_height))
+        .min(1.0);
+    let width = ((f64::from(v.source_width) * scale).floor() as u32) & !1;
+    let height = ((f64::from(v.source_height) * scale).floor() as u32) & !1;
+    report.notes.push(format!(
+        "{slug}: recording {}x{} -> {}x{} at {} fps (required 30 fps); frames={}, ring_full={}, queue_full={}, map_failed={}, gpu_reset={}, pacing_missed={}",
+        v.source_width, v.source_height, v.width, v.height, v.fps, v.frames,
+        v.ring_full, v.queue_full, v.map_failed, v.gpu_reset, v.pacing_missed
+    ));
+    for (name, value) in [
+        ("frames", v.frames),
+        ("dropped", v.dropped),
+        ("ring_full", v.ring_full),
+        ("queue_full", v.queue_full),
+        ("map_failed", v.map_failed),
+        ("gpu_reset", v.gpu_reset),
+        ("pacing_missed", v.pacing_missed),
+        ("duration_ticks", v.duration_ticks),
+        ("width", u64::from(v.width)),
+        ("height", u64::from(v.height)),
+        ("source_width", u64::from(v.source_width)),
+        ("source_height", u64::from(v.source_height)),
+        ("target_fps", u64::from(v.fps)),
+    ] {
+        report
+            .metrics
+            .insert(format!("{slug}.video_{name}"), value as f64);
+    }
+    for (name, value) in [
+        ("first_slot", v.first_slot),
+        ("last_slot", v.last_slot),
+        ("first_encoded_slot", v.first_encoded_slot),
+        ("last_encoded_slot", v.last_encoded_slot),
+    ] {
+        if let Some(value) = value {
+            report
+                .metrics
+                .insert(format!("{slug}.video_{name}"), value as f64);
+        }
+    }
+    if width == 0 || height == 0 || (v.width, v.height) != (width, height) {
+        problems.push(format!(
+            "video dimensions {}x{} do not match bounded, aspect-preserved, even, no-upscale output {width}x{height} from {}x{}",
+            v.width, v.height, v.source_width, v.source_height
+        ));
+    }
+    if v.fps != 30 {
+        problems.push(format!("video target fps is {}, expected 30", v.fps));
+    }
+    let dropped = v
+        .ring_full
+        .checked_add(v.queue_full)
+        .and_then(|n| n.checked_add(v.map_failed))
+        .and_then(|n| n.checked_add(v.gpu_reset));
+    if dropped != Some(v.dropped) {
+        problems.push("video dropped does not equal loss breakdown".into());
+    }
+    let fps = v.frames as f64 / secs.max(1) as f64;
+    report.metrics.insert(format!("{slug}.video_fps"), fps);
+    if fps < MIN_VIDEO_FPS {
+        problems.push(format!(
+            "the recording kept {fps:.1} fps of {secs} s: too few frames for the footage review"
+        ));
+    }
+    let due = v
+        .first_slot
+        .zip(v.last_slot)
+        .and_then(|(first, last)| last.checked_sub(first).and_then(|n| n.checked_add(1)));
+    match due {
+        Some(due) => {
+            let accounted = v
+                .frames
+                .checked_add(v.dropped)
+                .and_then(|n| n.checked_add(v.pacing_missed));
+            if accounted != Some(due) {
+                problems.push(
+                    "video frames + dropped + pacing_missed does not equal due interval".into(),
+                );
+            }
+            let missing = v.dropped.checked_add(v.pacing_missed);
+            let share = missing.map_or(f64::INFINITY, |n| n as f64 / due as f64);
+            report
+                .metrics
+                .insert(format!("{slug}.video_missing_share"), share);
+            report.metrics.insert(
+                format!("{slug}.video_dropped_share"),
+                v.dropped as f64 / due as f64,
+            );
+            if share > 0.05 {
+                problems.push(format!(
+                    "video missing source opportunities exceed 5% ({:.1}%)",
+                    share * 100.0
+                ));
+            }
+            if v.first_slot.is_some_and(|first| first > 30) {
+                problems.push("video first due slot exceeds 1 second startup allowance".into());
+            }
+            if due < secs.saturating_sub(1).saturating_mul(30) {
+                problems.push("video due interval covers less than duration minus 1 second".into());
+            }
+            match (v.first_encoded_slot, v.last_encoded_slot) {
+                (Some(first), Some(last)) if v.frames > 0 => {
+                    let duration = last.checked_sub(first).and_then(|n| n.checked_add(1));
+                    if duration != Some(v.duration_ticks) || v.frames > v.duration_ticks {
+                        problems.push(
+                            "video duration_ticks does not match encoded endpoints or frame count"
+                                .into(),
+                        );
+                    }
+                    let due_first = v.first_slot.unwrap();
+                    let due_last = v.last_slot.unwrap();
+                    if first < due_first || last > due_last || first > last {
+                        problems.push(
+                            "video encoded endpoints are outside due interval or reversed".into(),
+                        );
+                    } else {
+                        let gap = (first - due_first) + (due_last - last);
+                        if gap as f64 / due as f64 > 0.05 {
+                            problems.push(
+                                "video encoded endpoint gaps exceed 5% of due interval".into(),
+                            );
+                        }
+                    }
+                }
+                (None, None) if v.frames == 0 && v.duration_ticks == 0 => {}
+                _ => problems.push(
+                    "video encoded endpoints/duration_ticks disagree with frame count".into(),
+                ),
+            }
+        }
+        None => problems.push("video due endpoints are missing, reversed, or overflow".into()),
+    }
+    problems
 }
 
 #[derive(Deserialize)]
@@ -599,6 +762,7 @@ fn consume(
     }
     match &cj.video {
         Some(v) => {
+            problems.extend(video_problems(v, plan, secs, report));
             let size = fs::metadata(out.join(&v.file)).map_or(0, |m| m.len());
             if size == 0 {
                 problems.push(format!("video {} missing or empty", v.file));
@@ -607,36 +771,6 @@ fn consume(
                 report
                     .metrics
                     .insert(format!("{slug}.video_bytes"), size as f64);
-                if let Some(d) = v.dropped {
-                    report
-                        .metrics
-                        .insert(format!("{slug}.video_dropped"), d as f64);
-                    // The recorder's encoder returns a readback buffer and encodes it off the render thread, so a slot
-                    // it loses is a frame the video skips while each sample keeps its duration. How many it loses
-                    // depends on the frame size (37% at 5120x1440 against 0.6-1.7% at 2536x1416 and 1280x720 on the
-                    // same serial run) and on the cores the run has (up to 56% beside two other runs at 1920x1080);
-                    // the native-resolution shortfall is #442. What the footage cannot do is lose most of its frames.
-                    let slots = v.frames + d;
-                    if slots > 0 {
-                        let share = d as f64 / slots as f64;
-                        let fps = v.frames as f64 / secs.max(1) as f64;
-                        report
-                            .metrics
-                            .insert(format!("{slug}.video_dropped_share"), share);
-                        report.metrics.insert(format!("{slug}.video_fps"), fps);
-                        if d > 0 {
-                            report.notes.push(format!(
-                                "{slug}: the recording lost {d} of {slots} slots ({:.0}%): the encoder kept {fps:.1} fps beside the client",
-                                share * 100.0
-                            ));
-                        }
-                        if fps < MIN_VIDEO_FPS {
-                            problems.push(format!(
-                                "the recording kept {fps:.1} fps of {secs} s ({d} of {slots} slots lost): too few frames for the footage review"
-                            ));
-                        }
-                    }
-                }
             }
         }
         None => problems.push("no video".into()),

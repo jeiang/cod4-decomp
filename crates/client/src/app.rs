@@ -2151,7 +2151,7 @@ impl Viewer {
                 .as_deref()
                 .unwrap_or(Path::new("."))
                 .join("flythrough.mp4");
-            match Recorder::start(&path, st.rec_size, 720, 30) {
+            match Recorder::start(&path, st.rec_size, (1280, 720), 30) {
                 Ok(r) => st.recorder = Some(r),
                 Err(e) => {
                     tracing::error!(path = %path.display(), error = %e, "cannot start the video recording");
@@ -2636,6 +2636,13 @@ impl Viewer {
                     "file": s.path.file_name().map(|f| f.to_string_lossy().into_owned()),
                     "frames": s.frames, "dropped": s.dropped, "bytes": s.bytes,
                     "width": s.width, "height": s.height, "fps": s.fps,
+                    "source_width": s.source_width, "source_height": s.source_height,
+                    "ring_full": s.ring_full, "queue_full": s.queue_full,
+                    "map_failed": s.map_failed, "gpu_reset": s.gpu_reset,
+                    "pacing_missed": s.pacing_missed,
+                    "first_slot": s.first_slot, "last_slot": s.last_slot,
+                    "first_encoded_slot": s.first_encoded_slot,
+                    "last_encoded_slot": s.last_encoded_slot, "duration_ticks": s.duration_ticks,
                 })
             }
             None => Value::Null,
