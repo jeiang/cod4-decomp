@@ -37,6 +37,59 @@ pub(super) struct Body {
 }
 
 impl NetPlay {
+    /// The input layer owns definitions for the life of the client. Only an edit copies a definition; only stock's
+    /// resetting commands re-capture bodies, including bodies which have settled or hit their simulation limit.
+    pub fn sync_ragdolls(&mut self, input: &mut crate::input::Input) {
+        if self.ragdoll_revision.is_none() {
+            input
+                .script_strings
+                .extend(self.lib.content.script_strings().iter().cloned());
+        }
+        if self.ragdoll_revision == Some(input.ragdoll_revision) {
+            return;
+        }
+        self.ragdoll_def = input.ragdoll_defs.get(1).clone();
+        self.ragdoll_revision = Some(input.ragdoll_revision);
+        if self.ragdoll_reset_revision == input.ragdoll_reset_revision {
+            return;
+        }
+        self.ragdoll_reset_revision = input.ragdoll_reset_revision;
+        let tun = self.switches.ragdoll_tunables;
+        let mut running = 0;
+        for b in self.corpses.values_mut() {
+            let Some(old) = b.ragdoll.take() else {
+                continue;
+            };
+            self.ragdoll_resets += 1;
+            self.ragdoll_resting_resets += u64::from(old.at_rest());
+            b.at = old.root();
+            b.player.capture_ragdoll_pose(&old.bones(), old.yaw());
+            b.ragdoll = b.player.ragdoll(&self.ragdoll_def, b.at, [0.0; 3], tun);
+            if let Some(r) = &mut b.ragdoll {
+                if running >= tun.max_simulating {
+                    r.freeze();
+                } else {
+                    running += 1;
+                }
+            }
+            b.settled = false;
+        }
+    }
+
+    /// Live bodies, resting bodies, and cumulative resets (all/resting), for the command assertion.
+    pub fn ragdoll_bodies_fact(&self) -> String {
+        let live = self.corpses.values().filter_map(|b| b.ragdoll.as_ref());
+        let (mut count, mut resting) = (0, 0);
+        for r in live {
+            count += 1;
+            resting += usize::from(r.at_rest());
+        }
+        format!(
+            "{count} {resting} {} {}",
+            self.ragdoll_resets, self.ragdoll_resting_resets
+        )
+    }
+
     /// Makes the body of the corpse entity `e`: from the pose its owner was last seen in if the client has it, else
     /// from the end of its death clip.
     fn make_body(&mut self, e: &EntityState, now: Instant) -> Option<Body> {
@@ -57,14 +110,14 @@ impl NetPlay {
             .remotes
             .get(&e.client)
             .filter(|r| enabled && r.body == set.body)
-            .and_then(|r| r.player.ragdoll(&self.lib.ragdoll, e.origin, push, tun));
+            .and_then(|r| r.player.ragdoll(&self.ragdoll_def, e.origin, push, tun));
         let mut ragdoll = live.or_else(|| {
             let input = pose_input(e, None, true);
             for _ in 0..SETTLE_STEPS {
                 player.update(SETTLE_STEP, &input);
             }
             enabled
-                .then(|| player.ragdoll(&self.lib.ragdoll, e.origin, push, tun))
+                .then(|| player.ragdoll(&self.ragdoll_def, e.origin, push, tun))
                 .flatten()
         });
         if let Some(r) = &mut ragdoll {

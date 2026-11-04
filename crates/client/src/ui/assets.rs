@@ -10,7 +10,7 @@ use assets::zone::menu::MenuDef;
 use assets::zone::text::{Font, StringTable};
 use assets::zone::{Asset, XAssetType, Zone};
 use server::content::Install;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// Zones the menus come from, in boot order.
@@ -43,6 +43,8 @@ pub struct UiAssets {
     /// Lower-case map name to the game modes its `.arena` file allows (lower case); a map without an entry or with
     /// none listed allows every mode.
     pub arenas: HashMap<String, Vec<String>>,
+    /// All loaded zones' script-string tables, without asset-name normalization or asset filtering.
+    script_strings: HashSet<Arc<str>>,
 }
 
 /// The maps of an `.arena` file (blocks of `key value` lines) and the game modes each names.
@@ -91,6 +93,13 @@ impl UiAssets {
         Ok(a)
     }
 
+    /// Case-sensitive script strings loaded before the frontend opens, including `ui_mp` and `mod.ff`.
+    /// Later UI zone loads add to this set; callers retain membership across UI replacement by unioning
+    /// it into the client's process-lifetime registry.
+    pub fn script_strings(&self) -> &HashSet<Arc<str>> {
+        &self.script_strings
+    }
+
     /// Adds the icon materials the weapons carry (HUD, ammunition counter, kill feed, d-pad): most are defined
     /// by the weapon that first names them and no UI zone lists them.
     pub fn add_weapon_icons(&mut self, weapons: &[Arc<assets::zone::weapon::WeaponDef>]) {
@@ -120,6 +129,8 @@ impl UiAssets {
     fn load_file(&mut self, path: &std::path::Path, zone: &str) -> Result<(), String> {
         let file = ::assets::fs::buffered(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let z = Zone::open(file).map_err(|e| format!("{zone}: {e}"))?;
+        self.script_strings
+            .extend(z.script_strings().iter().flatten().cloned());
         z.decode(&UiFilter, |a| self.add(a))
             .map_err(|e| format!("{zone}: {e}"))?;
         tracing::debug!(
@@ -284,6 +295,28 @@ mod tests {
         Install::open(&root)
             .ok()
             .filter(|i| i.zone_path("ui_mp").is_some())
+    }
+
+    #[test]
+    fn startup_membership_includes_every_zone_script_string_before_asset_filtering() {
+        let Some(i) = install() else { return };
+        let assets = UiAssets::load(&i).unwrap();
+        let mut expected = HashSet::new();
+        let paths = UI_ZONES
+            .iter()
+            .map(|name| i.zone_path(name).unwrap())
+            .chain(::assets::paths::mod_zone(&i.root, &i.game));
+        for path in paths {
+            let zone = Zone::open(::assets::fs::buffered(&path).unwrap()).unwrap();
+            expected.extend(zone.script_strings().iter().flatten().cloned());
+        }
+        assert!(!expected.is_empty());
+        assert_eq!(assets.script_strings(), &expected);
+        assert!(
+            !assets
+                .script_strings()
+                .contains("529_unknown_script_string")
+        );
     }
 
     #[test]

@@ -325,6 +325,196 @@ fn props_until(
     }
 }
 
+fn ragdoll_counts<const N: usize>(c: &mut Driven, fact: &str) -> Result<[u64; N], String> {
+    let value = c.lookup(fact)?;
+    let numbers: Vec<u64> = value
+        .as_str()
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::parse)
+        .collect::<Result<_, _>>()
+        .map_err(|_| format!("{fact}: {value}"))?;
+    numbers
+        .try_into()
+        .map_err(|_| format!("{fact}: {value}, expected {N} counts"))
+}
+
+fn ragdoll_wait<const N: usize>(
+    c: &mut Driven,
+    fact: &str,
+    description: &str,
+    ok: impl Fn([u64; N]) -> bool,
+) -> Result<[u64; N], String> {
+    let end = Instant::now() + Duration::from_secs(15);
+    loop {
+        let counts = ragdoll_counts(c, fact)?;
+        if ok(counts) {
+            return Ok(counts);
+        }
+        if Instant::now() >= end {
+            return Err(format!("{description}: {fact} is {counts:?}"));
+        }
+        c.pause(Duration::from_millis(100))?;
+    }
+}
+
+/// Definition edits through typed console lines; a real death's corpse proves the same definition drives physics.
+fn ragdoll_commands(c: &mut Driven) -> Result<(), String> {
+    const DEF: &str = "cgame.ragdoll";
+    const BODIES: &str = "cgame.ragdoll_bodies";
+    let startup: [u64; 5] = ragdoll_counts(c, DEF)?;
+    if startup[0] < 2 {
+        return Err(format!(
+            "startup ragdoll.cfg did not define bones: {startup:?}"
+        ));
+    }
+    cheats(c, "1")?;
+    c.ask(json!({"cmd":"server","op":"exec","line":"set bot_idle 1"}))?;
+    c.console("ragdoll_max_life 0.2")?;
+    let kill = |c: &mut Driven| -> Result<(), String> {
+        spawned(c, 120)?;
+        let me = c
+            .lookup("player.client")?
+            .as_u64()
+            .ok_or("no player client")?;
+        c.ask(json!({"cmd":"server","op":"exec","line":format!("devkill {me} {me}")}))?;
+        c.until(
+            json!({"player.dead":true}),
+            Duration::from_secs(10),
+            "devkill did not kill",
+        )?;
+        Ok(())
+    };
+    kill(c)?;
+    let settled: [u64; 4] = ragdoll_wait(c, BODIES, "no resting corpse", |n: [u64; 4]| n[1] > 0)?;
+    c.console("RaGdOlL_ClEaR 1")?;
+    ragdoll_wait(c, DEF, "clear kept definition fields", |n: [u64; 5]| {
+        n == [0; 5]
+    })?;
+    ragdoll_wait(
+        c,
+        BODIES,
+        "clear did not reset the resting corpse",
+        |n: [u64; 4]| n[0] == 0 && n[2] > settled[2] && n[3] > settled[3],
+    )?;
+    spawned(c, 120)?;
+    let made = c
+        .lookup("fx.ragdolls")?
+        .as_u64()
+        .ok_or("no ragdoll creation counter")?;
+    kill(c)?;
+    spawned(c, 120)?;
+    if c.lookup("fx.ragdolls")?.as_u64() != Some(made) {
+        return Err("a corpse created physics after ragdoll_clear".into());
+    }
+    c.console("ragdoll_bone 1 j_mainroot j_spinelower 4.5 0.5 20 0.7 -1 0 capsule")?;
+    ragdoll_wait(c, DEF, "root bone not added", |n: [u64; 5]| {
+        n == [1, 0, 0, 0, 0]
+    })?;
+    typed(
+        c,
+        "ragdoll_bone 1 j_neck j_head 3.6 0.5 5 0.6 7 0 capsule",
+        "Ragdoll: Child bones must come after parent bones: 7",
+    )?;
+    c.console("ragdoll_bone 1 j_spinelower j_spineupper 4.5 0.5 20 0.7 0 0 capsule")?;
+    ragdoll_wait(c, DEF, "second bone not added", |n: [u64; 5]| {
+        n == [2, 0, 0, 0, 0]
+    })?;
+    c.console("ragdoll_joint 1 1 hinge")?;
+    ragdoll_wait(c, DEF, "joint not added", |n: [u64; 5]| {
+        n == [2, 1, 0, 0, 0]
+    })?;
+    typed(
+        c,
+        "ragdoll_joint 1 0 hinge",
+        "Ragdoll: Joint referenced bone with no parent (0)",
+    )?;
+    c.console("ragdoll_limit 1 0 x 0.5 -10 10")?;
+    ragdoll_wait(c, DEF, "limit not added", |n: [u64; 5]| {
+        n == [2, 1, 1, 0, 0]
+    })?;
+    typed(
+        c,
+        "ragdoll_limit 1 9 x 0 -10 10",
+        "Ragdoll: Angular limit added to nonexistent joint 9",
+    )?;
+    c.console("ragdoll_selfpair 1 0 1")?;
+    ragdoll_wait(c, DEF, "selfpair not added", |n: [u64; 5]| {
+        n == [2, 1, 1, 1, 0]
+    })?;
+    typed(
+        c,
+        "ragdoll_selfpair 1 0 99",
+        "Ragdoll: Bad self collision pair bone 99",
+    )?;
+    // Restore the stock shape for the no-reset checks, on a settled body.
+    c.console("exec ragdoll.cfg")?;
+    ragdoll_wait(
+        c,
+        DEF,
+        "exec did not restore the startup shape",
+        |n: [u64; 5]| n == startup,
+    )?;
+    kill(c)?;
+    let resting: [u64; 4] = ragdoll_wait(
+        c,
+        BODIES,
+        "restored definition made no corpse",
+        |n: [u64; 4]| n[1] > 0,
+    )?;
+    if c.lookup("fx.ragdolls")?.as_u64().unwrap_or(0) <= made {
+        return Err("exec ragdoll.cfg did not restore corpse physics".into());
+    }
+    // Stock definition 1 has all nine lerp slots occupied. Use definition 0 to exercise both appends without
+    // resetting any body; its bone names are actual zone script strings, not merely accepted spellings.
+    c.console("ragdoll_clear 0")?;
+    c.pause(Duration::from_millis(500))?;
+    c.console("ragdoll_bone 0 j_mainroot j_spinelower 4.5 0.5 20 0.7 -1 0 capsule")?;
+    c.pause(Duration::from_millis(500))?;
+    let before: [u64; 4] = ragdoll_wait(
+        c,
+        BODIES,
+        "definition-0 edit lost the resting body",
+        |n: [u64; 4]| n[1] > 0,
+    )?;
+    c.console("ragdoll_baselerp_bone 0 j_head 500")?;
+    c.console("ragdoll_pin_bone 0 j_head 0")?;
+    typed(
+        c,
+        "ragdoll_pin_bone 0 zz_never_interned 0",
+        "Ragdoll: Couldn't find pinned bone named zz_never_interned",
+    )?;
+    typed(
+        c,
+        "ragdoll_pin_bone 0 j_head 99",
+        "Ragdoll: Pinned bone has invalid parent index 99",
+    )?;
+    let zero: [u64; 5] = ragdoll_counts(c, "cgame.ragdoll0")?;
+    if zero != [1, 0, 0, 0, 2] {
+        return Err(format!("baselerp/pin did not append: {zero:?}"));
+    }
+    let after: [u64; 4] = ragdoll_counts(c, BODIES)?;
+    if after[2..] != before[2..] {
+        return Err(format!(
+            "baselerp/pin reset bodies: {before:?} -> {after:?}"
+        ));
+    }
+    if resting[1] == 0 {
+        return Err("no resting body for no-reset check".into());
+    }
+    c.console("exec ragdoll.cfg")?;
+    ragdoll_wait(
+        c,
+        DEF,
+        "final exec did not restore startup definition",
+        |n: [u64; 5]| n == startup,
+    )?;
+    c.console("ragdoll_max_life 4.5")?;
+    spawned(c, 120)?;
+    c.ask(json!({"cmd":"server","op":"exec","line":"set bot_idle 0"}))?;
+    cheats(c, "0")
+}
+
 /// A prop the `hitprop` dev hook struck falls; typed `Phys_Stop` (command names match without regard to case) stops
 /// it where it is (`Phys_Stop_f`); typed `phys_go` leaves it there (`Phys_Go_f` re-enables collision only), and the
 /// next force moves it again (#529).
@@ -640,6 +830,10 @@ fn in_match(c: &mut Driven, config: &Path, custom3: &str) -> Result<(), String> 
         typed(c, "stoprecord", "Not recording a demo.")
     })?;
     c.step("phys_stop and phys_go on a struck prop", phys)?;
+    c.step(
+        "ragdoll commands edit definitions and reset resting corpses",
+        ragdoll_commands,
+    )?;
     c.step("r_savesun and r_loadsun", |c| sun_files(c, config))?;
     c.step("words the server answers", |c| {
         says(

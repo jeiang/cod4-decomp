@@ -476,6 +476,11 @@ pub struct NetPlay {
     voice_on: bool,
     muted: HashSet<u16>,
     lib: Library,
+    ragdoll_def: crate::ragdoll::Def,
+    ragdoll_revision: Option<u64>,
+    ragdoll_reset_revision: u64,
+    ragdoll_resets: u64,
+    ragdoll_resting_resets: u64,
     /// The model configstrings (`CS_MODELS` slots) whose models the renderer has been handed to warm (native).
     models_warmed: HashSet<u16>,
     /// Slow network frames logged with their steps so far ([`SLOW_NET_FRAMES_LOGGED`]).
@@ -735,6 +740,11 @@ impl NetPlay {
             test_laser: false,
             shakes: Default::default(),
             lib,
+            ragdoll_def: Default::default(),
+            ragdoll_revision: None,
+            ragdoll_reset_revision: 0,
+            ragdoll_resets: 0,
+            ragdoll_resting_resets: 0,
             models_warmed: HashSet::new(),
             slow_net_frames: 0,
             events: Events::default(),
@@ -1059,6 +1069,7 @@ impl NetPlay {
                 .with_ambient(&lib.content, self.client_side_effects);
             self.params.mantle_anims = lib.content.mantle_anims();
             self.lib = lib;
+            self.ragdoll_revision = None;
             if let Some(a) = self.auto.as_mut() {
                 a.nav = AutoNav::new(&clipmap).map(Box::new);
             }

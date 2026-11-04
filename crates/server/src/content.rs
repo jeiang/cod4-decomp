@@ -10,7 +10,7 @@
 //! (tag 8) is dropped when the next map loads. A mod's `mod.ff` (tag 16, `DB_ZONE_MOD`) is loaded
 //! after the boot zones and outranks them and the map zone.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -333,6 +333,8 @@ pub struct Content {
     pub map_name: Option<String>,
     /// Per-zone decode time, for the boot log.
     pub timings: Vec<(String, Duration)>,
+    /// Every script string seen by client zone loads, independent of retained asset kinds or map lifetime.
+    script_strings: HashSet<Arc<str>>,
 }
 
 impl Content {
@@ -348,6 +350,20 @@ impl Content {
         Self {
             client: true,
             ..Self::default()
+        }
+    }
+
+    /// Case-sensitive script-string membership from this client's loaded zone tables, including strings
+    /// no retained asset references. Map replacement does not remove strings; the client can union this
+    /// set into its process-lifetime registry. Dedicated-server content does not collect these strings.
+    pub fn script_strings(&self) -> &HashSet<Arc<str>> {
+        &self.script_strings
+    }
+
+    fn collect_script_strings(&mut self, strings: &[Option<Arc<str>>]) {
+        if self.client {
+            self.script_strings
+                .extend(strings.iter().flatten().cloned());
         }
     }
 
@@ -379,12 +395,13 @@ impl Content {
         let t = Instant::now();
         let file = assets::fs::buffered(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let z = Zone::open(file).map_err(|e| format!("{zone}: {e}"))?;
+        let strings = z.script_strings().to_vec();
+        self.collect_script_strings(&strings);
         let layer = match tag {
             MAP_TAG => &mut self.map,
             MOD_TAG => &mut self.modded,
             _ => &mut self.base,
         };
-        let strings = z.script_strings().to_vec();
         let client = self.client;
         let filter = ContentFilter {
             presentation: client,
@@ -820,6 +837,38 @@ impl Content {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_script_strings_include_unreferenced_names_and_keep_case_and_lifetime() {
+        let name: Arc<str> = "not_a_skeleton_bone".into();
+        let strings = [
+            None,
+            Some(name.clone()),
+            Some(name.clone()),
+            Some("MixedCase".into()),
+        ];
+        let mut content = Content::for_client();
+        content.collect_script_strings(&strings);
+        assert_eq!(content.script_strings().len(), 2);
+        assert!(content.script_strings().contains("not_a_skeleton_bone"));
+        assert!(content.script_strings().contains("MixedCase"));
+        assert!(!content.script_strings().contains("mixedcase"));
+        assert!(!content.script_strings().contains("unknown"));
+        assert!(Arc::ptr_eq(
+            content.script_strings().get("not_a_skeleton_bone").unwrap(),
+            &name
+        ));
+
+        content.map = Layer::default();
+        content.collect_script_strings(&[Some("next_zone".into())]);
+        assert!(content.script_strings().contains("not_a_skeleton_bone"));
+        assert!(content.script_strings().contains("next_zone"));
+        assert!(content.base.skeletons.is_empty());
+
+        let mut server = Content::default();
+        server.collect_script_strings(&strings);
+        assert!(server.script_strings().is_empty());
+    }
 
     fn presentation_material(name: &str, sort_key: u8) -> Arc<Material> {
         Arc::new(Material {

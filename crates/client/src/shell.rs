@@ -650,6 +650,9 @@ impl Shell {
         input: &mut Input,
     ) -> Result<Self, String> {
         let mut assets = UiAssets::load(install)?;
+        input
+            .script_strings
+            .extend(assets.script_strings().iter().cloned());
         assets.note_menu_materials();
         let mut st = ShellState::new(&assets, install);
         // Warnings and errors reach the console as the stock engine's `Com_PrintWarning`/`Com_Error` text does.
@@ -703,6 +706,9 @@ impl Shell {
         input: &mut Input,
     ) -> Result<(), String> {
         let mut assets = UiAssets::load(install)?;
+        input
+            .script_strings
+            .extend(assets.script_strings().iter().cloned());
         assets.note_menu_materials();
         let (maps, map_sel, gametypes) = ShellState::catalog(&assets, install);
         let open = || {

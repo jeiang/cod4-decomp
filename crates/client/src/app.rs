@@ -988,6 +988,10 @@ impl Viewer {
                 &mut input,
             )?)
         };
+        if let Some(n) = net.as_mut() {
+            n.sync_ragdolls(&mut input);
+        }
+        input.register_ragdolls();
         if let (Some(sh), Some(n)) = (shell.as_mut(), net.as_mut()) {
             sh.ui.assets.add_weapon_icons(&n.weapon_defs());
             n.set_beam_materials(
@@ -1613,6 +1617,7 @@ impl Viewer {
         } else if st.loading.is_none()
             && let Some(net) = st.net.as_mut()
         {
+            net.sync_ragdolls(&mut st.input);
             let f = if self.cli.autoplay {
                 // The bot drives; only the grenade keys stay the player's (the control channel presses them).
                 let keys = st.input.frame(dt).buttons;
@@ -2779,6 +2784,9 @@ const CGAME_FACTS: &[&str] = &[
     "eyebob",
     "subtitle",
     "props",
+    "ragdoll",
+    "ragdoll0",
+    "ragdoll_bodies",
 ];
 
 /// A state section of named facts, each as its text, `null` where one is unavailable.
@@ -3099,6 +3107,9 @@ fn cgame_value(st: &State, name: &str) -> Option<String> {
         }
         // In a match: `<moving props> <props phys_stop stopped> <the hitprop prop moving: 1, 0, or - before one>`.
         "props" => st.net.as_ref().map(|n| n.props_fact()),
+        "ragdoll" => Some(st.input.ragdoll_defs.fact(1)),
+        "ragdoll0" => Some(st.input.ragdoll_defs.fact(0)),
+        "ragdoll_bodies" => st.net.as_ref().map(|n| n.ragdoll_bodies_fact()),
         _ => None,
     }
 }
