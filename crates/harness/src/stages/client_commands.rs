@@ -325,13 +325,14 @@ fn props_until(
     }
 }
 
-/// A prop the `hitprop` dev hook struck falls; typed `phys_stop` stops it where it is (`Phys_Stop_f`); typed
-/// `phys_go` leaves it there (`Phys_Go_f` re-enables collision only), and the next force moves it again (#529).
+/// A prop the `hitprop` dev hook struck falls; typed `Phys_Stop` (command names match without regard to case) stops
+/// it where it is (`Phys_Stop_f`); typed `phys_go` leaves it there (`Phys_Go_f` re-enables collision only), and the
+/// next force moves it again (#529).
 fn phys(c: &mut Driven) -> Result<(), String> {
     c.ask(json!({"cmd": "dev", "op": "hitprop", "arg": ""}))?;
     let before = props_until(c, 2, "the struck prop did not move", |_, p| p == "1")?;
     let shown = lines(c)?;
-    c.console("phys_stop")?;
+    c.console("Phys_Stop")?;
     props_until(c, 2, "phys_stop did not stop the moving prop", |s, p| {
         s > before && p == "0"
     })?;
@@ -344,7 +345,7 @@ fn phys(c: &mut Driven) -> Result<(), String> {
     // Other lines (the kill feed, chat) may come and go meanwhile; a warning or `Unknown command` names the word.
     if let Some(l) = fresh(&shown, &after)
         .iter()
-        .find(|l| !l.starts_with("] ") && l.contains("phys_"))
+        .find(|l| !l.starts_with("] ") && l.to_ascii_lowercase().contains("phys_"))
     {
         return Err(format!(
             "phys_stop and phys_go print nothing in stock, but the console said {l:?}"

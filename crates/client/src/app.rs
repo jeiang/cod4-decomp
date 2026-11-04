@@ -3397,7 +3397,7 @@ fn voice_capture(
 fn open_chat(shell: Option<&mut Shell>, input: &mut Input, f: &InputFrame) {
     let Some(sh) = shell else { return };
     for c in &f.pending_commands {
-        match c.as_str() {
+        match c.trim().to_ascii_lowercase().as_str() {
             "chatmodepublic" => sh.st.console.open_chat(false),
             "chatmodeteam" => sh.st.console.open_chat(true),
             "toggleconsole" => sh.st.console.toggle(),
