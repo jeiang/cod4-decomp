@@ -107,13 +107,16 @@ is still dropped when the client records the loss. `gfx` is what the graphics
 settings came to in the renderer and on the surface, by name (`aa`, `aa_max`,
 `specular`, `dof`, `blur`, `blur_radius`, `blur_shape`, `glow`, `shadows`, `aniso`, `mipmode`, `dlights`, `postlights`, `aspect`,
 `fullscreen`, `uncapped`, `zfeather`, `nearfar`, `depthhack_near`, `outdoor`, `sun_tweak`, `film_tweak`,
-`glow_tweak`, `sun_flare`, `sun_fx_position`, `water`, `picmip`, `pace`), and `cgame` what the cgame drew last
+`glow_tweak`, `sun_flare`, `sun_fx_position`, `water`, `texture_cache`, `ui_texture_cache`, `picmip`, `pace`), and `cgame` what the cgame drew last
 frame, by name (`gun`, `hud2d`, `fps`, `fpstext`, `fullbright`, `shock`, `centertime`,
 `heli_camera`, `air_camera`, `brightness`, `film_sample`, `crosshair_alpha`, `window_position`, `levelfade`,
 `eyebob`, `subtitle`). Each fact is text (numbers separated by spaces), `null` where it needs what is
 not up (a world renderer, a match). Like `report`, both are built only when named (`state gfx`): a bare `state`, a
 `wait` and an `assert` leave them out rather than query the surface and the adapter every frame, so a stage reads
 them. Effect counts are `fx.played.<kind>`.
+`texture_cache` (the world's) and `ui_texture_cache` (the menus', up at the front end too) are `<evicted> <loads>`:
+the images `reloadmaterialtextures` dropped from that texture cache, and the image loads it attempted, a dropped
+image counting again when it is next drawn.
 
 `report` is what the match saw so far, the `net` object of `client.json`: the run's counters,
 such as `vehicles_max_drawn` and `vehicles_unloaded`, `projectiles_max_drawn`, `missiles_seen` (by weapon name),
