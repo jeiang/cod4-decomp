@@ -758,7 +758,6 @@ mod tests {
     fn a_scripted_body_missing_from_the_zones_is_noted_and_not_drawn() {
         let lib = Library {
             content: Content::for_client(),
-            ragdoll: Def::default(),
             pure_digest: 0,
             anims: HashMap::new(),
             rests: HashMap::new(),

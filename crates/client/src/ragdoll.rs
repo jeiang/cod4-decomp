@@ -209,7 +209,7 @@ impl Defs {
         let d = self.get(index);
         let limits: usize = d.joints.iter().map(|j| j.limits.len()).sum();
         format!(
-            "def={index} bones={} joints={} limits={limits} pairs={} lerps={}",
+            "{} {} {limits} {} {}",
             d.bones.len(),
             d.joints.len(),
             d.pairs.len(),
@@ -1515,10 +1515,29 @@ mod tests {
         );
         assert_eq!(snapshot, old);
         assert!(defs.get(1).is_empty());
-        assert_eq!(
-            defs.fact(1),
-            "def=1 bones=0 joints=0 limits=0 pairs=0 lerps=0"
-        );
+        assert_eq!(defs.fact(1), "0 0 0 0 0");
+    }
+
+    #[test]
+    fn installed_definition_one_preserves_every_old_parser_field() {
+        let Some(root) = std::env::var_os("COD4_PATH") else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let vfs =
+            assets::vfs::Vfs::open_stock(std::path::Path::new(&root), 0).expect("startup VFS");
+        let bytes = vfs
+            .read("ragdoll.cfg")
+            .expect("read installed ragdoll.cfg")
+            .expect("installed ragdoll.cfg exists");
+        let text = std::str::from_utf8(&bytes).expect("ragdoll.cfg text");
+        let old = Def::parse(text);
+        assert!(!old.is_empty(), "installed definition 1 has bodies");
+        // The real exec path tokenizes each console line and calls Defs::apply with the
+        // process script-string lookup; do not invent a skeleton or accept-any pin lookup.
+        let mut input = crate::input::Input::detached_with(vfs);
+        input.exec_line("exec ragdoll.cfg");
+        assert_eq!(input.ragdoll_defs.get(1), &old);
     }
 
     #[test]
@@ -1677,7 +1696,7 @@ mod tests {
             command(&mut defs, "ragdoll_limit 1 0 z 1 0 1"),
             Err("Ragdoll: Too many limit axes for joint 0, max 3\n".into())
         );
-        assert!(defs.fact(1).contains("joints=3 limits=3"));
+        assert_eq!(defs.fact(1), "2 3 3 0 0");
     }
 
     #[test]

@@ -571,6 +571,25 @@ fn writeconfig(c: &mut Driven, active: &Path) -> Result<(), String> {
 
 /// The console commands at the front end: usage lines, binds, cvars, channels, and a connect nothing answers.
 fn front_end(c: &mut Driven) -> Result<(), String> {
+    c.step(
+        "ragdoll definitions and script-string lookup at the front end",
+        |c| {
+            c.console("ragdoll_clear 0")?;
+            typed(
+                c,
+                "ragdoll_pin_bone 0 zz_never_interned 0",
+                "Ragdoll: Couldn't find pinned bone named zz_never_interned",
+            )?;
+            c.console("ragdoll_bone 0 j_mainroot j_spinelower 4.5 0.5 20 0.7 -1 0 capsule")?;
+            ragdoll_wait(
+                c,
+                "cgame.ragdoll0",
+                "frontend definition not edited",
+                |n: [u64; 5]| n == [1, 0, 0, 0, 0],
+            )
+            .map(|_| ())
+        },
+    )?;
     c.step("front-end console commands", |c| {
         typed(
             c,
@@ -779,6 +798,13 @@ fn in_match(c: &mut Driven, config: &Path, custom3: &str) -> Result<(), String> 
             "the player is not a Marine",
         )
         .map(|_| ())
+    })?;
+    c.step("ragdoll console edits survive loading the match", |c| {
+        let n: [u64; 5] = ragdoll_counts(c, "cgame.ragdoll0")?;
+        if n != [1, 0, 0, 0, 0] {
+            return Err(format!("map load replaced frontend definition: {n:?}"));
+        }
+        Ok(())
     })?;
     // The `cgame` section is not one a `wait` builds (`control::PARTS`): it is read by name until it answers.
     c.step("the level's sound faded in over snd_levelFadeTime", |c| {
