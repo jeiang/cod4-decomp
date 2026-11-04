@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-only
 # Usage: scripts/remote-linux.sh [git-ref] [-- run-options... | -- command...]
+# Recovery: scripts/remote-linux.sh --attach '~/Projects/cod4e/run-<identity>'
 # Ships a git ref to the Linux test host and runs scripts/host-run.sh there in the devshell with
 # COD4_PATH=~/Projects/cod4e/shared/COD4: build/test/clippy/fmt and, when run-options are given,
 # `cod4e-harness run --out bundles <run-options>` (a bare `--` runs the default suite). The host's bundles/ and
@@ -52,16 +53,58 @@ finish() {
   exit "$status"
 }
 trap finish EXIT
+# Keep log draining outside the worker's temporary command redirections. An EXIT trap entered from a signal
+# handler inside `cat ... >&2` otherwise retains bash's saved pipe descriptor and can wait forever for tee.
+controller=$$
+(
+trap - EXIT
+scratch=
+trap '[ -z "$scratch" ] || rm -rf "$scratch"' EXIT
+dir=
+interrupted() {
+  echo "remote: follower stopped; the host run keeps its lease and locks: $host $dir" >&2
+  echo "remote: recover with COD4E_LINUX_HOST=$host scripts/remote-linux.sh --attach '$dir'" >&2
+  exit "$1"
+}
+trap 'interrupted 130' INT
+trap 'interrupted 143' TERM
+trap 'interrupted 129' HUP
+host=${COD4E_LINUX_HOST:?set COD4E_LINUX_HOST to the ssh host of the Linux test machine}
+ssh_opts=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3)
+# Only connection failures are retried; command errors remain errors. No SSH status is a host-run status.
+host_ssh() { ssh "${ssh_opts[@]}" "$host" "$@"; }
+retry_ssh() {
+  local dest=$1 rc
+  shift
+  while :; do
+    kill -0 "$controller" 2>/dev/null || exit 143
+    host_ssh "$@" > "$dest" && return 0
+    rc=$?
+    [ "$rc" = 255 ] || [ "$rc" -ge 128 ] || return "$rc"
+    echo "remote: connection lost; host state unknown, reconnecting in 5s ($dir)" >&2
+    sleep 5
+  done
+}
+attach=0
+if [ "${1:-}" = --attach ]; then
+  [ $# = 2 ] || { echo "usage: $0 --attach <run-directory>" >&2; exit 2; }
+  dir=$2
+  [[ $dir =~ ^~/Projects/cod4e/run-[a-zA-Z0-9._-]+$ ]] || {
+    echo "remote: invalid run directory: $dir" >&2; exit 2;
+  }
+  attach=1
+  shift 2
+fi
 ref=HEAD
 if [ $# -gt 0 ] && [ "$1" != -- ]; then ref=$1; shift; fi
 {
   printf 'started=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf 'ref=%s\n' "$ref"
 } >> "$log"
-host=${COD4E_LINUX_HOST:?set COD4E_LINUX_HOST to the ssh host of the Linux test machine}
+if [ "$attach" = 0 ]; then
 # The ref is resolved once: the shipped tree and the build hash name the same commit even if a branch moves.
 commit=$(git rev-parse --verify "$ref^{commit}")
-dir="~/Projects/cod4e/run-$(hostname -s)-$$"  # per invocation: parallel runs must not wipe each other
+dir="~/Projects/cod4e/run-$(hostname -s)-$(date -u +%Y%m%dT%H%M%SZ)-${log##*-}"
 slot=${COD4E_LINUX_SLOT:-}
 token=${COD4E_LINUX_SLOT_TOKEN:-}
 if [ -n "$token" ] && [ -z "$slot" ]; then
@@ -99,34 +142,147 @@ fi
   printf 'slot=%s guarded=%s\n' "${slot:-serial}" "$([ -n "$token" ] && echo yes || echo no)"
   printf 'host_run_options=%s\n' "$opts"
 } >> "$log"
-
-# `tar x -m` stamps every file with the extraction time: git archive carries commit times, and a slot's target dir
-# outlives a run, so an older ref's sources would look older than the last build and cargo would reuse its binaries.
-git archive "$commit" | ssh "$host" "bash -c 'rm -rf $dir && mkdir -p $dir && tar x -m -C $dir'"
-status=0
-# The command goes to the host as a file: the login shell there is fish, and printf %q output for arguments with
-# quotes, newlines or other specials ($'...') must be parsed by bash alone. It can carry the lease token, so only its
-# owner may read it, and it is removed with the run directory.
+# `tar x -m` prevents an older ref reusing a slot's newer compiled binaries.
+git archive "$commit" | host_ssh "bash -c 'umask 077 && mkdir $dir && tar x -m -C $dir'"
+# The command file is private: it may contain the lease token, never printed to logs or process arguments.
 printf 'cd %s || exit\n%s\n%s%s\n' "$dir" "$guard_check" "$vars" "$launch" |
-  ssh "$host" "bash -c 'umask 077 && cat > $dir/.host-cmd'"
-ssh "$host" "bash -c 'bash $dir/.host-cmd'" || status=$?
+  host_ssh "bash -c 'umask 077 && cat > $dir/.host-cmd'"
+printf '%s\n' "$slot" | host_ssh "bash -c 'cat > $dir/.host-slot'"
+# This transport belongs to the launching checkout, not the ref being tested. The detached session encloses the
+# installed guard as well as host-run.sh; queue ownership, inherited lease locks and EXIT cleanup are unchanged.
+host_ssh "bash -c 'umask 077 && cat > $dir/.host-transport'" <<'TRANSPORT'
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")"
+identity_live() {
+  local pid start
+  [ -f .host-identity ] || return 1
+  { read -r pid; IFS= read -r start; } < .host-identity
+  [ "$(ps -o lstart= -p "$pid" 2>/dev/null)" = "$start" ]
+}
+case $1 in
+  start)
+    command -v setsid >/dev/null && command -v nohup >/dev/null && command -v flock >/dev/null || {
+      echo "remote: detachment needs setsid, nohup and flock on the host" >&2; exit 2;
+    }
+    if [ ! -f .host-identity ] && [ ! -f .host-status ]; then
+      nohup setsid bash .host-transport supervise </dev/null >.host-supervisor.log 2>&1 3>&- 4>&- &
+    fi
+    # Wait only for durable identity, not for the run. Repeating start after a lost acknowledgement is safe.
+    for ((i=0; i<50; i++)); do
+      [ ! -f .host-identity ] || exit 0
+      sleep .1
+    done
+    echo "remote: supervisor did not publish its identity; inspect .host-supervisor.log" >&2
+    exit 2 ;;
+  supervise)
+    exec 5>.host-launch.lock
+    flock -n 5 || exit 0
+    [ ! -f .host-identity ] && [ ! -f .host-status ] || exit 0
+    : > .host-stdout
+    : > .host-stderr
+    { printf '%s\n' "$$"; ps -o lstart= -p "$$"; ps -o pgid= -p "$$"; } > .host-identity.tmp
+    mv .host-identity.tmp .host-identity
+    rc=0
+    bash .host-cmd >.host-stdout 2>.host-stderr || rc=$?
+    printf '%s\n' "$rc" > .host-status.tmp
+    mv .host-status.tmp .host-status ;;
+  poll)
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    # Read status BEFORE sizes: completion means the command's final output is already in these files.
+    live=0
+    identity_live && live=1
+    if [ -f .host-status ]; then
+      cp .host-status "$tmp/status"
+      echo done > "$tmp/state"
+    elif [ "$live" = 1 ]; then
+      echo running > "$tmp/state"
+    else
+      echo dead > "$tmp/state"
+    fi
+    for stream in stdout stderr; do
+      offset=$2; shift
+      size=$(wc -c < ".host-$stream")
+      dd if=".host-$stream" of="$tmp/$stream" bs=65536 iflag=skip_bytes,count_bytes \
+        skip="$offset" count="$((size - offset))" status=none
+    done
+    cp .host-slot "$tmp/slot"
+    tar c -C "$tmp" . ;;
+  collect)
+    [ -f .host-status ] || exit 2
+    files=(.host-status)
+    for f in bundles out .host-run-gave-up; do [ ! -e "$f" ] || files+=("$f"); done
+    tar c "${files[@]}" ;;
+  *) exit 2 ;;
+esac
+TRANSPORT
+echo "remote: detached run $host $dir"
+retry_ssh /dev/null "bash -c 'bash $dir/.host-transport start'"
+else
+  printf 'host=%s\nrun_dir=%s\n' "$host" "$dir" >> "$log"
+  echo "remote: attaching to $host $dir"
+fi
+
+scratch=$(mktemp -d)
+out_offset=0 err_offset=0
+while :; do
+  # Download to a file first: a dropped connection must not print a partial response or advance the offsets.
+  retry_ssh "$scratch/snapshot.tar" "bash -c 'bash $dir/.host-transport poll $out_offset $err_offset'"
+  mkdir -p "$scratch/snapshot"
+  tar xf "$scratch/snapshot.tar" -C "$scratch/snapshot"
+  cat "$scratch/snapshot/stdout"
+  cat "$scratch/snapshot/stderr" >&2
+  out_offset=$((out_offset + $(wc -c < "$scratch/snapshot/stdout")))
+  err_offset=$((err_offset + $(wc -c < "$scratch/snapshot/stderr")))
+  slot=$(cat "$scratch/snapshot/slot")
+  state=$(cat "$scratch/snapshot/state")
+  case $state in
+    done) status=$(cat "$scratch/snapshot/status"); break ;;
+    running) sleep 1 ;;
+    *) echo "remote: host supervisor is gone without an exit status; retained $dir for inspection" >&2; exit 255 ;;
+  esac
+done
+[[ $status =~ ^[0-9]+$ ]] && [ "$status" -le 255 ] || {
+  echo "remote: invalid host exit status in $dir" >&2; exit 2;
+}
 printf 'host_status=%s\n' "$status" >> "$log"
-mkdir -p bundles out
-# Slot bundles get a slot-<n>- prefix: runs in two slots can start in the same second and name their zips alike.
-tmp=$(mktemp -d)
-ssh "$host" "bash -c 'cd $dir && [ -d bundles ] && tar c bundles || true'" | tar x -C "$tmp" 2>/dev/null || true
+mkdir -p bundles out "$scratch/artifacts"
+retry_ssh "$scratch/artifacts.tar" "bash -c 'bash $dir/.host-transport collect'"
+tar xf "$scratch/artifacts.tar" -C "$scratch/artifacts"
 copied=()
-for z in "$tmp"/bundles/*; do
+for z in "$scratch"/artifacts/bundles/*; do
   [ -e "$z" ] || continue
   dest="bundles/${slot:+slot-$slot-}$(basename "$z")"
   mv "$z" "$dest"
   copied+=("$dest")
 done
-rm -rf "$tmp"
-ssh "$host" "bash -c 'cd $dir && [ -d out ] && tar c out || true'" | tar x -C . 2>/dev/null || true
-# host-run.sh leaves this file only when it gave up waiting (exit 76); a command's own status 76 leaves none.
-gave_up=$(ssh "$host" "bash -c 'cat $dir/.host-run-gave-up 2>/dev/null || true'") || true
-ssh "$host" "bash -c 'rm -rf $dir'" || true
+if [ -d "$scratch/artifacts/out" ]; then cp -R "$scratch/artifacts/out/." out/; fi
+gave_up=
+if [ -f "$scratch/artifacts/.host-run-gave-up" ]; then gave_up=$(cat "$scratch/artifacts/.host-run-gave-up"); fi
+# Only a completed, collected run may be removed. Killing the follower never touches the host process or its files.
+kill -0 "$controller" 2>/dev/null || exit 143
+retry_ssh /dev/null "bash -c 'rm -rf $dir'"
+rm -rf "$scratch"
+scratch=
 for p in ${copied[@]+"${copied[@]}"}; do echo "local bundle: $p"; done
 [ -z "$gave_up" ] || echo "remote: host run gave up waiting: ${gave_up#host-run: }" >&2
-exit $status
+exit "$status"
+) &
+worker=$!
+signal_status=0
+stop_worker() {
+  signal_status=$1
+  kill -TERM "$worker" 2>/dev/null || true
+}
+trap 'stop_worker 130' INT
+trap 'stop_worker 143' TERM
+trap 'stop_worker 129' HUP
+status=0
+while :; do
+  wait "$worker" && status=0 || status=$?
+  # A trapped signal interrupts wait before the worker exits; wait again so its descriptors close before tee.
+  kill -0 "$worker" 2>/dev/null || break
+done
+[ "$signal_status" = 0 ] || status=$signal_status
+exit "$status"
