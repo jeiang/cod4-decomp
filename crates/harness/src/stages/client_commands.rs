@@ -288,6 +288,75 @@ fn pitch_in(c: &mut Driven, lo: f64, hi: f64) -> Result<(), String> {
     }
 }
 
+/// The `props` cgame fact: moving props, props `phys_stop` stopped, and whether the prop `hitprop` struck moves.
+fn props(c: &mut Driven) -> Result<(u64, String), String> {
+    let v = c.lookup("cgame.props")?;
+    let text = v.as_str().ok_or(format!("cgame.props is {v}"))?;
+    match text.split_whitespace().collect::<Vec<_>>()[..] {
+        [_, stopped, probe] => Ok((
+            stopped
+                .parse()
+                .map_err(|_| format!("cgame.props is {text}"))?,
+            probe.to_owned(),
+        )),
+        _ => Err(format!("cgame.props is {text}")),
+    }
+}
+
+/// Waits up to `secs` for the `props` fact to satisfy `ok`.
+fn props_until(
+    c: &mut Driven,
+    secs: u64,
+    what: &str,
+    ok: impl Fn(u64, &str) -> bool,
+) -> Result<u64, String> {
+    let end = Instant::now() + Duration::from_secs(secs);
+    loop {
+        let (stopped, probe) = props(c)?;
+        if ok(stopped, &probe) {
+            return Ok(stopped);
+        }
+        if Instant::now() > end {
+            return Err(format!(
+                "{what} within {secs} s: {stopped} stopped, the struck prop moving {probe}"
+            ));
+        }
+        c.pause(Duration::from_millis(50))?;
+    }
+}
+
+/// A prop the `hitprop` dev hook struck falls; typed `phys_stop` stops it where it is (`Phys_Stop_f`); typed
+/// `phys_go` leaves it there (`Phys_Go_f` re-enables collision only), and the next force moves it again (#529).
+fn phys(c: &mut Driven) -> Result<(), String> {
+    c.ask(json!({"cmd": "dev", "op": "hitprop", "arg": ""}))?;
+    let before = props_until(c, 2, "the struck prop did not move", |_, p| p == "1")?;
+    let shown = lines(c)?;
+    c.console("phys_stop")?;
+    props_until(c, 2, "phys_stop did not stop the moving prop", |s, p| {
+        s > before && p == "0"
+    })?;
+    c.pause(Duration::from_secs(1))?;
+    props_until(c, 0, "the stopped prop moved again", |_, p| p == "0")?;
+    c.console("phys_go")?;
+    c.pause(Duration::from_millis(500))?;
+    props_until(c, 0, "phys_go woke the stopped prop", |_, p| p == "0")?;
+    let after = lines(c)?;
+    // Other lines (the kill feed, chat) may come and go meanwhile; a warning or `Unknown command` names the word.
+    if let Some(l) = fresh(&shown, &after)
+        .iter()
+        .find(|l| !l.starts_with("] ") && l.contains("phys_"))
+    {
+        return Err(format!(
+            "phys_stop and phys_go print nothing in stock, but the console said {l:?}"
+        ));
+    }
+    c.ask(json!({"cmd": "dev", "op": "hitprop", "arg": ""}))?;
+    props_until(c, 2, "a force did not move the stopped prop", |_, p| {
+        p == "1"
+    })
+    .map(drop)
+}
+
 /// `writeconfig` from the console: the named exports, the usage lines, and the active profile read back as it was.
 fn writeconfig(c: &mut Driven, active: &Path) -> Result<(), String> {
     c.step("writeconfig exports and usage", |c| {
@@ -569,6 +638,7 @@ fn in_match(c: &mut Driven, config: &Path, custom3: &str) -> Result<(), String> 
         typed(c, "stoprecord", "Stopped demo.")?;
         typed(c, "stoprecord", "Not recording a demo.")
     })?;
+    c.step("phys_stop and phys_go on a struck prop", phys)?;
     c.step("r_savesun and r_loadsun", |c| sun_files(c, config))?;
     c.step("words the server answers", |c| {
         says(

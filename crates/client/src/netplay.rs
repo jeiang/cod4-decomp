@@ -770,6 +770,21 @@ impl NetPlay {
         self.want_flesh_hit = true;
     }
 
+    /// The `props` cgame fact ([`crate::props::Props::fact`]).
+    pub fn props_fact(&self) -> String {
+        self.props.fact()
+    }
+
+    /// A bullet from the eye strikes the nearest prop that can move (for the `hitprop` dev hook).
+    pub fn hit_prop(&mut self) -> Result<(), String> {
+        let eye = self.last_eye.ok_or("no view to strike a prop from")?;
+        if self.props.strike_nearest(eye) {
+            Ok(())
+        } else {
+            Err("no prop on the map can move".into())
+        }
+    }
+
     /// A `shellshock` server command for the player, `ms` of the default shock, as the server sends one for a
     /// nearby explosion (for the `shock` dev hook).
     pub fn inject_shock(&mut self, ms: i32) {
@@ -2419,6 +2434,13 @@ impl NetPlay {
         }
         if let Some(arg) = cmd.strip_prefix("drawprops ") {
             self.draw_props = arg.trim() != "0";
+            return;
+        }
+        // `Phys_Stop_f` and `Phys_Go_f` take no arguments. `phys_go` enables the collision of the dynent world's
+        // bodies, and a stopped prop has none left (`Props::stop`): it stays until a force wakes it, colliding as
+        // before.
+        if cmd.split_whitespace().next() == Some("phys_stop") {
+            self.props.stop();
             return;
         }
         let forward = match cmd {
