@@ -856,10 +856,6 @@ fn in_match(c: &mut Driven, config: &Path, custom3: &str) -> Result<(), String> 
         typed(c, "stoprecord", "Not recording a demo.")
     })?;
     c.step("phys_stop and phys_go on a struck prop", phys)?;
-    c.step(
-        "ragdoll commands edit definitions and reset resting corpses",
-        ragdoll_commands,
-    )?;
     c.step("r_savesun and r_loadsun", |c| sun_files(c, config))?;
     c.step("words the server answers", |c| {
         says(
@@ -1050,7 +1046,12 @@ fn in_match(c: &mut Driven, config: &Path, custom3: &str) -> Result<(), String> 
             }
             c.pause(Duration::from_millis(100))?;
         }
-    })
+    })?;
+    // Intentional deaths change the spawn point: run these after the stance/view/quick-message assertions.
+    c.step(
+        "ragdoll commands edit definitions and reset resting corpses",
+        ragdoll_commands,
+    )
 }
 
 fn drive(c: &mut Driven, active: &Path, config: &Path, custom3: &str) -> Result<(), String> {
