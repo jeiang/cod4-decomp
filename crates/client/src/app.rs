@@ -3355,11 +3355,12 @@ fn voice_capture(
         .and_then(|v| v.trim().parse::<f32>().ok())
         .filter(|v| v.is_finite())
         .unwrap_or(1.0);
+    let rec_level = crate::voice::record_level(input.cvar("winvoice_mic_reclevel"));
     let Some(sh) = shell else {
-        return talker.frames(talking, false, scaler, Instant::now());
+        return talker.frames(talking, false, scaler, rec_level, Instant::now());
     };
     let metering = std::mem::take(&mut sh.st.game.hud.meter_shown);
-    let frames = talker.frames(talking, metering, scaler, Instant::now());
+    let frames = talker.frames(talking, metering, scaler, rec_level, Instant::now());
     sh.st.game.hud.voice_level = talker.current_level;
     if let Some(note) = talker.note.take() {
         sh.print_console(&note);

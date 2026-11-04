@@ -171,25 +171,11 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     // The one value each of these has here (see `UNSUPPORTED`); the Sound and Game Options pages show them.
     ("snd_outputConfiguration", "Windows default", true),
     ("monkeytoy", "0", true),
-    // The Voice Chat and Multiplayer Options pages' controls that `ui_multiplayer` shows (see `NOT_IMPLEMENTED`):
-    // `winvoice_mic_reclevel` as `Voice_Init` registers it (win32/win_voice.cpp, 65535) and `cl_punkbuster` as
-    // `CL_InitOnceForAllClients` does (client_mp/cl_main_mp.cpp, 1): the stock profile's config writes that value back
-    // on every start, which is no change and so no warning.
+    // Voice_Init (win32/win_voice.cpp) registers the recording level at 65535; this build applies software gain.
+    // CL_InitOnceForAllClients (client_mp/cl_main_mp.cpp) registers cl_punkbuster at 1. It is saved only here:
+    // no PunkBuster client, userinfo, write protection or join/start gates (README intentional differences).
     ("winvoice_mic_reclevel", "65535", true),
     ("cl_punkbuster", "1", true),
-];
-
-/// Stock dvars the menus set that this build keeps but does not act on yet: a write says so (issue #372).
-const NOT_IMPLEMENTED: &[(&str, &str)] = &[
-    (
-        "winvoice_mic_reclevel",
-        "voice chat does not capture yet; the microphone's recording level is not set",
-    ),
-    (
-        "voicechat_level_indicator",
-        "voice chat does not capture yet; no level indicator is drawn",
-    ),
-    ("cl_punkbuster", "PunkBuster does not exist in this build"),
 ];
 
 /// The cvars a console, bind or menu may not set (`DVAR_ROM`).
@@ -279,6 +265,8 @@ const FLOAT_DOMAINS: &[(&str, f32, f32)] = &[
     // `iw3mp.exe` 1.7's `cg_fov` registration (near 0x43adc1): min 65, max 80, `DVAR_ARCHIVE` only. KisakCOD
     // (GPL-3.0, CoD4 MP 1.8), cgame_mp/cg_main_mp.cpp:366, allows up to 120.
     ("cg_fov", 65.0, 80.0),
+    // Voice_Init, KisakCOD win32/win_voice.cpp:597; iw3mp.exe 1.7 registration at 0x57a987.
+    ("winvoice_mic_reclevel", 0.0, 65535.0),
 ];
 
 /// Stock dvars whose other values this build cannot act on: the one value it has, and why. A write of any other
@@ -469,14 +457,6 @@ impl Cvars {
                 }
             }
         }
-    }
-
-    /// For a stock dvar this build keeps but does not act on: why.
-    pub fn not_implemented(name: &str) -> Option<&'static str> {
-        NOT_IMPLEMENTED
-            .iter()
-            .find(|(n, _)| n.eq_ignore_ascii_case(name))
-            .map(|&(_, why)| why)
     }
 
     /// For a dvar this build accepts only one value of: that value and why.
@@ -770,6 +750,33 @@ mod tests {
             assert_eq!(entries.len(), 1, "{name}");
             assert!(!entries[0].2, "{name}");
         }
+    }
+
+    #[test]
+    fn recording_level_has_stock_domain_and_is_saved() {
+        let mut input = Input::detached();
+        assert_eq!(input.cvar("winvoice_mic_reclevel"), Some("65535"));
+        assert_eq!(
+            Cvars::float_domain("winvoice_mic_reclevel"),
+            Some((0.0, 65535.0))
+        );
+        for value in ["0", "32767", "65535"] {
+            input.exec_line(&format!("set winvoice_mic_reclevel {value}"));
+            assert_eq!(input.cvar("winvoice_mic_reclevel"), Some(value));
+            assert!(
+                input
+                    .cvars
+                    .archived()
+                    .contains(&("winvoice_mic_reclevel", value))
+            );
+        }
+        for value in ["-1", "65536", "NaN"] {
+            input.exec_line(&format!("set winvoice_mic_reclevel {value}"));
+            assert_eq!(input.cvar("winvoice_mic_reclevel"), Some("65535"));
+        }
+        assert_eq!(input.cvar("voicechat_level_indicator"), None);
+        input.exec_line("set voicechat_level_indicator 1");
+        assert_eq!(input.cvar("voicechat_level_indicator"), Some("1"));
     }
 
     #[test]
