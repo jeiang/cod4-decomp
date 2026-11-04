@@ -376,8 +376,10 @@ fn front_end(c: &mut Driven) -> Result<(), String> {
             "reloadmaterialtextures zz_nomaterial",
             "ReloadMaterialTextures: Material 'zz_nomaterial' is not currently loaded.",
         )?;
+        // The menus' pointer, which every front-end frame draws from the UI zone's `ui_cursor` material (the
+        // filled rectangles of `white` take no image from the cache).
         let (evicted, loads) = ui_texture_cache(c)?;
-        c.console("reloadmaterialtextures white")?;
+        c.console("reloadmaterialtextures ui_cursor")?;
         let end = Instant::now() + Duration::from_secs(5);
         loop {
             let now = ui_texture_cache(c)?;
@@ -386,14 +388,14 @@ fn front_end(c: &mut Driven) -> Result<(), String> {
             }
             if Instant::now() > end {
                 return Err(format!(
-                    "reloadmaterialtextures white did not evict and load again the menus' images: {:?} before, {now:?} after",
+                    "reloadmaterialtextures ui_cursor did not evict and load again the menus' images: {:?} before, {now:?} after",
                     (evicted, loads)
                 ));
             }
             c.pause(Duration::from_millis(100))?;
         }
-        if let Some(l) = lines(c)?.iter().find(|l| l.contains("Material 'white'")) {
-            return Err(format!("reloadmaterialtextures white was refused: {l:?}"));
+        if let Some(l) = lines(c)?.iter().find(|l| l.contains("Material 'ui_cursor'")) {
+            return Err(format!("reloadmaterialtextures ui_cursor was refused: {l:?}"));
         }
         Ok(())
     })?;
@@ -843,7 +845,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             out.reason = Some(w);
         }
         None => out.notes.push(format!(
-            "Pause refused, centerview levelled the view, record wrote {demo_len} bytes, the vote and the quick message reached the server, setFromLocString and cmd ran; writeconfig exported both named configs with the archived cvar and bind, left the active profile unchanged until its normal save, and rejected invalid arity; imagelist listed the images, reloadmaterialtextures reloaded the menus' white, and a saved sun file loaded back into the world's flare"
+            "Pause refused, centerview levelled the view, record wrote {demo_len} bytes, the vote and the quick message reached the server, setFromLocString and cmd ran; writeconfig exported both named configs with the archived cvar and bind, left the active profile unchanged until its normal save, and rejected invalid arity; imagelist listed the images, reloadmaterialtextures reloaded the menus' pointer, and a saved sun file loaded back into the world's flare"
         )),
     }
     Ok(out)
