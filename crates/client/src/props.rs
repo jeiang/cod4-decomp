@@ -196,6 +196,10 @@ pub struct Props {
     /// What broke props threw.
     pieces: Vec<Piece>,
     out: Happened,
+    /// Moving props `phys_stop` has stopped.
+    stopped: u64,
+    /// The prop the `hitprop` dev hook last struck.
+    probe: Option<usize>,
     /// `phys_bulletUpBias` and `phys_bulletSpinScale`, for the hits that strike props and the pieces they throw.
     bullet: BulletTune,
 }
@@ -351,6 +355,8 @@ impl Props {
             pieces: Vec::new(),
             out: Happened::default(),
             bullet: BulletTune::default(),
+            stopped: 0,
+            probe: None,
         }
     }
 
@@ -410,6 +416,64 @@ impl Props {
     /// The player's `phys_bulletUpBias` and `phys_bulletSpinScale`.
     pub fn set_bullet(&mut self, bullet: BulletTune) {
         self.bullet = bullet;
+    }
+
+    /// `phys_stop` (`Phys_Stop_f`): disables every body of the dynent physics world, so the moving props stop where
+    /// they are. Stock also disables their collision, but `DynEntCl_ProcessEntities` destroys a disabled body on the
+    /// next frame and keeps only its pose, so a force on the prop later makes a new body that collides as any does:
+    /// here the body is put to sleep in place, which is what a settled prop keeps. Broken props' pieces, physics
+    /// launches and corpses are in other physics worlds and go on moving. `phys_go` (`Phys_Go_f`) enables the
+    /// collision of the dynent world's bodies again, and by then a stopped prop has none, so it has nothing to do
+    /// here: the prop stays until a force wakes it.
+    pub fn stop(&mut self) {
+        for b in self.props.iter_mut().filter_map(|p| p.body.as_mut()) {
+            if !b.asleep() {
+                b.sleep();
+                self.stopped += 1;
+            }
+        }
+    }
+
+    /// The `props` cgame fact: moving props, props `phys_stop` stopped, and whether the prop the `hitprop` dev hook
+    /// last struck is moving (`-` before it struck one).
+    pub fn fact(&self) -> String {
+        let awake = self
+            .props
+            .iter()
+            .filter(|p| p.body.as_ref().is_some_and(|b| !b.asleep()))
+            .count();
+        let probe = self.probe.map_or("-".to_owned(), |i| {
+            u8::from(self.props[i].body.as_ref().is_some_and(|b| !b.asleep())).to_string()
+        });
+        format!("{awake} {} {probe}", self.stopped)
+    }
+
+    /// The `hitprop` dev hook: a bullet from `eye` strikes the nearest prop that can move, at the middle of its
+    /// bounds, without hurting it. `false` when no prop can move.
+    pub fn strike_nearest(&mut self, eye: Vec3) -> bool {
+        let Some((i, centre)) = self
+            .props
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !p.gone && p.preset.is_some())
+            .map(|(i, p)| {
+                let (lo, hi) = p.bounds();
+                (i, (lo + hi) / 2.0)
+            })
+            .min_by(|a, b| a.1.distance(eye).total_cmp(&b.1.distance(eye)))
+        else {
+            return false;
+        };
+        let dir = (centre - eye).normalize_or(Vec3::Z);
+        let bullet = self.bullet;
+        // `woken` counts props that started to fall, as `event` does: bodies made, not bodies woken again.
+        let new = self.props[i].body.is_none();
+        self.props[i].strike(|b, preset| {
+            b.bullet_impact(centre, dir, BULLET_FORCE, preset.bullet_force_scale, bullet);
+        });
+        self.woken += u64::from(new && self.props[i].body.is_some());
+        self.probe = Some(i);
+        true
     }
 
     /// What the props asked the client to play since the last call.
@@ -1080,7 +1144,63 @@ mod tests {
             pieces: Vec::new(),
             out: Happened::default(),
             bullet: BulletTune::default(),
+            stopped: 0,
+            probe: None,
         }
+    }
+
+    #[test]
+    fn phys_stop_stops_moving_props_only_and_a_later_force_makes_one_fall_and_land_again() {
+        let mut far = prop(Some(preset()));
+        far.origin = Vec3::new(500.0, 0.0, 0.5);
+        let mut props = props_of(vec![prop(Some(preset())), far]);
+        assert_eq!(props.fact(), "0 0 -");
+        let eye = Vec3::new(0.0, -60.0, 15.0);
+        assert!(props.strike_nearest(eye));
+        assert_eq!(props.probe, Some(0), "the nearer prop is struck");
+        assert_eq!(props.fact(), "1 0 1");
+        assert_eq!(props.woken, 1);
+        // A broken prop's piece is in the effects' physics world, which phys_stop leaves alone.
+        let model = crate_model(Some(preset()));
+        let pieces = XModelPieces {
+            name: None,
+            pieces: Arc::from(vec![assets::zone::clipmap::XModelPiece {
+                model: Some(model),
+                offset: [0.0, 0.0, 5.0],
+            }]),
+        };
+        spawn_pieces(
+            &mut props.pieces,
+            &pieces,
+            (Vec3::new(0.0, 0.0, 100.0), [Vec3::X, Vec3::Y, Vec3::Z]),
+            Vec3::new(0.0, 0.0, 100.0),
+            Vec3::X,
+            (&mut 1, BulletTune::default()),
+        );
+        for _ in 0..3 {
+            props.props[0].advance(1.0 / 60.0, &Floor);
+        }
+
+        props.stop();
+        assert_eq!(props.fact(), "0 1 0", "the moving prop stopped");
+        let held = props.props[0].origin();
+        for _ in 0..60 {
+            props.props[0].advance(1.0 / 60.0, &Floor);
+            props.pieces[0].advance(1.0 / 60.0, &Floor);
+        }
+        assert_eq!(props.props[0].origin(), held, "it stays where it stopped");
+        assert!(!props.pieces[0].body.asleep(), "the piece goes on moving");
+        props.stop();
+        assert_eq!(props.fact(), "0 1 0", "nothing was moving");
+
+        assert!(props.strike_nearest(eye));
+        assert_eq!(props.fact(), "1 1 1", "a force wakes it");
+        assert_eq!(props.woken, 1, "the same body falls again");
+        for _ in 0..600 {
+            props.props[0].advance(1.0 / 60.0, &Floor);
+        }
+        let (lo, _) = props.props[0].bounds();
+        assert!(lo.z > -0.5, "it lands on the floor: {lo}");
     }
 
     fn woken(what: Physics, at: Vec3, ps: Vec<Prop>) -> Vec<bool> {

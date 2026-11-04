@@ -1623,7 +1623,14 @@ impl Viewer {
             } else {
                 let f = st.input.frame(dt);
                 let typing = st.shell.as_ref().is_some_and(|s| s.st.console.active());
-                if menu_open || typing {
+                if typing {
+                    // The keys are the console's, but what a typed line handed on runs now (`Cbuf_AddText` from
+                    // the console), as the original's does: `phys_stop`, `drawvehicles 0`, `weapnext`, ...
+                    InputFrame {
+                        pending_commands: f.pending_commands,
+                        ..InputFrame::default()
+                    }
+                } else if menu_open {
                     InputFrame::default()
                 } else {
                     f
@@ -2771,6 +2778,7 @@ const CGAME_FACTS: &[&str] = &[
     "levelfade",
     "eyebob",
     "subtitle",
+    "props",
 ];
 
 /// A state section of named facts, each as its text, `null` where one is unavailable.
@@ -3089,6 +3097,8 @@ fn cgame_value(st: &State, name: &str) -> Option<String> {
         "subtitle" => {
             sh.map(|s| u8::from(s.st.feed.active(crate::hud::SUBTITLE, s.st.live.time)).to_string())
         }
+        // In a match: `<moving props> <props phys_stop stopped> <the hitprop prop moving: 1, 0, or - before one>`.
+        "props" => st.net.as_ref().map(|n| n.props_fact()),
         _ => None,
     }
 }
@@ -3110,7 +3120,7 @@ fn dev_hook(st: &mut State, op: &str, arg: &str) -> Result<(), String> {
             .set_test_laser(arg.trim() != "0"),
         // Counts the frames from here, for the `pace` graphics fact.
         "pacereset" => st.pace = (Instant::now(), 0),
-        "fxdemo" | "bobmark" | "hitflesh" | "shock" | "subtitle" => {
+        "fxdemo" | "bobmark" | "hitflesh" | "shock" | "subtitle" | "hitprop" => {
             let net = st
                 .net
                 .as_mut()
@@ -3123,6 +3133,9 @@ fn dev_hook(st: &mut State, op: &str, arg: &str) -> Result<(), String> {
                 // A bullet of the weapon in hand strikes a player 64 units ahead on the next frame: the flesh
                 // impact effect, or the no-blood one with `cg_blood` off.
                 "hitflesh" => net.inject_flesh_hit(),
+                // A bullet from the eye strikes the nearest prop that can move, now, without hurting it: the
+                // `props` cgame fact then follows that prop.
+                "hitprop" => net.hit_prop()?,
                 // A `shellshock` of the default kind for `arg` ms, as a nearby explosion's.
                 "shock" => net.inject_shock(arg.parse().unwrap_or(5000)),
                 // A started sound's subtitle (`CL_SubtitlePrint`), as the sound engine would hand it on.
@@ -3391,7 +3404,7 @@ fn voice_capture(
 fn open_chat(shell: Option<&mut Shell>, input: &mut Input, f: &InputFrame) {
     let Some(sh) = shell else { return };
     for c in &f.pending_commands {
-        match c.as_str() {
+        match c.trim().to_ascii_lowercase().as_str() {
             "chatmodepublic" => sh.st.console.open_chat(false),
             "chatmodeteam" => sh.st.console.open_chat(true),
             "toggleconsole" => sh.st.console.toggle(),

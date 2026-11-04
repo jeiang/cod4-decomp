@@ -770,6 +770,21 @@ impl NetPlay {
         self.want_flesh_hit = true;
     }
 
+    /// The `props` cgame fact ([`crate::props::Props::fact`]).
+    pub fn props_fact(&self) -> String {
+        self.props.fact()
+    }
+
+    /// A bullet from the eye strikes the nearest prop that can move (for the `hitprop` dev hook).
+    pub fn hit_prop(&mut self) -> Result<(), String> {
+        let eye = self.last_eye.ok_or("no view to strike a prop from")?;
+        if self.props.strike_nearest(eye) {
+            Ok(())
+        } else {
+            Err("no prop on the map can move".into())
+        }
+    }
+
     /// A `shellshock` server command for the player, `ms` of the default shock, as the server sends one for a
     /// nearby explosion (for the `shock` dev hook).
     pub fn inject_shock(&mut self, ms: i32) {
@@ -2405,25 +2420,38 @@ impl NetPlay {
             }
             return;
         }
-        if let Some(arg) = cmd.strip_prefix("actionslot ") {
-            self.action_slot(arg);
-            return;
-        }
-        if let Some(arg) = cmd.strip_prefix("drawvehicles ") {
-            self.draw_vehicles = arg.trim() != "0";
-            return;
-        }
-        if let Some(arg) = cmd.strip_prefix("drawscriptmodels ") {
-            self.draw_script_models = arg.trim() != "0";
-            return;
-        }
-        if let Some(arg) = cmd.strip_prefix("drawprops ") {
-            self.draw_props = arg.trim() != "0";
-            return;
-        }
-        let forward = match cmd {
-            "weapnext" => true,
-            "weapprev" => false,
+        // Command names match without regard to case, as the console's owners do (`Cmd_ExecuteSingleCommand`).
+        let (verb, arg) = cmd
+            .trim()
+            .split_once(char::is_whitespace)
+            .map_or((cmd.trim(), ""), |(v, a)| (v, a.trim()));
+        let lower = verb.to_ascii_lowercase();
+        let forward = match (lower.as_str(), arg) {
+            ("actionslot", a) if !a.is_empty() => {
+                self.action_slot(a);
+                return;
+            }
+            ("drawvehicles", a) if !a.is_empty() => {
+                self.draw_vehicles = a != "0";
+                return;
+            }
+            ("drawscriptmodels", a) if !a.is_empty() => {
+                self.draw_script_models = a != "0";
+                return;
+            }
+            ("drawprops", a) if !a.is_empty() => {
+                self.draw_props = a != "0";
+                return;
+            }
+            // `Phys_Stop_f` and `Phys_Go_f` take no arguments. `phys_go` enables the collision of the dynent world's
+            // bodies, and a stopped prop has none left (`Props::stop`): it stays until a force wakes it, colliding as
+            // before.
+            ("phys_stop", _) => {
+                self.props.stop();
+                return;
+            }
+            ("weapnext", "") => true,
+            ("weapprev", "") => false,
             _ => return,
         };
         let Some(snap) = self.net.latest() else {

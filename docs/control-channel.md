@@ -112,10 +112,12 @@ settings came to in the renderer and on the surface, by name (`aa`, `aa_max`,
 `glow_tweak`, `sun_flare`, `sun_fx_position`, `water`, `texture_cache`, `ui_texture_cache`, `picmip`, `pace`), and `cgame` what the cgame drew last
 frame, by name (`gun`, `hud2d`, `fps`, `fpstext`, `fullbright`, `shock`, `centertime`,
 `heli_camera`, `air_camera`, `brightness`, `film_sample`, `crosshair_alpha`, `window_position`, `levelfade`,
-`eyebob`, `subtitle`). Each fact is text (numbers separated by spaces), `null` where it needs what is
+`eyebob`, `subtitle`, `props`). Each fact is text (numbers separated by spaces), `null` where it needs what is
 not up (a world renderer, a match). Like `report`, both are built only when named (`state gfx`): a bare `state`, a
 `wait` and an `assert` leave them out rather than query the surface and the adapter every frame, so a stage reads
 them. Effect counts are `fx.played.<kind>`.
+`props` is `<moving> <stopped> <struck>`: the map's props that are moving, the props `phys_stop` stopped so far, and
+whether the prop the last `hitprop` struck is moving (`1`, `0`, or `-` before one).
 `texture_cache` (the world's) and `ui_texture_cache` (the menus', up at the front end too) are `<evicted> <loads>`:
 the images `reloadmaterialtextures` dropped from that texture cache, and the image loads it attempted, a dropped
 image counting again when it is next drawn.
@@ -131,7 +133,8 @@ test light in front of the camera, `0` removes it), `pacereset` (counts frames f
 match `laser` (`arg` `1` draws a laser sight from just below the eye along the view each frame, `0` removes it),
 `fxdemo` (`arg` an effect played in front of the player every 1.5 s, `off`), `bobmark` (starts `cgame.eyebob`
 over), `hitflesh` (a bullet of the weapon in hand strikes a player 64 units ahead), `shock` (`arg` ms of the default
-shellshock) and `subtitle` (`arg` a string key shown as a started sound's subtitle).
+shellshock), `subtitle` (`arg` a string key shown as a started sound's subtitle) and `hitprop` (a bullet from the eye
+strikes the nearest prop that can move, without hurting it, for `cgame.props`; an error if none can).
 
 `net.motd` is the server's message of the day as the client holds it (`CS_MOTD`, configstring 10).
 

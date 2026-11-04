@@ -166,6 +166,9 @@ const COMMANDS: &[(&str, Owner)] = {
         ("drawvehicles", Frame),
         ("drawprops", Frame),
         ("drawscriptmodels", Frame),
+        // phys_ode.cpp:372-415 (`Phys_Stop_f`, `Phys_Go_f`), for the map's props (`Props::stop`).
+        ("phys_stop", Frame),
+        ("phys_go", Frame),
         ("say", Server),
         ("say_team", Server),
         ("callvote", Server),
@@ -210,8 +213,6 @@ const MISSING: &[(&str, u32)] = &[
     ("r_smc_flush", 527),
     ("r_smc_stats", 527),
     ("updatehunkusage", 528),
-    ("phys_go", 529),
-    ("phys_stop", 529),
     ("ragdoll_baselerp_bone", 529),
     ("ragdoll_bone", 529),
     ("ragdoll_clear", 529),
@@ -832,6 +833,9 @@ mod tests {
             "1.7 has no recovered command registration"
         );
         assert_eq!(owner("updatehunkusage"), Some(Owner::Missing));
+        assert_eq!(owner("phys_stop"), Some(Owner::Frame));
+        assert_eq!(owner("phys_go"), Some(Owner::Frame));
+        assert_eq!(owner("ragdoll_clear"), Some(Owner::Missing));
         assert_eq!(owner("openscriptmenu"), Some(Owner::Shell));
         assert_eq!(owner("TOGGLEPRONE"), Some(Owner::Input));
         assert_eq!(owner("give"), Some(Owner::Forward));
