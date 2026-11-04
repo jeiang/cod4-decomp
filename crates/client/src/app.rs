@@ -1623,7 +1623,14 @@ impl Viewer {
             } else {
                 let f = st.input.frame(dt);
                 let typing = st.shell.as_ref().is_some_and(|s| s.st.console.active());
-                if menu_open || typing {
+                if typing {
+                    // The keys are the console's, but what a typed line handed on runs now (`Cbuf_AddText` from
+                    // the console), as the original's does: `phys_stop`, `drawvehicles 0`, `weapnext`, ...
+                    InputFrame {
+                        pending_commands: f.pending_commands,
+                        ..InputFrame::default()
+                    }
+                } else if menu_open {
                     InputFrame::default()
                 } else {
                     f
