@@ -990,7 +990,14 @@ impl Ui {
         }
     }
 
-    fn paint_listbox(&self, host: &mut dyn Host, p: &mut Painter, m: usize, i: usize, d: &ItemDef) {
+    fn paint_listbox(
+        &mut self,
+        host: &mut dyn Host,
+        p: &mut Painter,
+        m: usize,
+        i: usize,
+        d: &ItemDef,
+    ) {
         let ItemData::ListBox(Some(l)) = &d.data else {
             return;
         };
