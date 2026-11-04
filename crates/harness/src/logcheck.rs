@@ -179,6 +179,12 @@ pub const ALLOWED: &[Allow] = &[
         max: Some(2), // measured 1 on the Linux host, 2026-10-30,
     },
     Allow {
+        contains: &["cod4e::console", "unknown command", "command=\"devgui\""],
+        reason: "client-commands types `devgui` to assert the normal unknown-command path: no retail 1.7 registration was recovered (#528)",
+        stages: &["client-commands"],
+        max: Some(1), // measured by the client-commands runs recorded in the PR
+    },
+    Allow {
         contains: &["cod4e::console", "unknown command", "+zz_"],
         reason: "client-commands types and binds a `+word` that is no button to check `Unknown command` (#365)",
         stages: &["client-commands"],
