@@ -161,13 +161,6 @@ pub const ALLOWED: &[Allow] = &[
         max: Some(3), // measured 2 on the Linux host, 2026-10-29,
     },
     Allow {
-        contains: &["cod4e::voice", "microphone cannot be opened", "#488"],
-        reason: "client-hud holds +talk and shows the record meter, and client-frontend opens Options > Voice Chat (the \
-                 record meter), on a host with no capture device (#488)",
-        stages: &["client-hud", "client-frontend"],
-        max: Some(6), // measured 1 with +talk alone on the Linux host, 2026-11-01; the meter adds an open (5 s retry)
-    },
-    Allow {
         contains: &["server::server", "unknown client command", "frobnicate"],
         reason: "net-vote sends an unknown client command to check the answer",
         stages: &["net-vote"],
@@ -268,6 +261,26 @@ pub const ALLOWED: &[Allow] = &[
     },
 ];
 
+/// Allowed only when the harness ran without the slot's test microphone (`COD4E_TEST_MIC` unset; `virtual-audio.sh`
+/// sets it on the Linux host): a PC with no capture device cannot open one, so the voice stages note the voice checks
+/// as not run instead of failing on the warning. With the test microphone this warning stays unexpected (#488).
+pub const WITHOUT_TEST_MIC: Allow = Allow {
+    contains: &["cod4e::voice", "microphone cannot be opened"],
+    reason: "client-hud holds +talk and shows the record meter, and client-frontend opens Options > Voice Chat (the record meter), on a host with no capture device and no test microphone (#488)",
+    stages: &["client-hud", "client-frontend"],
+    max: Some(6), // measured 1 with +talk alone on the Linux host, 2026-11-01; the meter adds an open (5 s retry)
+};
+
+/// Whether the harness runs with the slot's test microphone (`COD4E_TEST_MIC`, set by `scripts/virtual-audio.sh`).
+pub fn test_mic_provided() -> bool {
+    std::env::var_os("COD4E_TEST_MIC").is_some()
+}
+
+/// The entry at index `i`: `list`'s, or [`WITHOUT_TEST_MIC`] at `list.len()`.
+fn entry(list: &[Allow], i: usize) -> &Allow {
+    list.get(i).unwrap_or(&WITHOUT_TEST_MIC)
+}
+
 /// A `WARN` or `ERROR` event read from a log.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Event {
@@ -302,27 +315,31 @@ pub fn events(text: &str) -> Vec<Event> {
         .collect()
 }
 
-fn allowed(list: &[Allow], stage: &str, e: &Event) -> Option<usize> {
-    list.iter().position(|a| {
+fn allowed(list: &[Allow], stage: &str, e: &Event, test_mic: bool) -> Option<usize> {
+    let hit = |a: &Allow| {
         (a.stages.is_empty() || a.stages.contains(&stage))
             && a.contains.iter().all(|c| e.text.contains(c))
-    })
+    };
+    list.iter()
+        .position(hit)
+        .or_else(|| (!test_mic && hit(&WITHOUT_TEST_MIC)).then_some(list.len()))
 }
 
 /// What reading a stage's logs found: the events nothing allows, and how often each allowed entry fired.
 #[derive(Default, Debug)]
 pub struct Findings {
     pub unexpected: Vec<Event>,
-    /// Events per allow-list entry (by index).
+    /// Events per allow-list entry (by index; `list.len()` is [`WITHOUT_TEST_MIC`]).
     pub allowed: BTreeMap<usize, usize>,
 }
 
-/// Reads `<dir>/logs/*.log` and sorts its `WARN`/`ERROR` events against `list`.
+/// Reads `<dir>/logs/*.log` and sorts its `WARN`/`ERROR` events against `list` (and [`WITHOUT_TEST_MIC`] when
+/// `test_mic` is false).
 ///
 /// The gate vouches for the logs it read, so a `logs/` that is missing, unreadable or empty, and a log file it cannot
 /// read, are findings of their own: every process of a stage writes its log there, so none means the gate could not
 /// check what the stage did (issue #396).
-pub fn scan(dir: &Path, stage: &str, list: &'static [Allow]) -> Findings {
+pub fn scan(dir: &Path, stage: &str, list: &'static [Allow], test_mic: bool) -> Findings {
     let mut f = Findings::default();
     let err = |text: String| Event { error: true, text };
     let rd = match std::fs::read_dir(dir.join("logs")) {
@@ -366,19 +383,20 @@ pub fn scan(dir: &Path, stage: &str, list: &'static [Allow]) -> Findings {
             )));
         }
         for e in events(&text) {
-            match allowed(list, stage, &e) {
+            match allowed(list, stage, &e, test_mic) {
                 Some(i) => *f.allowed.entry(i).or_default() += 1,
                 None => f.unexpected.push(e),
             }
         }
     }
     for (&i, &n) in &f.allowed {
-        if let Some(max) = list[i].max.filter(|&m| n > m) {
+        let a = entry(list, i);
+        if let Some(max) = a.max.filter(|&m| n > m) {
             f.unexpected.push(Event {
                 error: false,
                 text: format!(
                     "allow-list entry fired {n} times, more than its max {max}: {}",
-                    list[i].reason
+                    a.reason
                 ),
             });
         }
@@ -388,15 +406,34 @@ pub fn scan(dir: &Path, stage: &str, list: &'static [Allow]) -> Findings {
 
 /// Notes what the logs held on `report`, and turns a passed stage with an unexpected event into a failed one.
 pub fn apply(report: &mut StageReport, dir: &Path, stage: &str) {
-    apply_with(report, dir, stage, ALLOWED);
+    apply_env(report, dir, stage, ALLOWED, test_mic_provided());
 }
 
+/// [`apply`] as on the slot host, with the test microphone: the strict list alone.
+#[cfg(test)]
 fn apply_with(report: &mut StageReport, dir: &Path, stage: &str, list: &'static [Allow]) {
-    let f = scan(dir, stage, list);
+    apply_env(report, dir, stage, list, true);
+}
+
+fn apply_env(
+    report: &mut StageReport,
+    dir: &Path,
+    stage: &str,
+    list: &'static [Allow],
+    test_mic: bool,
+) {
+    let f = scan(dir, stage, list, test_mic);
     for (&i, n) in &f.allowed {
-        report
-            .notes
-            .push(format!("allowed log events: {n} x {}", list[i].reason));
+        report.notes.push(format!(
+            "allowed log events: {n} x {}",
+            entry(list, i).reason
+        ));
+    }
+    if !test_mic && f.allowed.contains_key(&list.len()) {
+        report.notes.push(
+            "voice checks not run: no test microphone (COD4E_TEST_MIC unset), so the missing microphone was allowed (#488)"
+                .into(),
+        );
     }
     if f.unexpected.is_empty() {
         return;
@@ -633,5 +670,41 @@ mod tests {
         assert_eq!(r.status, Status::Failed);
         let why = r.reason.unwrap();
         assert!(why.contains("x.log cannot be read"), "{why}");
+    }
+
+    const MIC: &str = "2026-11-03T00:00:00Z  WARN cod4e::voice: microphone cannot be opened error=no input device\n";
+
+    #[test]
+    fn a_missing_microphone_fails_the_voice_stages_with_the_test_mic() {
+        for stage in ["client-hud", "client-frontend"] {
+            let d = stage_dir(MIC);
+            let mut r = StageReport::new(stage, Status::Passed);
+            apply_env(&mut r, d.path(), stage, ALLOWED, true);
+            assert_eq!(r.status, Status::Failed, "{stage}");
+            assert!(r.reason.unwrap().contains("microphone cannot be opened"));
+            assert!(!r.notes.iter().any(|n| n.contains("voice checks not run")));
+        }
+    }
+
+    #[test]
+    fn a_missing_microphone_is_allowed_and_noted_without_the_test_mic() {
+        for stage in ["client-hud", "client-frontend"] {
+            let d = stage_dir(MIC);
+            let mut r = StageReport::new(stage, Status::Passed);
+            apply_env(&mut r, d.path(), stage, ALLOWED, false);
+            assert_eq!(r.status, Status::Passed, "{stage}: {:?}", r.reason);
+            assert!(r.notes.iter().any(|n| n.contains(WITHOUT_TEST_MIC.reason)));
+            assert!(r.notes.iter().any(|n| n.contains("voice checks not run")));
+        }
+        // Other stages still fail on it.
+        let d = stage_dir(MIC);
+        let mut r = StageReport::new("client-ui", Status::Passed);
+        apply_env(&mut r, d.path(), "client-ui", ALLOWED, false);
+        assert_eq!(r.status, Status::Failed);
+        // And past its max it fails the voice stage too.
+        let d = stage_dir(&MIC.repeat(7));
+        let mut r = StageReport::new("client-hud", Status::Passed);
+        apply_env(&mut r, d.path(), "client-hud", ALLOWED, false);
+        assert_eq!(r.status, Status::Failed);
     }
 }

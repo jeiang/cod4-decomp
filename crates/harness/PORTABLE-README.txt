@@ -69,5 +69,7 @@ RUN THE TEST STAGES
    example --allow-skip web-client,web-join,web-download). The stage
    client-dedicated starts cod4e-server and joins it with cod4e, as in the
    steps above. It writes cod4e-run-<date>.zip next to the program.
+   A PC with no microphone still passes client-hud and client-frontend,
+   with a note that the voice checks were not run.
 4. Send that zip. It is scrubbed of your user name, home folder and host name,
    and holds no game files. It stays under 100 MB.

@@ -1309,8 +1309,9 @@ fn play(
         received_voice(c, install, notes)
     })?;
     c.step("record level ownerdraw", |c| {
-        // UI_DrawRecordLevel in the stock voice options; the slot hosts have no microphone (#488), so only the
-        // meter's drawing is checked, not a level.
+        // UI_DrawRecordLevel in the stock voice options. With the slot's test-tone microphone (#488, half-scale sine:
+        // a mean sample size of about 0.32 of full scale) the meter must rise; without one only its drawing is checked.
+        let mic = crate::logcheck::test_mic_provided();
         let before = c.lookup("menu.open")?;
         c.console("openmenu options_voice")?;
         let result = c.until(
@@ -1318,6 +1319,24 @@ fn play(
             secs(10),
             "the voice options never drew the record level (265)",
         );
+        let result = result.and_then(|_| {
+            if !mic {
+                notes.push(
+                    "record level not run: no test microphone (COD4E_TEST_MIC unset; #488)".into(),
+                );
+                return Ok(());
+            }
+            c.until(
+                json!({"hud.report.record_level":{"ge":0.1}}),
+                secs(10),
+                "the record level stayed under 0.1 with the test tone on the microphone",
+            )?;
+            notes.push(format!(
+                "record level {}",
+                c.lookup("hud.report.record_level")?
+            ));
+            Ok(())
+        });
         let result = result.and_then(|_| {
             let shot = c.capture("record-level")?;
             let rect = c.lookup("hud.report.record_meter_rect")?;
@@ -1475,6 +1494,42 @@ fn play(
             secs(10),
             "global chat did not return",
         )?;
+        Ok(())
+    })?;
+    // Holding `+talk` sends the microphone (`CL_VoiceFrame`): on the Linux test host's slots scripts/virtual-audio.sh
+    // gives the client a 440 Hz test-tone microphone (#488) and says so with COD4E_TEST_MIC.
+    c.step("voice capture", |c| {
+        if !crate::logcheck::test_mic_provided() {
+            notes.push(
+                "voice capture not run: no test microphone (COD4E_TEST_MIC unset; #488)".into(),
+            );
+            return Ok(());
+        }
+        let before = stat(c, "voice.sent")?;
+        c.bind("+talk", "down")?;
+        // Half a second of speech: 25 of the 20 ms frames (`net::voice::FRAME_SAMPLES` at 8 kHz).
+        let sent = c.until(
+            json!({"voice.mic_open": true, "voice.sent": {"ge": before + 25}}),
+            secs(10),
+            &format!("holding +talk sent no voice frames from the test microphone (sent before: {before})"),
+        );
+        let held = c.state("voice")?;
+        c.bind("+talk", "up")?;
+        sent.map_err(|e| format!("{e}; voice {held}"))?;
+        // Released, nothing more is sent (the microphone stays open for a while, its audio thrown away).
+        c.pause(Duration::from_millis(300))?;
+        let up = stat(c, "voice.sent")?;
+        c.pause(secs(1))?;
+        let later = stat(c, "voice.sent")?;
+        if later != up {
+            return Err(format!(
+                "voice frames went on after +talk was released ({up} -> {later})"
+            ));
+        }
+        notes.push(format!(
+            "voice: {} frames sent while +talk was held",
+            up - before
+        ));
         Ok(())
     })?;
     // A vote called, bots counted and added through the console.

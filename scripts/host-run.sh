@@ -8,8 +8,9 @@
 # binaries on PATH, writing into out/. A harness run that selects a web-* stage (the default suite does) refuses to
 # start with exit 78, before queueing or building, when scripts/find-chromium.sh finds no Chromium, unless
 # --allow-skip names every such stage.
-# COD4E_SLOT=1..3 selects a harness slot: its own target dir, headless display (scripts/virtual-display.sh) and
-# loopback-only network namespace (scripts/netns.sh). Every run holds the host-wide stage lock shared from its build
+# COD4E_SLOT=1..3 selects a harness slot: its own target dir, headless display (scripts/virtual-display.sh), sound
+# server with a test-tone microphone (scripts/virtual-audio.sh) and loopback-only network namespace
+# (scripts/netns.sh). Every run holds the host-wide stage lock shared from its build
 # on, so up to three slot runs work at once. Without a slot the run is serial: after its build it holds the stage lock
 # exclusively, so timing-gated stages see a quiet host (no stage and no compile beside them), and runs on its own
 # headless display like a slot (the desktop session's state cannot stall its windows). A pending serial run
@@ -365,7 +366,7 @@ fi
 [ $run = 1 ] || exit 0
 
 slot_wrap() {
-  scripts/virtual-display.sh "$COD4E_SLOT" -- scripts/netns.sh -- "$@"
+  scripts/virtual-display.sh "$COD4E_SLOT" -- scripts/virtual-audio.sh "$COD4E_SLOT" -- scripts/netns.sh -- "$@"
 }
 
 if [ $exec_mode = 1 ]; then
@@ -397,6 +398,6 @@ else
   wait_lock -x 8 exclusive "the stage lock (exclusive, for the serial run)"
   set_state running
   # shellcheck disable=SC2086
-  scripts/virtual-display.sh serial -- \
+  scripts/virtual-display.sh serial -- scripts/virtual-audio.sh serial -- \
     env COD4E_NO_PROMPT=1 $chrome "$h" run --out bundles "$@"
 fi

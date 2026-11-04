@@ -95,8 +95,9 @@ now: `live`, `health`, `frag`, `second`, `overlay_alpha`, `unresolved_text`), `h
 and `debug_strings` (the listen server's `line`/`print3d` drawings on screen last frame), ...),
 `hud.live` (`killcam`, `dead`, `intermission`, `following`, `feed`, `players_listed`), `hud.scoreboard_shown`, and
 `net.spawned` with `net.levels` (the levels the client has begun: each map load and each `map_restart`'s new game
-state) and `net.view` (`death_view_frames`, `death_view_range_max`, `dof_frames`), and `look` (`naked`,
-`night`, `goggles`, `night_vision`, `channel`, `blend` with `ms`, `missing`, `applied`, the last goggles `switch`).
+state) and `net.view` (`death_view_frames`, `death_view_range_max`, `dof_frames`), `look` (`naked`,
+`night`, `goggles`, `night_vision`, `channel`, `blend` with `ms`, `missing`, `applied`, the last goggles `switch`), and
+`voice` (`heard` and `sent`: microphone frames read and sent so far, `mic_open`, `note`: why it could not open).
 
 `client.gpu_health` is what the graphics device went through (`device_losses`, `errors`) and `client.load` what the
 last map load measured until the player spawned (`map`, `load_ms`, `to_spawn_ms`, `frames`, `max_frame_gap_ms`,

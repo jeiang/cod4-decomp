@@ -44,6 +44,7 @@ scripts/host-run.sh                     @full
 scripts/remote-linux.sh                 @full
 scripts/netns.sh                        @full
 scripts/virtual-display.sh              @full
+scripts/virtual-audio.sh                @full
 scripts/headless-seat.py                @full
 flake.nix                               @full +timing
 flake.lock                              @full +timing

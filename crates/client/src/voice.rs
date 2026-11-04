@@ -29,9 +29,16 @@ pub struct Talker {
     /// `voice_current_voicelevel`: the mean sample size (16-bit units) of the last block the microphone gave, 0 while
     /// it is closed (`Voice_GetVoiceLevel` reads 0 before voice is up).
     pub current_level: f32,
+    /// Frames read from the microphone so far, sent or thrown away.
+    pub heard: u64,
 }
 
 impl Talker {
+    /// Whether the microphone is open now.
+    pub fn mic_open(&self) -> bool {
+        self.mic.is_some()
+    }
+
     /// Takes what the microphone heard since the last call. The microphone is open while `talking` (the talk key held
     /// with voice on) or while the record meter is shown (`metering`): stock records whenever its UI runs
     /// (`CL_VoiceFrame`, `Voice_GetLocalVoiceData`), which only the meter can see, so this opens it only then. Each
@@ -55,7 +62,7 @@ impl Talker {
                     }
                     Err(e) => {
                         self.failed_at = Some(now);
-                        tracing::warn!(error = %e, "microphone cannot be opened (no capture on the test hosts: #488)");
+                        tracing::warn!(error = %e, "microphone cannot be opened");
                         self.note = Some(format!("voice chat: {e}"));
                     }
                 }
@@ -81,6 +88,7 @@ impl Talker {
                 *i = (s * scale).clamp(-32768.0, 32767.0) as i16;
             }
             self.current_level = mean_size(&ints);
+            self.heard += 1;
             if talking {
                 out.push(self.enc.encode(&ints));
             }
