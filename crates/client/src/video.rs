@@ -630,8 +630,10 @@ impl Converter {
                     for (row, dst) in rgb.chunks_exact_mut(w * 3).enumerate() {
                         let start = (row0 + row) * self.stride;
                         for (pixel, out) in data[start..start + w * 4]
-                            .chunks_exact(4)
-                            .zip(dst.chunks_exact_mut(3))
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .zip(dst.as_chunks_mut::<3>().0.iter_mut())
                         {
                             for c in 0..3 {
                                 out[c] = pixel[channels[c]];
