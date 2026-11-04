@@ -59,6 +59,9 @@ if mode == "check":
 if mode == "master":
     time.sleep(.03)
     open(control, "w").close()
+    if os.environ.get("FAKE_MASTER_HOLD") and os.fork() == 0:
+        time.sleep(5)
+        os._exit(0)
     with open(os.environ["FAKE_RECORD"] + ".masters", "a") as log:
         log.write(control + "\\n")
     sys.exit(0)
@@ -413,6 +416,13 @@ class RemoteLinux(unittest.TestCase):
         counts = [int(n) for n in Path(self.record + ".active.seen").read_text().splitlines()]
         self.assertLessEqual(max(counts), 8)
         self.assertGreater(max(counts), 1)
+
+    def test_background_master_does_not_hold_caller_output_pipes(self):
+        helper = os.path.join(SCRIPTS, "host-ssh.py")
+        r = subprocess.run([sys.executable, helper, "testhost", "true"],
+                           env=self.remote_env(FAKE_MASTER_HOLD="1"),
+                           capture_output=True, text=True, timeout=3)
+        self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_killed_wrapper_keeps_token_until_fd_closing_ssh_exits(self):
         helper = os.path.join(SCRIPTS, "host-ssh.py")

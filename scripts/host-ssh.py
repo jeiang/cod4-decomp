@@ -52,8 +52,13 @@ def run(args):
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if check.returncode:
             socket.unlink(missing_ok=True)
-            started = subprocess.run([*common, "-o", "ControlMaster=yes", "-Nf", host],
-                                     stdin=subprocess.DEVNULL)
+            # The background master must not retain a follower's output pipes:
+            # subprocess capture would otherwise wait for ControlPersist expiry.
+            master_log = root / (key + ".master.log")
+            with open(master_log, "w") as output:
+                started = subprocess.run([*common, "-o", "ControlMaster=yes", "-Nf", host],
+                                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=output)
+            sys.stderr.write(master_log.read_text())
             if started.returncode:
                 return started.returncode
     # Bound concurrent session channels below sshd's default MaxSessions=10.
