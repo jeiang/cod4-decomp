@@ -199,14 +199,16 @@ const COMMANDS: &[(&str, Owner)] = {
 /// The stock multiplayer client commands this build accepts but does not carry out, each with the issue that
 /// tracks it: the warning names both instead of `Unknown command`. Every one is registered by `iw3mp.exe` 1.7
 /// with a handler that is not empty. KisakCOD 1.8 names 1.7 lacks (`gfx_stats`, `devgui_dvar`, `loadzone`,
-/// `statGet`, `listmenus`, `fxTest`, ...) are not here and are unknown, as in 1.7. `error`, `crash`, `freeze`
-/// and `assert` are not here either: the original registers them only with `com_developer`
-/// (common.cpp:1328-1334).
+/// `statGet`, `listmenus`, `fxTest`, ...) are not here and are unknown, as in 1.7. `devgui` is not registered
+/// either: the 1.7 string at 0x6d01fc is used by a binding comparison (0x467eb0) and the console-channel table
+/// (0x726adc, initialized by 0x476fc0), not a recovered `Cmd_AddCommand` (REA
+/// ev_0b90c10346aa52f5a451d88d89de87c67e8eb877508c35b851b52c5ba5f4f83a; absence remains an inference).
+/// `error`, `crash`, `freeze` and `assert` are not here either: the original registers them only with
+/// `com_developer` (common.cpp:1328-1334).
 const MISSING: &[(&str, u32)] = &[
     ("cubemapShot", 527),
     ("r_smc_flush", 527),
     ("r_smc_stats", 527),
-    ("devgui", 528),
     ("updatehunkusage", 528),
     ("phys_go", 529),
     ("phys_stop", 529),
@@ -824,6 +826,12 @@ mod tests {
         assert_eq!(owner("IMAGELIST"), Some(Owner::App));
         assert_eq!(owner("r_smc_flush"), Some(Owner::Missing));
         assert_eq!(owner("gfx_stats"), None, "1.8 only: unknown, as in 1.7");
+        assert_eq!(
+            owner("devgui"),
+            None,
+            "1.7 has no recovered command registration"
+        );
+        assert_eq!(owner("updatehunkusage"), Some(Owner::Missing));
         assert_eq!(owner("openscriptmenu"), Some(Owner::Shell));
         assert_eq!(owner("TOGGLEPRONE"), Some(Owner::Input));
         assert_eq!(owner("give"), Some(Owner::Forward));
@@ -847,5 +855,16 @@ mod tests {
         let e = &events[0];
         assert!(e.level == tracing::Level::WARN && e.field("command") == Some("r_smc_flush"));
         assert_eq!(e.field("issue"), Some("527"));
+    }
+
+    #[test]
+    fn updatehunkusage_keeps_the_tracked_missing_command_warning() {
+        let (_, events) = logging::capture(|| note_missing("updatehunkusage"));
+        assert_eq!(events.len(), 1);
+        let e = &events[0];
+        assert_eq!(e.message, "stock command not implemented");
+        assert_eq!(e.field("command"), Some("updatehunkusage"));
+        assert_eq!(e.field("issue"), Some("528"));
+        assert_eq!(e.level, tracing::Level::WARN);
     }
 }
