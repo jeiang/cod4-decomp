@@ -128,8 +128,6 @@ const PLACE_DISTS: [f32; 10] = [
 ];
 /// How far the bot may stand from the wanted distance to the person, flat: `teleport_near` puts it exactly there.
 const PLACE_SLACK: f64 = 8.0;
-/// How far the bot's height may move between the two samples after a placement: more is a fall.
-const PLACE_STILL_Z: f64 = 4.0;
 
 /// Where `place` left the bot: its server record at a checked spot, or why the attempt is lost.
 enum Placed {
@@ -138,8 +136,8 @@ enum Placed {
 }
 
 /// Whether a placement at `dist` held, from the bot's record before `devtele` (`pre`), its two samples after it (right
-/// away and one poll later) and the person's record: the same life, alive, no health lost, `dist` from the person flat
-/// and no fall between the samples. A spot in a hurt volume kills or hurts the bot; one over a drop moves it down.
+/// away and one poll later) and the person's record: the same life, alive, no health lost and `dist` from the person
+/// flat. A spot in a hurt volume kills or hurts the bot (#584).
 fn spot_verdict(
     dist: f32,
     pre: &Value,
@@ -170,17 +168,11 @@ fn spot_verdict(
             ));
         }
     }
-    let fell = at(samples[0], 2) - at(samples[1], 2);
-    if !within(fell, PLACE_STILL_Z) {
-        return Err(format!(
-            "the bot's height moved {fell:.1} units between the samples"
-        ));
-    }
     Ok(())
 }
 
 /// Puts the living bot about a distance from the person (`devtele … near`, floor and a clear sight line) and checks
-/// the spot with [`spot_verdict`]. A spot with no floor in sight, at the wrong distance or over a drop is passed over
+/// the spot with [`spot_verdict`]. A spot with no floor in sight, or not at the distance asked for, is passed over
 /// for the next of [`PLACE_DISTS`], from `next` on. A spot the bot dies at, or a person who dies meanwhile, loses the
 /// attempt; `next` then points past the deadly spot, so the next attempt from the same person tries another.
 fn place(
@@ -719,7 +711,7 @@ mod tests {
     }
 
     #[test]
-    fn a_placement_holds_only_alive_in_the_same_life_unhurt_at_the_distance_and_still() {
+    fn a_placement_holds_only_alive_in_the_same_life_unhurt_and_at_the_distance() {
         let (pre, person) = (
             bot(true, 3, 100, [0.0, 0.0, 0.0]),
             bot(true, 1, 100, [0.0, 0.0, 64.0]),
@@ -734,10 +726,8 @@ mod tests {
         // Respawned elsewhere between the read and the teleport: alive in another life.
         let other = bot(true, 4, 100, [0.0, -96.0, 32.5]);
         assert!(spot_verdict(-96.0, &pre, [&other, &other], &person).is_err());
-        // Not where the hook was asked to put it, or falling.
+        // Not where the hook was asked to put it.
         let far = bot(true, 3, 100, [0.0, -300.0, 32.5]);
         assert!(spot_verdict(-96.0, &pre, [&far, &far], &person).is_err());
-        let below = bot(true, 3, 100, [0.0, -96.0, 0.5]);
-        assert!(spot_verdict(-96.0, &pre, [&s, &below], &person).is_err());
     }
 }
