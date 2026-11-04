@@ -186,7 +186,7 @@ impl TextureCache {
     /// invalidation, not command acknowledgements.
     pub fn reload_material_textures(&mut self, material: &Material) -> usize {
         let mut evicted = 0;
-        for texture in &material.textures {
+        for texture in material.textures.iter() {
             if texture.semantic == SEMANTIC_WATER_MAP {
                 continue;
             }
