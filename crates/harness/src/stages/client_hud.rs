@@ -290,7 +290,7 @@ fn crosshair_colour_steps(c: &mut Driven, w: &mut Walker) -> Result<(), String> 
             }
             c.pause(Duration::from_millis(250))?;
         }
-        c.ask(json!({"cmd": "exec", "line": "god"})).map(|_| ())
+        c.console("god")
     })?;
     // Held fire keeps an enemy alive under the sights through the fade-in; `god` keeps the player alive.
     w.hold_fire = true;
@@ -1284,6 +1284,23 @@ fn play(
     notes: &mut Vec<String>,
 ) -> Result<(), String> {
     let secs = Duration::from_secs;
+    // Enable the later crosshair diagnostic's stock cheats through the host's real console, not a forced dvar.
+    c.step("devmap cheat context", |c| {
+        c.until(
+            json!({"menu.open": {"contains": TEAM_MENU}}),
+            secs(90),
+            "the initial team menu did not open",
+        )?;
+        c.console("devmap mp_crash")?;
+        let end = Instant::now() + secs(120);
+        while c.ask(json!({"cmd": "server", "op": "cvar", "name": "sv_cheats"}))?["value"] != "1" {
+            if Instant::now() > end {
+                return Err("devmap did not enable cheats on the listen server".into());
+            }
+            c.pause(Duration::from_millis(250))?;
+        }
+        Ok(())
+    })?;
     // The server's team menu, answered with the pointer; then the class menu.
     c.step("team menu", |c| {
         c.until(
@@ -2117,25 +2134,13 @@ fn play(
         super::client_hud_compass::exec(c, "set bot_idle 0")?;
         result
     })?;
-    // The crosshair over a player takes their team's colour (`CG_CalcCrosshairColor`, #414). The colour steps run
-    // with `sv_cheats` on at the listen server (forced, as `devmap` sets it; the client takes it from the
-    // systeminfo) and the player in `god` mode, so the walker's sights stay on players rather than on killcams.
-    let cheats = c.ask(json!({"cmd": "server", "op": "cvar", "name": "sv_cheats"}))?["value"]
-        .as_str()
-        .unwrap_or("0")
-        .to_owned();
-    let force = |c: &mut Driven, v: &str| {
-        c.ask(
-            json!({"cmd": "server", "op": "cvar", "name": "sv_cheats", "value": v, "force": true}),
-        )
-    };
-    force(c, "1")?;
+    // The crosshair over a player takes their team's colour (`CG_CalcCrosshairColor`, #414). The typed devmap
+    // established cheats before the team/class menus; god keeps the walker's sights off killcams.
     let r = crosshair_colours(c, w);
     w.hold_fire = false;
     let restored = c
         .ask(json!({"cmd": "cvar", "name": "cg_crosshairEnemyColor", "value": "1"}))
-        .and_then(|_| c.ask(json!({"cmd": "exec", "line": "god"})))
-        .and_then(|_| force(c, &cheats));
+        .and_then(|_| c.console("god"));
     r?;
     restored?;
     notes.push(format!(

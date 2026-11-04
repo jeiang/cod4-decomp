@@ -53,7 +53,7 @@ fn write_json(path: &Path, v: &serde_json::Value) -> Result<(), String> {
 fn drive(c: &mut Driven, report: &mut StageReport) -> Result<(), String> {
     let secs = Duration::from_secs;
     // `devmap` is the player's own path that enables cheats (sv_cheats is init/write protected).
-    c.ask(json!({"cmd": "exec", "line": "devmap mp_crash"}))?;
+    c.console("devmap mp_crash")?;
     c.until(
         json!({"menu.open.0": "team_marinesopfor"}),
         secs(120),
@@ -78,7 +78,7 @@ fn drive(c: &mut Driven, report: &mut StageReport) -> Result<(), String> {
         "set cg_drawGun 0",
         "set cg_fov 80",
     ] {
-        c.ask(json!({"cmd": "exec", "line": line}))?;
+        c.console(line)?;
     }
     // Stock `_globallogic::matchStartTimer` shows `mpIntro` (film desaturation 1, contrast 1.8) through the prematch
     // and blends to the map's own set over 2 s after it; the intro's contrast crushes the tyre's shadowed corner to
@@ -137,7 +137,7 @@ fn drive(c: &mut Driven, report: &mut StageReport) -> Result<(), String> {
     let earlier = player["teleport"]["after"].as_u64().unwrap_or(0);
     let timeline = c.dir.join("teleport-timeline.json");
     // TeleportPlayer adds one unit after subtracting view height; ask for 323.5 to put the render eye at 324.5.
-    c.ask(json!({"cmd": "exec", "line": "setviewpos 200.8 2267.5 323.5 175.3 0"}))?;
+    c.console("setviewpos 200.8 2267.5 323.5 175.3 0")?;
     // Render frames are not server ticks: judge what the server sends from the garage from the first snapshot built
     // since the move, which flips the player's teleport bit. Two snapshots can land in one frame, so the newest one
     // when the position matches may be the second; the client names the pair the bit flipped between instead.

@@ -90,7 +90,7 @@ fn drive(c: &mut Driven, report: &mut StageReport) -> Result<(), String> {
     // A menu item clicked at the centre of its own rectangle is the item under the pointer. The menu is one the
     // stage opens itself: `togglemenu` opens the menu `g_scriptMainMenu` names, which a listen server does not set
     // here, so the stage names the class menu first and then presses the bind the player presses.
-    c.ask(json!({"cmd": "exec", "line": "set g_scriptMainMenu class"}))?;
+    c.console("set g_scriptMainMenu class")?;
     let open = c.state("menu")?["open"]
         .as_array()
         .is_some_and(|o| !o.is_empty());

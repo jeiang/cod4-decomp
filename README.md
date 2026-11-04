@@ -38,6 +38,10 @@ off unless asked; see `docs/control-channel.md`). The client channel injects the
 document (menu, entities, scoreboard, sounds, and the listen server's authoritative `server` section), waits on it
 and captures the presented frame. The dedicated channel reads and asserts authoritative state and runs server
 console lines. The `control-channel` and `server-control` stages run that acceptance.
+`client-host-console` types its host commands (including `set g_motd`, `map_restart` and `devmap`) through
+backquote, text and Enter, then checks console output and authoritative state, not execution acknowledgements.
+`client-hud` likewise establishes its cheat-enabled diagnostic context with typed `devmap` before clicking
+team/class menus; its two `god` commands use the same console input path, never a forced `sv_cheats` write.
 
 Linux harness displays keep a virtual keyboard and pointer attached to their private headless sway seat
 (`scripts/headless-seat.py`): windows receive focus and can lock the pointer for real mouse-look input even without
@@ -99,9 +103,10 @@ The dedicated serial acceptance target for each recorded mode is at most 5% miss
 Every `--out` run records the camera it drew each frame from in `frames.pose.csv` (same rows as `frames.raw.csv`: `frame,x,y,z,yaw,pitch,roll,cg_fov,fov_x`), and a `--screenshot` run writes the screenshot's camera to `client.json` as `pose` (#431): the map, the frame number, the eye's origin, the angles as the original takes them (degrees, yaw within -180 to 180, pitch positive looking down), `cg_fov` (degrees at 4:3), the horizontal field of view it was widened to (Hor+) and the frame size, plus a ready `setviewpos` line. To draw the same picture on the original: run it at the same width and height, `devmap <map>` (or `sv_cheats 1`), spectate or spawn, `cg_fov <cg_fov>` (an archived dvar, 65 to 80 in 1.7), then the `setviewpos x y z yaw pitch` line; `setviewpos` takes the eye, as it lowers the origin by the player's view height before moving the player (KisakCOD `game_mp/g_cmds_mp.cpp:1084-1127`), so the numbers go in as recorded. `--fly-at <secs>` holds the flythrough at one time of its path, so every frame and the screenshot share that pose. `client-flythrough` checks each run's pose: it names the run's map, its `setviewpos` line carries its eye and angles, `fov_x` is its `cg_fov` widened for the frame size, `frames.pose.csv` has a row per timed frame, the row for the screenshot's frame is the same camera, and the camera moved along the tour.
 
 `client-garage` covers the parked green car and loose tyre at mp_crash's garage (#357). It starts a real match with
-the player's `devmap`, team/class selection, `noclip` and `setviewpos` commands, then compares the issue-pose image
+the player's typed `devmap`, team/class selection, typed `noclip` and `setviewpos` commands, then compares the issue-pose image
 against the same camera with script models and dynamic props separately hidden (`drawscriptmodels 0`,
-`drawprops 0`, diagnostic commands analogous to `drawvehicles`). Both objects must change their own image regions.
+`drawprops 0`, diagnostic commands analogous to `drawvehicles`). These direct renderer-isolation fixtures are not
+stock player commands or proof of model spawning through player input. Both objects must change their own image regions.
 Before the images, the client counts the car in every snapshot from the first one built after the move (the control
 channel's `watch`): at least 40 consecutive snapshots must arrive, and each must carry the car with its model. The
 serverless `--flythrough` is a tour of the static world, not a match: it does not spawn script models or client-side
