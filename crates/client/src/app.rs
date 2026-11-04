@@ -2160,17 +2160,17 @@ impl Viewer {
             }
         }
         if let Some(r) = st.recorder.as_mut() {
-            if (frame.texture.width(), frame.texture.height()) == st.rec_size {
-                r.capture(
-                    &st.gpu.device,
-                    &st.gpu.queue,
-                    &frame.texture,
-                    Duration::from_secs_f32(t),
-                );
-            } else if !st
-                .notes
-                .iter()
-                .any(|n| n.starts_with("window resized during"))
+            r.capture(
+                &st.gpu.device,
+                &st.gpu.queue,
+                &frame.texture,
+                Duration::from_secs_f32(t),
+            );
+            if (frame.texture.width(), frame.texture.height()) != st.rec_size
+                && !st
+                    .notes
+                    .iter()
+                    .any(|n| n.starts_with("window resized during"))
             {
                 st.notes.push(
                     "window resized during the recording; frames at the new size are not recorded"

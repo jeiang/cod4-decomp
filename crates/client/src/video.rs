@@ -206,11 +206,12 @@ impl Recorder {
         texture: &wgpu::Texture,
         elapsed: Duration,
     ) -> bool {
-        assert_eq!(
-            (texture.width(), texture.height()),
-            self.src,
-            "texture size != recorder source size"
-        );
+        if (texture.width(), texture.height()) != self.src {
+            // A resize suspends capture at the original dimensions. Release the old
+            // full-size GPU copy and retire pending maps, just as for device replacement.
+            self.reset_gpu();
+            return false;
+        }
         let slot = (elapsed.as_secs_f64() * self.fps as f64) as u64;
         if self.last_slot.is_some_and(|l| slot <= l) {
             return false;
@@ -937,90 +938,139 @@ mod tests {
         let _lock = crate::GPU_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let Some(gpu) = device() else { return };
         let (d, q) = (&gpu.device, &gpu.queue);
-        let src = (30, 18);
-        let out = (14, 8);
-        for format in [
-            wgpu::TextureFormat::Rgba8Unorm,
-            wgpu::TextureFormat::Rgba8UnormSrgb,
-            wgpu::TextureFormat::Bgra8Unorm,
-            wgpu::TextureFormat::Bgra8UnormSrgb,
-        ] {
-            let bgra = matches!(
-                format,
-                wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
-            );
-            let input = d.create_texture(&wgpu::TextureDescriptor {
+        for src in [(30, 18), (31, 19)] {
+            let out = (14, 8);
+            for format in [
+                wgpu::TextureFormat::Rgba8Unorm,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                wgpu::TextureFormat::Bgra8Unorm,
+                wgpu::TextureFormat::Bgra8UnormSrgb,
+            ] {
+                let bgra = matches!(
+                    format,
+                    wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+                );
+                let input = d.create_texture(&wgpu::TextureDescriptor {
+                    label: None,
+                    size: wgpu::Extent3d {
+                        width: src.0,
+                        height: src.1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                let data: Vec<u8> = (0..src.0 * src.1 * 4)
+                    .map(|i| (i.wrapping_mul(37) % 256) as u8)
+                    .collect();
+                q.write_texture(
+                    input.as_image_copy(),
+                    &data,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(src.0 * 4),
+                        rows_per_image: Some(src.1),
+                    },
+                    input.size(),
+                );
+                let scale = GpuScale::new(d, src, out, format);
+                let buffer = d.create_buffer(&wgpu::BufferDescriptor {
+                    label: None,
+                    size: 256 * out.1 as u64,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                });
+                let mut enc = d.create_command_encoder(&Default::default());
+                scale.draw(&mut enc, &input);
+                enc.copy_texture_to_buffer(
+                    scale.output.as_image_copy(),
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &buffer,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(256),
+                            rows_per_image: Some(out.1),
+                        },
+                    },
+                    scale.output.size(),
+                );
+                q.submit([enc.finish()]);
+                buffer
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, |r| r.unwrap());
+                d.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                let mapped = buffer.slice(..).get_mapped_range().unwrap();
+                let mut expected = vec![0; out.0 as usize * out.1 as usize * 3];
+                Scaler::new(src, out, bgra).scale(&data, src.0 as usize * 4, 0, &mut expected);
+                let channels = if bgra { [2, 1, 0] } else { [0, 1, 2] };
+                for y in 0..out.1 as usize {
+                    for x in 0..out.0 as usize {
+                        for c in 0..3 {
+                            let actual = mapped[y * 256 + x * 4 + channels[c]];
+                            let want = expected[(y * out.0 as usize + x) * 3 + c];
+                            assert!(
+                                actual.abs_diff(want) <= 1,
+                                "{format:?} ({x},{y}) channel {c}: {actual} != {want}"
+                            );
+                        }
+                    }
+                }
+                drop(mapped);
+                buffer.unmap();
+            }
+        }
+    }
+
+    #[test]
+    fn resize_releases_gpu_resources_and_original_size_resumes() {
+        let _lock = crate::GPU_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(gpu) = device() else { return };
+        let (d, q) = (&gpu.device, &gpu.queue);
+        let texture = |size: u32| {
+            d.create_texture(&wgpu::TextureDescriptor {
                 label: None,
                 size: wgpu::Extent3d {
-                    width: src.0,
-                    height: src.1,
+                    width: size,
+                    height: size,
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format,
+                format: wgpu::TextureFormat::Rgba8Unorm,
                 usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
-            });
-            let data: Vec<u8> = (0..src.0 * src.1 * 4)
-                .map(|i| (i.wrapping_mul(37) % 256) as u8)
-                .collect();
-            q.write_texture(
-                input.as_image_copy(),
-                &data,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(src.0 * 4),
-                    rows_per_image: Some(src.1),
-                },
-                input.size(),
-            );
-            let scale = GpuScale::new(d, src, out, format);
-            let buffer = d.create_buffer(&wgpu::BufferDescriptor {
-                label: None,
-                size: 256 * out.1 as u64,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            });
-            let mut enc = d.create_command_encoder(&Default::default());
-            scale.draw(&mut enc, &input);
-            enc.copy_texture_to_buffer(
-                scale.output.as_image_copy(),
-                wgpu::TexelCopyBufferInfo {
-                    buffer: &buffer,
-                    layout: wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(256),
-                        rows_per_image: Some(out.1),
-                    },
-                },
-                scale.output.size(),
-            );
-            q.submit([enc.finish()]);
-            buffer
-                .slice(..)
-                .map_async(wgpu::MapMode::Read, |r| r.unwrap());
-            d.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-            let mapped = buffer.slice(..).get_mapped_range().unwrap();
-            let mut expected = vec![0; out.0 as usize * out.1 as usize * 3];
-            Scaler::new(src, out, bgra).scale(&data, src.0 as usize * 4, 0, &mut expected);
-            let channels = if bgra { [2, 1, 0] } else { [0, 1, 2] };
-            for y in 0..out.1 as usize {
-                for x in 0..out.0 as usize {
-                    for c in 0..3 {
-                        let actual = mapped[y * 256 + x * 4 + channels[c]];
-                        let want = expected[(y * out.0 as usize + x) * 3 + c];
-                        assert!(
-                            actual.abs_diff(want) <= 1,
-                            "{format:?} ({x},{y}) channel {c}: {actual} != {want}"
-                        );
-                    }
-                }
-            }
-            drop(mapped);
-            buffer.unmap();
-        }
+            })
+        };
+        let original = texture(16);
+        let resized = texture(8);
+        let path = std::env::temp_dir().join(format!("cod4e-resize-{}.mp4", std::process::id()));
+        let mut rec = Recorder::start(&path, (16, 16), (16, 16), 30).unwrap();
+        assert!(rec.capture(d, q, &original, Duration::ZERO));
+        assert!(rec.scale.is_some());
+        let pending = rec.pending.len() as u64;
+        assert_eq!(pending, 1);
+        assert!(!rec.capture(d, q, &resized, Duration::from_millis(34)));
+        assert!(rec.scale.is_none());
+        assert!(rec.format.is_none());
+        assert!(rec.pending.is_empty() && rec.ring.is_empty() && rec.free.is_empty());
+        assert_eq!((rec.gpu_reset, rec.dropped), (pending, pending));
+        // Repeated mismatched frames neither allocate GPU resources nor count losses twice.
+        assert!(!rec.capture(d, q, &resized, Duration::from_millis(67)));
+        assert_eq!(rec.gpu_reset, pending);
+        assert!(rec.scale.is_none());
+        assert!(rec.capture(d, q, &original, Duration::from_millis(100)));
+        assert!(rec.scale.is_some());
+        let stats = rec.finish(d).unwrap();
+        assert_eq!(stats.frames, 1);
+        assert_eq!(stats.gpu_reset, 1);
+        assert_eq!(stats.pacing_missed, 2);
+        assert_eq!(stats.frames + stats.dropped + stats.pacing_missed, 4);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
