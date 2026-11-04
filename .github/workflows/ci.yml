@@ -20,6 +20,7 @@ jobs:
       - run: echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
+      - run: python -m unittest web.test_serve
       # `cargo test` compiles every target, so a separate `cargo build` adds nothing.
       - run: cargo test --workspace
       - run: cargo clippy --workspace -- -D warnings

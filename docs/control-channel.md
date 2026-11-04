@@ -178,6 +178,16 @@ that the authoritative client list contains the player and bots. `server-control
 with `--control`, reads its map and cvars, runs `bots 3` at its console, waits for and asserts three authoritative
 bot clients and no script errors, then quits through the channel.
 
+Before its enabled-control player path, default `web-match` opens a separate browser page **without** `control`,
+proves the document and wasm runtime ready through CDP, and POSTs a state request. It asserts HTTP 504, the
+`no reply from the page (is it open with ?control?)` diagnostic and at least 30 seconds elapsed, using the real
+server timeout and a 45-second HTTP read deadline. `web-match/control-disabled.json` records the URL, readiness,
+status, body, elapsed time and browser cleanup, including failure paths. That browser and its process group are
+terminated and its profile removed before the controlled player page starts. Readiness is bounded to 180 seconds
+(each CDP read also has a 30-second deadline), separately from the match's 1,200-second budget.
+`python3 -m unittest web.test_serve` (`python` on Windows CI), also in `just check`, remains an accelerated unit
+check of the HTTP timeout; it does not prove real-browser startup, Linux cleanup or the real 30-second delay.
+
 `web-match` runs the browser client through the same requests over the page transport: menus clicked, movement, a
 mouse delta after a trusted click grants pointer lock, fire, grenade, HUD, sound, scoreboard, killcam, map change,
 Leave Game and the no-hosting popup, each asserted on the state document (see the README's Browser section). It then

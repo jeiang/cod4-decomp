@@ -209,6 +209,29 @@ mod imp {
             Ok(result["result"]["value"].clone())
         }
 
+        /// Independent page/runtime evidence; never sends a dev-control request or mutates gameplay.
+        pub fn page_readiness(&mut self, port: u16) -> Result<Value, String> {
+            self.attach(port)?;
+            let result = self.call(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "({url: location.href, document: document.readyState, frames: window.__cod4?.overlay?.frames ?? 0, error: window.__cod4?.error ?? null})",
+                    "returnByValue": true
+                }),
+                true,
+            )?;
+            if result["exceptionDetails"].is_object() {
+                return Err(format!(
+                    "page readiness threw: {}",
+                    result["exceptionDetails"]
+                ));
+            }
+            result["result"]["value"]
+                .as_object()
+                .ok_or("page readiness returned no object")?;
+            Ok(result["result"]["value"].clone())
+        }
+
         pub fn click(&mut self) -> Result<(), String> {
             self.attach(18092)?;
             for (kind, count) in [("mousePressed", 1), ("mouseReleased", 1)] {
@@ -236,6 +259,9 @@ pub fn pipe(_: &mut Command) -> io::Result<BrowserPipe> {
 
 #[cfg(not(unix))]
 impl BrowserPipe {
+    pub fn page_readiness(&mut self, _: u16) -> Result<Value, String> {
+        Err("page readiness needs Chromium's DevTools pipe on Unix".into())
+    }
     pub fn click(&mut self) -> Result<(), String> {
         Err("a trusted browser click needs Chromium's DevTools pipe on Unix".into())
     }
