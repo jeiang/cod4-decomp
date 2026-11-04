@@ -336,12 +336,44 @@ pub fn blur(c: &Cvars, view_blur: f32) -> f32 {
     view_blur.hypot(tweak)
 }
 
+/// `sunDvarNames` in KisakCOD `gfx_d3d/r_sky.h`: the on-disk `.sun` order.
+pub const SUN_DVARS: [&str; 21] = [
+    "r_sunsprite_shader",
+    "r_sunsprite_size",
+    "r_sunflare_shader",
+    "r_sunflare_min_size",
+    "r_sunflare_min_angle",
+    "r_sunflare_max_size",
+    "r_sunflare_max_angle",
+    "r_sunflare_max_alpha",
+    "r_sunflare_fadein",
+    "r_sunflare_fadeout",
+    "r_sunblind_min_angle",
+    "r_sunblind_max_angle",
+    "r_sunblind_max_darken",
+    "r_sunblind_fadein",
+    "r_sunblind_fadeout",
+    "r_sunglare_min_angle",
+    "r_sunglare_max_angle",
+    "r_sunglare_max_lighten",
+    "r_sunglare_fadein",
+    "r_sunglare_fadeout",
+    "r_sun_fx_position",
+];
+
 /// `R_SetSunFromDvars`: update the effective flare in place while enabled. Stock mutates the world, so switching
 /// the gate off leaves these values in place. Material handles are resolved by the caller only when names change.
 pub fn sun_flare(c: &Cvars, sun: &mut assets::zone::gfxworld::SunFlare) -> bool {
     if !c.bool("sv_cheats") || !c.bool("r_sun_from_dvars") {
         return false;
     }
+    apply_sun_dvars(c, sun);
+    true
+}
+
+/// `R_SetSunFromDvars`, also used by a complete `r_loadsun` independently of the per-frame gate.
+/// The caller resolves sprite/flare material names after applying these values.
+pub fn apply_sun_dvars(c: &Cvars, sun: &mut assets::zone::gfxworld::SunFlare) {
     let f = |name: &str, default: f32, lo: f32, hi: f32| c.f32_or(name, default).clamp(lo, hi);
     let angle = |name, default| f(name, default, 0.0, 90.0).to_radians().cos();
     let ms = |name, default| (f(name, default, 0.0, 60.0) * 1000.0).round() as i32;
@@ -370,7 +402,6 @@ pub fn sun_flare(c: &Cvars, sun: &mut assets::zone::gfxworld::SunFlare) -> bool 
     )
     .0;
     sun.has_valid_data = true;
-    true
 }
 
 impl Gfx {
@@ -862,6 +893,10 @@ mod tests {
         c.set_cheat_state(false);
         assert!(!sun_flare(&c, &mut sun));
         assert_eq!(sun.sprite_size, 32.0);
+        // Loading a complete file calls R_SetSunFromDvars without either per-frame gate.
+        c.set("r_sun_from_dvars", "0", false);
+        apply_sun_dvars(&c, &mut sun);
+        assert_eq!(sun.sprite_size, 48.0);
     }
 
     #[test]

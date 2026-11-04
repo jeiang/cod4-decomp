@@ -205,7 +205,7 @@ impl DecodeFilter for ContentFilter {
         // A client draws effects and impacts; the server links the effects for `loadfx` to look up.
         ty == XAssetType::Fx
             || (self.presentation && ty == XAssetType::ImpactFx)
-            || (self.materials && ty == XAssetType::Material)
+            || (self.materials && matches!(ty, XAssetType::Material | XAssetType::Image))
             // The alias names, for `soundexists`; the samples are presentation data and stay out.
             || ty == XAssetType::Sound
             // The menu names, for `precachemenu`.
@@ -559,6 +559,16 @@ impl Content {
         get(&self.map.sounds, name)
             .or_else(|| get(&self.base.sounds, name))
             .is_some()
+    }
+
+    /// All active image definitions, including images nested in client materials and models.
+    pub fn images(&self) -> impl Iterator<Item = &Arc<assets::zone::gfx::GfxImage>> {
+        self.db.images()
+    }
+
+    /// The active zone-owned material, without manufacturing a default on a miss.
+    pub fn loaded_material(&self, name: &str) -> Option<&Arc<Material>> {
+        self.db.loaded_material(name)
     }
 
     /// Whether a zone defines a material of this name (`DB_FindXAssetHeader` without its default): what

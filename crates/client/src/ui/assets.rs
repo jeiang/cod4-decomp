@@ -5,7 +5,7 @@
 //! `localized_common_mp` at boot, then the running mod's `mod.ff` (`fs_game`); the UI reads its assets from that set,
 //! by lower-case name, a later zone's replacing an earlier one's.
 
-use assets::zone::gfx::Material;
+use assets::zone::gfx::{GfxImage, Material, TextureSource};
 use assets::zone::menu::MenuDef;
 use assets::zone::text::{Font, StringTable};
 use assets::zone::{Asset, XAssetType, Zone};
@@ -38,6 +38,8 @@ pub struct UiAssets {
     pub tables: HashMap<String, Arc<StringTable>>,
     /// Lower-case material name, without a leading `,`.
     pub materials: HashMap<String, Arc<Material>>,
+    /// Active image definitions, shared with their materials rather than copying texture payloads.
+    images: HashMap<String, Arc<GfxImage>>,
     /// Lower-case map name to the game modes its `.arena` file allows (lower case); a map without an entry or with
     /// none listed allows every mode.
     pub arenas: HashMap<String, Vec<String>>,
@@ -72,7 +74,7 @@ impl assets::zone::DecodeFilter for UiFilter {
         use XAssetType::*;
         matches!(
             ty,
-            MenuList | Font | Localize | StringTable | Material | RawFile | TechniqueSet
+            MenuList | Font | Localize | StringTable | Material | Image | RawFile | TechniqueSet
         )
     }
 }
@@ -139,6 +141,7 @@ impl UiAssets {
                     .as_deref()
                     .is_some_and(|n| n.eq_ignore_ascii_case("ui_mp/hud.txt"));
                 for m in l.menus.iter().flatten() {
+                    self.add_menu_materials(m);
                     if let Some(n) = &m.window.name {
                         let k = n.to_ascii_lowercase();
                         if is_hud && !self.hud_order.contains(&k) {
@@ -170,6 +173,7 @@ impl UiAssets {
                 }
             }
             Asset::Material(m) => self.add_material(m),
+            Asset::Image(image) => self.add_image(image),
             Asset::RawFile(r) if r.name.as_deref().is_some_and(|n| n.ends_with(".arena")) => {
                 self.arenas
                     .extend(parse_arenas(&String::from_utf8_lossy(&r.data)));
@@ -179,6 +183,17 @@ impl UiAssets {
     }
 
     fn add_material(&mut self, m: Arc<Material>) {
+        for texture in m.textures.iter() {
+            let image = match &texture.source {
+                TextureSource::Image(image) => image.as_ref(),
+                TextureSource::Water(water) => {
+                    water.as_ref().and_then(|water| water.image.as_ref())
+                }
+            };
+            if let Some(image) = image {
+                self.add_image(image.clone());
+            }
+        }
         let Some(n) = &m.name else { return };
         let k = n.trim_start_matches(',').to_ascii_lowercase();
         // A name with a leading comma marks a copy of a material another zone owns; keep the owner's.
@@ -192,15 +207,34 @@ impl UiAssets {
     pub fn note_menu_materials(&mut self) {
         let menus: Vec<Arc<MenuDef>> = self.menus.values().cloned().collect();
         for m in menus {
-            if let Some(b) = &m.window.background {
-                self.add_material(b.clone());
-            }
-            for it in &m.items {
-                if let Some(b) = &it.window.background {
-                    self.add_material(b.clone());
-                }
+            self.add_menu_materials(&m);
+        }
+    }
+
+    fn add_menu_materials(&mut self, menu: &MenuDef) {
+        if let Some(background) = &menu.window.background {
+            self.add_material(background.clone());
+        }
+        for item in &menu.items {
+            if let Some(background) = &item.window.background {
+                self.add_material(background.clone());
             }
         }
+    }
+
+    fn add_image(&mut self, image: Arc<GfxImage>) {
+        let Some(name) = image.name.as_deref() else {
+            return;
+        };
+        let key = name.trim_start_matches(',').to_ascii_lowercase();
+        if !name.starts_with(',') || !self.images.contains_key(&key) {
+            self.images.insert(key, image);
+        }
+    }
+
+    /// Standalone and nested material images in the loaded UI zones.
+    pub fn images(&self) -> impl Iterator<Item = &Arc<GfxImage>> {
+        self.images.values()
     }
 
     pub fn material(&self, name: &str) -> Option<&Arc<Material>> {
@@ -242,6 +276,7 @@ impl UiAssets {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assets::zone::DecodeFilter as _;
 
     fn install() -> Option<Install> {
         let root =
@@ -273,6 +308,19 @@ mod tests {
         assert!(a.translate("@MENU_JOIN_GAME").is_some());
         assert!(a.table("mp/mapstable.csv").is_some());
         assert!(a.material("white").is_some(), "white");
+        assert!(UiFilter.keep(XAssetType::Image));
+        assert!(a.images().next().is_some());
+        for material in a.materials.values() {
+            for texture in material.textures.iter() {
+                if let TextureSource::Image(Some(image)) = &texture.source {
+                    let name = image.name.as_deref().unwrap().trim_start_matches(',');
+                    assert!(
+                        a.images.contains_key(&name.to_ascii_lowercase()),
+                        "nested image {name}"
+                    );
+                }
+            }
+        }
     }
 
     /// The d-pad and grenade icons are materials only the weapons define; the UI must be able to draw them.

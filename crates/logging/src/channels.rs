@@ -59,6 +59,12 @@ impl Channels {
         channel == 0 || (channel < NAMES.len() && self.shown & (1 << channel) != 0)
     }
 
+    /// `Con_IsChannelVisible` for a message printed by `Com_PrintError` or `Com_PrintWarning`: its own channel, or
+    /// the `error` channel when that is shown (KisakCOD con_channels.cpp:100-103).
+    pub fn visible_error(&self, channel: usize) -> bool {
+        self.visible(channel) || self.visible(ERROR)
+    }
+
     /// `Con_FilterShowChannel`: shows or hides every channel `pattern` matches (`*` and `?`, any case); a line per
     /// channel that changed, or `No channels added or hidden`.
     fn filter(&mut self, pattern: &str, show: bool) -> Vec<String> {
@@ -140,6 +146,15 @@ pub fn cmd_list<'a>(names: impl IntoIterator<Item = &'a str>, filter: Option<&st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_error_or_warning_shows_on_its_channel_or_the_error_channel() {
+        let mut c = Channels::default();
+        c.command("con_hidechannel", &["system"]);
+        assert!(!c.visible(16) && c.visible_error(16));
+        c.command("con_hidechannel", &["error"]);
+        assert!(!c.visible_error(16) && c.visible_error(8));
+    }
 
     #[test]
     fn every_channel_starts_visible_and_hiding_is_by_pattern() {

@@ -1243,6 +1243,18 @@ impl NetPlay {
         }
     }
 
+    /// Actual active image assets, independent of which textures the GPU has uploaded.
+    pub fn images(&self) -> impl Iterator<Item = &std::sync::Arc<assets::zone::gfx::GfxImage>> {
+        self.lib.content.images()
+    }
+
+    pub fn loaded_material(
+        &self,
+        name: &str,
+    ) -> Option<&std::sync::Arc<assets::zone::gfx::Material>> {
+        self.lib.content.loaded_material(name)
+    }
+
     /// Resolves a material from this match's linked presentation assets, not the UI registry.
     pub fn material(
         &mut self,

@@ -23,8 +23,14 @@
 //! (`give`) is shown typed and bound, not forwarded; `connect <server> reconnect` joins from the front end (an
 //! address nothing answers on opens the error popup) and a plain `connect` in a match is refused with the stock
 //! `Already connected to a server. Disconnect first`, opening nothing. Launched with `snd_levelFadeTime 100`, the
-//! initial level's sound fades in from silence over that non-default time (#407). Needs a display and the install;
-//! skips without.
+//! initial level's sound fades in from silence over that non-default time (#407). The renderer commands of #527:
+//! `imagelist` lists the loaded images with their totals and `imagelist all` warns with #581, as its generated
+//! images are not listed; `reloadmaterialtextures` prints its usage, refuses a material nothing loaded and reloads
+//! a loaded one's images in the menus' texture cache (evicted, then loaded again); in the match `r_savesun` and
+//! `r_loadsun` print their usage, `r_loadsun` is refused without cheats, a name leaving the user folder is refused
+//! and, with `sv_cheats` forced on at the server, a saved sun file loads back into the dvars and the world's flare,
+//! a missing one warns and an incomplete one sets the dvars it names but leaves the world's flare. Needs a display
+//! and the install; skips without.
 use super::client_custom_class::{HOME, localized, session_report, until_top};
 use super::client_flythrough::locate_client;
 use super::client_frontend::cvar_is;
@@ -36,6 +42,144 @@ use serde_json::{Value, json};
 use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
+
+/// The menu cache's `gfx.ui_texture_cache` fact: images evicted by reloads and image loads attempted.
+fn ui_texture_cache(c: &mut Driven) -> Result<(u64, u64), String> {
+    let v = c.lookup("gfx.ui_texture_cache")?;
+    let text = v.as_str().unwrap_or_default();
+    let mut n = text.split_whitespace().map(str::parse::<u64>);
+    match (n.next(), n.next(), n.next()) {
+        (Some(Ok(evicted)), Some(Ok(loads)), None) => Ok((evicted, loads)),
+        _ => Err(format!("gfx.ui_texture_cache is {v}, not two counts")),
+    }
+}
+
+/// The world flare's maximum alpha, the fifth number of the `gfx.sun_flare` fact.
+fn flare_alpha(c: &mut Driven) -> Result<f64, String> {
+    let v = c.lookup("gfx.sun_flare")?;
+    v.as_str()
+        .and_then(|s| s.split_whitespace().nth(4))
+        .and_then(|a| a.parse().ok())
+        .ok_or_else(|| format!("gfx.sun_flare is {v}, without a maximum alpha"))
+}
+
+/// Forces `sv_cheats` at the listen server, as `devmap` sets it, and waits for the client to take it from the
+/// systeminfo.
+fn cheats(c: &mut Driven, value: &str) -> Result<(), String> {
+    c.ask(
+        json!({"cmd": "server", "op": "cvar", "name": "sv_cheats", "value": value, "force": true}),
+    )?;
+    let end = Instant::now() + Duration::from_secs(15);
+    while c.ask(json!({"cmd": "cvar", "name": "sv_cheats"}))?["value"] != value {
+        if Instant::now() > end {
+            return Err(format!(
+                "the client never took sv_cheats {value} from the server"
+            ));
+        }
+        c.pause(Duration::from_millis(250))?;
+    }
+    Ok(())
+}
+
+/// `r_savesun` and `r_loadsun` in the match: usage, the cheat refusal, a name leaving the user folder refused, then
+/// with cheats on a save and load round trip checked in the dvar and the world's flare, a missing file and an
+/// incomplete one (`stagepart`, written by [`run`]), which sets the dvars it names but must not reach the world.
+fn sun_files(c: &mut Driven, config: &Path) -> Result<(), String> {
+    typed(c, "r_savesun", "USAGE: r_savesun <sunname>")?;
+    typed(c, "r_loadsun", "USAGE: r_loadsun <sunname>")?;
+    typed(
+        c,
+        "r_loadsun stagesun",
+        "You must have cheats enabled to use r_loadsun",
+    )?;
+    // `FS_CreatePath` refuses the write (naming the OS path) and `FS_WriteFile` says it failed, both on `files`.
+    typed(
+        c,
+        "r_savesun ../zz_escape",
+        "Failed to open sun/../zz_escape.sun",
+    )?;
+    let refusal = lines(c)?.into_iter().rev().find(|l| {
+        l.starts_with("^3WARNING: refusing to create relative path \"")
+            && l.ends_with("sun/../zz_escape.sun\"")
+    });
+    if refusal.is_none() {
+        return Err(
+            "r_savesun ../zz_escape printed no stock `refusing to create relative path` warning"
+                .into(),
+        );
+    }
+    if config.join("zz_escape.sun").exists() {
+        return Err("r_savesun ../zz_escape wrote outside the sun folder".into());
+    }
+    cheats(c, "1")?;
+    // `FS_SanitizeFilename` refuses a `../`, so the read fails with the plain stock line.
+    let escape = "WARNING: couldn't load sun file 'sun/../zz_escape.sun'";
+    typed(c, "r_loadsun ../zz_escape", escape)?;
+    if let Some(l) = lines(c)?.into_iter().rev().find(|l| l.contains(escape))
+        && !l.ends_with(escape)
+    {
+        return Err(format!(
+            "r_loadsun ../zz_escape added to the stock line: {l:?}"
+        ));
+    }
+    c.console("set r_sunflare_max_alpha 0.37")?;
+    // A leading separator stays inside `sun/`: stock writes `sun//stagesun.sun`, the file `r_loadsun stagesun` reads.
+    c.console("r_savesun /stagesun")?;
+    c.pause(Duration::from_millis(500))?;
+    let saved = config.join("sun/stagesun.sun");
+    let text = std::fs::read_to_string(&saved)
+        .map_err(|e| format!("r_savesun left no {}: {e}", saved.display()))?;
+    if text.lines().count() != 21 || !text.lines().any(|l| l == "r_sunflare_max_alpha \"0.37\"") {
+        return Err(format!(
+            "{} is not the 21 sun dvars with the set alpha: {text:?}",
+            saved.display()
+        ));
+    }
+    let map = flare_alpha(c)?;
+    if (map - 0.37).abs() < 1e-4 {
+        return Err("the map's flare already has the alpha the file sets".into());
+    }
+    c.console("set r_sunflare_max_alpha 0.81")?;
+    c.console("r_loadsun stagesun")?;
+    cvar_is(c, "r_sunflare_max_alpha", "0.37")?;
+    let end = Instant::now() + Duration::from_secs(2);
+    loop {
+        let alpha = flare_alpha(c)?;
+        if (alpha - 0.37).abs() < 1e-4 {
+            break;
+        }
+        if Instant::now() > end {
+            return Err(format!(
+                "r_loadsun did not set the world's flare alpha to 0.37 (it is {alpha}, the map's {map})"
+            ));
+        }
+        c.pause(Duration::from_millis(100))?;
+    }
+    typed(
+        c,
+        "r_loadsun zz_nosun",
+        "WARNING: couldn't load sun file 'sun/zz_nosun.sun'",
+    )?;
+    typed(
+        c,
+        "r_loadsun stagepart",
+        "^1ERROR: the following dvars were not specified in file 'sun/stagepart.sun'",
+    )?;
+    // `Com_PrintError` lines show on the `error` channel while `system` is hidden; each missing dvar is one.
+    c.console("con_showchannel error")?;
+    c.console("con_hidechannel system")?;
+    typed(c, "r_loadsun stagepart", "^1Error:   r_sunsprite_shader")?;
+    c.console("con_showchannel system")?;
+    cvar_is(c, "r_sunflare_max_alpha", "0.9")?;
+    c.frames(5)?;
+    let alpha = flare_alpha(c)?;
+    if (alpha - 0.37).abs() >= 1e-4 {
+        return Err(format!(
+            "the incomplete sun file reached the world's flare: alpha {alpha}, not 0.37"
+        ));
+    }
+    cheats(c, "0")
+}
 
 const NAME: &str = "client-commands";
 const DEMO: &str = "stagedemo";
@@ -221,7 +365,7 @@ fn front_end(c: &mut Driven) -> Result<(), String> {
     c.step("the error channel hidden and shown", |c| {
         typed(c, "con_hidechannel error", "Hiding channel: error")?;
         let before = lines(c)?;
-        c.console("imagelist")?;
+        c.console("r_smc_flush")?;
         c.pause(Duration::from_secs(1))?;
         let after = lines(c)?;
         if let Some(l) = fresh(&before, &after)
@@ -232,6 +376,64 @@ fn front_end(c: &mut Driven) -> Result<(), String> {
         }
         typed(c, "con_showchannel error", "Adding channel: error")?;
         typed(c, "r_smc_stats", "not implemented")
+    })?;
+    c.step("the renderer commands at the front end", |c| {
+        let reply = |c: &mut Driven, line: &str, text: &str| {
+            let line = line.to_owned();
+            says(c, move |c| c.console(&line), text, true, 5)
+        };
+        reply(c, "imagelist", " total images")?;
+        let after = lines(c)?;
+        let total = after
+            .iter()
+            .rev()
+            .find_map(|l| l.strip_suffix(" total images"))
+            .and_then(|n| n.trim().parse::<u32>().ok());
+        if !total.is_some_and(|n| n > 0) {
+            return Err(format!("imagelist counted no images: {total:?}"));
+        }
+        if !after
+            .last()
+            .is_some_and(|l| l.starts_with("Related commands: meminfo, imagelist"))
+        {
+            return Err(format!(
+                "imagelist did not end with its related commands: {:?}",
+                after.last()
+            ));
+        }
+        reply(c, "imagelist all", "issue=581")?;
+        reply(
+            c,
+            "reloadmaterialtextures",
+            "Usage: reloadmaterialtextures <materialname>",
+        )?;
+        reply(
+            c,
+            "reloadmaterialtextures zz_nomaterial",
+            "ReloadMaterialTextures: Material 'zz_nomaterial' is not currently loaded.",
+        )?;
+        // The menus' pointer, which every front-end frame draws from the UI zone's `ui_cursor` material (the
+        // filled rectangles of `white` take no image from the cache).
+        let (evicted, loads) = ui_texture_cache(c)?;
+        c.console("reloadmaterialtextures ui_cursor")?;
+        let end = Instant::now() + Duration::from_secs(5);
+        loop {
+            let now = ui_texture_cache(c)?;
+            if now.0 > evicted && now.1 > loads {
+                break;
+            }
+            if Instant::now() > end {
+                return Err(format!(
+                    "reloadmaterialtextures ui_cursor did not evict and load again the menus' images: {:?} before, {now:?} after",
+                    (evicted, loads)
+                ));
+            }
+            c.pause(Duration::from_millis(100))?;
+        }
+        if let Some(l) = lines(c)?.iter().find(|l| l.contains("Material 'ui_cursor'")) {
+            return Err(format!("reloadmaterialtextures ui_cursor was refused: {l:?}"));
+        }
+        Ok(())
     })?;
     c.step("the stock commands of #479 at the front end", |c| {
         let reply = |c: &mut Driven, line: &str, text: &str| {
@@ -291,7 +493,7 @@ fn front_end(c: &mut Driven) -> Result<(), String> {
 }
 
 /// The commands in the match: the player's binds and keys, the console, the menus, and the server's answers.
-fn in_match(c: &mut Driven, custom3: &str) -> Result<(), String> {
+fn in_match(c: &mut Driven, config: &Path, custom3: &str) -> Result<(), String> {
     c.step("start a server and join the Marines", |c| {
         c.console("set ui_netGametypeName war")?;
         cvar_is(c, "ui_netGametypeName", "war")?;
@@ -362,6 +564,7 @@ fn in_match(c: &mut Driven, custom3: &str) -> Result<(), String> {
         typed(c, "stoprecord", "Stopped demo.")?;
         typed(c, "stoprecord", "Not recording a demo.")
     })?;
+    c.step("r_savesun and r_loadsun", |c| sun_files(c, config))?;
     c.step("words the server answers", |c| {
         says(
             c,
@@ -554,10 +757,10 @@ fn in_match(c: &mut Driven, custom3: &str) -> Result<(), String> {
     })
 }
 
-fn drive(c: &mut Driven, active: &Path, custom3: &str) -> Result<(), String> {
+fn drive(c: &mut Driven, active: &Path, config: &Path, custom3: &str) -> Result<(), String> {
     writeconfig(c, active)?;
     front_end(c)?;
-    in_match(c, custom3)
+    in_match(c, config, custom3)
 }
 
 pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
@@ -588,6 +791,15 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             Err(e) => return Err(e),
         }
     }
+    // The saved sun file is the stage's to write; the incomplete one names one of the 21 sun dvars only.
+    let sun = config.join("sun");
+    std::fs::create_dir_all(&sun)?;
+    match std::fs::remove_file(sun.join("stagesun.sun")) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    std::fs::write(sun.join("stagepart.sun"), "r_sunflare_max_alpha \"0.9\"\n")?;
     let mut out = StageReport::new(NAME, Status::Passed);
     let mut c = match Driven::start(
         &client,
@@ -598,7 +810,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         Ok(c) => c,
         Err(e) => return Ok(StageReport::new(NAME, Status::Failed).with_reason(e)),
     };
-    let played = drive(&mut c, &active, &custom3);
+    let played = drive(&mut c, &active, &config, &custom3);
     let report = session_report(&mut c, "control-run.json");
     let status = c.finish(Duration::from_secs(30));
     out.files.push("control-run.json".into());
@@ -669,7 +881,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             out.reason = Some(w);
         }
         None => out.notes.push(format!(
-            "Pause refused, centerview levelled the view, record wrote {demo_len} bytes, the vote and the quick message reached the server, setFromLocString and cmd ran; writeconfig exported both named configs with the archived cvar and bind, left the active profile unchanged until its normal save, and rejected invalid arity"
+            "Pause refused, centerview levelled the view, record wrote {demo_len} bytes, the vote and the quick message reached the server, setFromLocString and cmd ran; writeconfig exported both named configs with the archived cvar and bind, left the active profile unchanged until its normal save, and rejected invalid arity; imagelist listed the images, reloadmaterialtextures reloaded the menus' pointer, and a saved sun file loaded back into the world's flare"
         )),
     }
     Ok(out)

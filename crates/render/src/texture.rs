@@ -4,7 +4,7 @@
 use crate::gpu::Gpu;
 use assets::iwi::{self, Texels};
 use assets::vfs::Vfs;
-use assets::zone::gfx::GfxImage;
+use assets::zone::gfx::{GfxImage, Material, TextureSource};
 use sm3::SamplerDim;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -111,12 +111,20 @@ fn mips_to_skip(used: u64, budget: u64, dims: impl Iterator<Item = (usize, usize
     skip.min(last)
 }
 
+struct CachedTexture {
+    tex: Option<Arc<Tex>>,
+    decoded: u64,
+}
+
 pub struct TextureCache {
     vfs: Option<Vfs>,
     /// Decoded RGBA8 bytes uploaded so far (only counted when the GPU has no BC textures).
     decoded: u64,
     decoded_budget: u64,
-    cache: HashMap<String, Option<Arc<Tex>>>,
+    cache: HashMap<String, CachedTexture>,
+    generation: u64,
+    /// Image loads attempted, including reloads after eviction (cache hits do not count).
+    loads: u64,
     placeholders: HashMap<(SamplerDim, [u8; 4]), Arc<Tex>>,
     picmip: usize,
     picmip_bump: usize,
@@ -132,6 +140,8 @@ impl TextureCache {
             decoded: 0,
             decoded_budget: DECODED_BUDGET,
             cache: HashMap::new(),
+            generation: 0,
+            loads: 0,
             placeholders: HashMap::new(),
             picmip,
             picmip_bump: picmip,
@@ -151,6 +161,43 @@ impl TextureCache {
     /// The levels dropped from colour, normal and specular maps.
     pub fn picmips(&self) -> [usize; 3] {
         [self.picmip, self.picmip_bump, self.picmip_spec]
+    }
+
+    /// Number of image-cache entries actually evicted, including cached load failures.
+    /// Bind-group owners use this to discard references to textures that have been replaced.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Forget a successful or failed image load, including its decoded-memory budget charge.
+    pub fn evict(&mut self, name: &str) -> bool {
+        let name = name.trim_start_matches(',');
+        let Some(entry) = self.cache.remove(name) else {
+            return false;
+        };
+        self.decoded -= entry.decoded;
+        self.failed.retain(|failed| failed != name);
+        self.generation += 1;
+        true
+    }
+
+    /// Follows KisakCOD `gfx_d3d/r_material.cpp:974-1003`: skip semantic 11 (water).
+    /// Shared image names are evicted once, so the result and generation measure real
+    /// invalidation, not command acknowledgements.
+    pub fn reload_material_textures(&mut self, material: &Material) -> usize {
+        let mut evicted = 0;
+        for texture in material.textures.iter() {
+            if texture.semantic == SEMANTIC_WATER_MAP {
+                continue;
+            }
+            if let TextureSource::Image(Some(image)) = &texture.source
+                && let Some(name) = &image.name
+                && self.evict(name)
+            {
+                evicted += 1;
+            }
+        }
+        evicted
     }
 
     /// How many mip levels the image drops: the setting of its kind of map (`Image_PicmipForSemantic`), none for
@@ -191,8 +238,10 @@ impl TextureCache {
     pub fn image(&mut self, gpu: &Gpu, img: &GfxImage) -> Option<Arc<Tex>> {
         let name = img.name.as_deref()?.trim_start_matches(',');
         if let Some(t) = self.cache.get(name) {
-            return t.clone();
+            return t.tex.clone();
         }
+        let decoded_before = self.decoded;
+        self.loads += 1;
         let tex = match &img.load_def {
             Some(d) if !d.data.is_empty() => load_inline(gpu, img),
             _ => {
@@ -205,7 +254,13 @@ impl TextureCache {
             tracing::debug!(image = name, "image unavailable");
             self.failed.push(name.to_owned());
         }
-        self.cache.insert(name.to_owned(), tex.clone());
+        self.cache.insert(
+            name.to_owned(),
+            CachedTexture {
+                tex: tex.clone(),
+                decoded: self.decoded - decoded_before,
+            },
+        );
         tex
     }
 
@@ -213,14 +268,22 @@ impl TextureCache {
     pub fn named(&mut self, gpu: &Gpu, name: &str) -> Option<Arc<Tex>> {
         let name = name.trim_start_matches(',');
         if let Some(t) = self.cache.get(name) {
-            return t.clone();
+            return t.tex.clone();
         }
+        let decoded_before = self.decoded;
+        self.loads += 1;
         let tex = self.load_iwi(gpu, name, self.picmip).map(Arc::new);
         if tex.is_none() {
             tracing::debug!(image = name, "image unavailable");
             self.failed.push(name.to_owned());
         }
-        self.cache.insert(name.to_owned(), tex.clone());
+        self.cache.insert(
+            name.to_owned(),
+            CachedTexture {
+                tex: tex.clone(),
+                decoded: self.decoded - decoded_before,
+            },
+        );
         tex
     }
 
@@ -233,6 +296,11 @@ impl TextureCache {
     /// Decoded RGBA8 bytes held so far on a GPU without BC textures.
     pub fn decoded_bytes(&self) -> u64 {
         self.decoded
+    }
+
+    /// Image loads attempted so far; a reloaded image counts again when it is next used.
+    pub fn loads(&self) -> u64 {
+        self.loads
     }
 
     fn load_iwi(&mut self, gpu: &Gpu, name: &str, picmip: usize) -> Option<Tex> {
@@ -350,6 +418,99 @@ fn load_inline(gpu: &Gpu, img: &GfxImage) -> Option<Tex> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn eviction_forgets_failures_and_restores_the_decoded_budget_once() {
+        let mut cache = TextureCache::new(None, 0);
+        cache.cache.insert(
+            "image".into(),
+            CachedTexture {
+                tex: None,
+                decoded: 64,
+            },
+        );
+        cache.decoded = 96;
+        cache.failed = vec!["image".into(), "other".into()];
+        assert!(cache.evict(",image"));
+        assert_eq!(cache.decoded_bytes(), 32);
+        assert_eq!(cache.failed, ["other"]);
+        assert_eq!(cache.generation(), 1);
+        assert!(!cache.evict("image"));
+        assert_eq!(cache.generation(), 1);
+    }
+
+    #[test]
+    fn material_reload_skips_water_and_counts_each_cached_image_only_once() {
+        use assets::zone::gfx::TextureDef;
+
+        let image = |name: &str| {
+            Arc::new(GfxImage {
+                map_type: 3,
+                picmip: [0; 2],
+                no_picmip: false,
+                semantic: 2,
+                track: 0,
+                card_memory: [0; 2],
+                width: 1,
+                height: 1,
+                depth: 1,
+                category: 0,
+                delay_load_pixels: false,
+                name: Some(name.into()),
+                load_def: None,
+            })
+        };
+        let texture = |name: &str, semantic| TextureDef {
+            name_hash: 0,
+            name_start: 0,
+            name_end: 0,
+            sampler_state: 0,
+            semantic,
+            source: TextureSource::Image(Some(image(name))),
+        };
+        let material = Material {
+            name: Some("loaded".into()),
+            game_flags: 0,
+            sort_key: 0,
+            atlas_rows: 1,
+            atlas_columns: 1,
+            draw_surf: 0,
+            surface_type_bits: 0,
+            hash_index: 0,
+            state_bits_entry: [0; 34],
+            state_flags: 0,
+            camera_region: 0,
+            technique_set: None,
+            textures: vec![
+                texture(",shared", 2),
+                texture("shared", 5),
+                texture("water", SEMANTIC_WATER_MAP),
+                texture("uncached", 2),
+            ]
+            .into(),
+            constants: Arc::from([]),
+            state_bits: Arc::from([]),
+        };
+        let mut cache = TextureCache::new(None, 0);
+        for name in ["shared", "water", "unrelated"] {
+            cache.cache.insert(
+                name.into(),
+                CachedTexture {
+                    tex: None,
+                    decoded: 0,
+                },
+            );
+            cache.failed.push(name.into());
+        }
+        assert_eq!(cache.reload_material_textures(&material), 1);
+        assert_eq!(cache.generation(), 1);
+        assert!(!cache.cache.contains_key("shared"));
+        assert!(cache.cache.contains_key("water"));
+        assert!(cache.cache.contains_key("unrelated"));
+        assert_eq!(cache.failed, ["water", "unrelated"]);
+        assert_eq!(cache.reload_material_textures(&material), 0);
+        assert_eq!(cache.generation(), 1);
+    }
 
     #[test]
     fn colour_normal_and_specular_maps_drop_their_own_number_of_levels() {

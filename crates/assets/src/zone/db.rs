@@ -117,6 +117,22 @@ pub fn is_stub(name: &str) -> bool {
 }
 
 impl Db {
+    /// Currently active image definitions, once per name; shadowed zone definitions stay private.
+    pub fn images(&self) -> impl Iterator<Item = &Arc<GfxImage>> {
+        self.images
+            .values()
+            .filter_map(|chain| chain.last().map(|(_, image)| image))
+    }
+
+    /// The active material owned by a loaded zone, excluding synthesized default entries.
+    pub fn loaded_material(&self, name: &str) -> Option<&Arc<Material>> {
+        self.materials
+            .get(&name.trim_start_matches(',').to_ascii_lowercase())
+            .and_then(|chain| chain.last())
+            .filter(|(tag, _)| tag.is_some())
+            .map(|(_, material)| material)
+    }
+
     /// The definition of `name` (a leading comma ignored) in use, when a zone decoded so far has one.
     pub fn get<T: Linkable>(&mut self, name: &str) -> Option<&Arc<T>> {
         T::table(self)
@@ -158,6 +174,54 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loaded_material_normalizes_names_and_excludes_synthesized_defaults() {
+        let mut db = Db::default();
+        db.link(2, Arc::new(material("$default"))).unwrap();
+        db.link(4, Arc::new(material(",missing"))).unwrap();
+        assert!(db.loaded_material(",MISSING").is_none());
+        assert!(db.loaded_material("absent").is_none());
+        let base = db.link(4, Arc::new(material("loaded"))).unwrap();
+        let map = db.link(8, Arc::new(material("LOADED"))).unwrap();
+        assert!(Arc::ptr_eq(db.loaded_material(",loaded").unwrap(), &map));
+        db.unload(8);
+        assert!(Arc::ptr_eq(db.loaded_material("LOADED").unwrap(), &base));
+        db.unload(4);
+        assert!(db.loaded_material("loaded").is_none());
+        // The actual zone-owned default material is itself loaded, unlike a synthesized copy.
+        assert!(db.loaded_material("$default").is_some());
+    }
+
+    #[test]
+    fn image_inventory_exposes_active_definitions_and_promotes_on_unload() {
+        let image = |name: &str, width| {
+            Arc::new(GfxImage {
+                map_type: 3,
+                picmip: [0; 2],
+                no_picmip: false,
+                semantic: 2,
+                track: 3,
+                card_memory: [0; 2],
+                width,
+                height: 1,
+                depth: 1,
+                category: 0,
+                delay_load_pixels: false,
+                name: Some(name.into()),
+                load_def: None,
+            })
+        };
+        let mut db = Db::default();
+        let base = db.link(4, image("test", 1)).unwrap();
+        let map = db.link(8, image("TEST", 2)).unwrap();
+        assert_eq!(db.images().count(), 1);
+        assert!(Arc::ptr_eq(db.images().next().unwrap(), &map));
+        db.unload(8);
+        assert!(Arc::ptr_eq(db.images().next().unwrap(), &base));
+        db.unload(4);
+        assert_eq!(db.images().count(), 0);
+    }
 
     fn material(name: &str) -> Material {
         Material {

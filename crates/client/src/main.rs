@@ -34,6 +34,7 @@ mod gfx;
 mod helicopter;
 mod hud;
 mod hudstate;
+mod image_list;
 mod input;
 mod kick;
 mod laser;

@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Sun-file parsing and sun-path handling follow KisakCOD (GPL-3.0, copyright the KisakCOD contributors and
+// Activision): universal/dvar.cpp (Com_LoadDvarsFromBuffer, Com_SaveDvarsToBuffer) and universal/com_files.cpp
+// (FS_SanitizeFilename, FS_IsBackupSubStr, FS_CreatePath).
 //! Config-file syntax: tokenizing command lines, quoting on write, and the platform config path.
 //!
 //! A line holds commands separated by `;`. Tokens are whitespace separated or `"quoted"`; inside quotes `\"`, `\\`
@@ -102,6 +105,144 @@ pub fn exec_name(name: &str) -> String {
     file
 }
 
+/// Guard a relative user filename using the VFS's no-parent/no-drive convention.
+pub fn user_filename(name: &str) -> std::io::Result<String> {
+    let name = name.replace('\\', "/");
+    if name.is_empty()
+        || name.ends_with('/')
+        || name.starts_with('/')
+        || name.contains([':', '\0'])
+        || name.split('/').any(|p| p == "..")
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "filename must stay inside the user folder",
+        ));
+    }
+    Ok(name)
+}
+
+/// `va("sun/%s.sun", name)`: stock appends `.sun` even when the argument already has an extension.
+pub fn sun_qpath(name: &str) -> String {
+    format!("sun/{name}.sun")
+}
+
+/// `FS_CreatePath` (KisakCOD com_files.cpp:452-459) never creates a path holding `..` or `::`, and prints
+/// `refusing to create relative path`. A drive (`:`) and NUL are refused with it, as the server's `writeconfig` does.
+pub fn refuses_write(qpath: &str) -> bool {
+    qpath.contains("..") || qpath.contains([':', '\0'])
+}
+
+/// `FS_SanitizeFilename` (com_files.cpp:644): `\` as `/`, leading and repeated separators collapsed (`sun//x.sun`
+/// is `sun/x.sun`) and `.` components skipped. `None` for a `../` (`FS_IsBackupSubStr`), a drive or NUL, which are
+/// never opened.
+pub fn sanitize_qpath(qpath: &str) -> Option<String> {
+    let qpath = qpath.replace('\\', "/");
+    if qpath.contains("../") || qpath.contains([':', '\0']) {
+        return None;
+    }
+    let parts: Vec<&str> = qpath
+        .split('/')
+        .filter(|p| !p.is_empty() && *p != ".")
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// `Com_LoadDvarsFromBuffer`'s result. Messages belong on the system console channel; every one is printed by
+/// `Com_PrintWarning` or `Com_PrintError`, so it carries their colour prefix and shows when the `error` channel does.
+/// Incomplete files still change the dvars, but must not be applied to the world sun.
+#[derive(Debug)]
+pub struct DvarLoad {
+    pub complete: bool,
+    pub messages: Vec<String>,
+}
+
+/// Reset every listed dvar, then read a name and one value per line. Unlike config scripts,
+/// semicolons and backslash escapes have no special meaning in these stock data files.
+pub fn load_dvars(
+    cvars: &mut super::Cvars,
+    names: &[&str],
+    text: &str,
+    filename: &str,
+) -> DvarLoad {
+    for &name in names {
+        let reset = cvars.reset_value(name).expect("registered dvar").to_owned();
+        cvars.set(name, &reset, false);
+    }
+    let mut read = vec![false; names.len()];
+    let mut messages = Vec::new();
+    let mut rest = text.split('\0').next().unwrap_or("");
+    while let Some(name) = dvar_token(&mut rest, true) {
+        if name.is_empty() {
+            break;
+        }
+        if let Some(i) = names.iter().position(|n| n.eq_ignore_ascii_case(name)) {
+            let value = dvar_token(&mut rest, false).unwrap_or("");
+            cvars.set(names[i], value, false);
+            read[i] = true;
+        } else {
+            // `Com_PrintWarning` adds `^3`.
+            messages.push(format!(
+                "^3WARNING: unknown dvar '{name}' in file '{filename}'"
+            ));
+        }
+        rest = rest.find('\n').map_or("", |i| &rest[i + 1..]);
+    }
+    let complete = read.iter().all(|&r| r);
+    if !complete {
+        // `Com_PrintError` adds `^1` to a format naming an error and `^1Error: ` to one that does not, so each
+        // `"  %s\n"` member line reads `^1Error:   <dvar>` (1.7 0x56d540 through 0x4fcc80).
+        messages.push(format!(
+            "^1ERROR: the following dvars were not specified in file '{filename}'"
+        ));
+        for (&name, read) in names.iter().zip(read) {
+            if !read {
+                messages.push(format!("^1Error:   {name}"));
+            }
+        }
+    }
+    DvarLoad { complete, messages }
+}
+
+/// `Com_Parse`/`Com_ParseOnLine`: quotes are literal, both C comment forms are skipped.
+fn dvar_token<'a>(rest: &mut &'a str, allow_newline: bool) -> Option<&'a str> {
+    loop {
+        let trimmed = rest.trim_start_matches(|c: char| c.is_ascii_whitespace());
+        if !allow_newline && rest[..rest.len() - trimmed.len()].contains('\n') {
+            return None;
+        }
+        *rest = trimmed;
+        if rest.starts_with("//") {
+            let end = rest.find('\n').unwrap_or(rest.len());
+            *rest = &rest[end..];
+        } else if rest.starts_with("/*") {
+            let end = rest.find("*/").map_or(rest.len(), |i| i + 2);
+            let newline = rest[..end].contains('\n');
+            *rest = &rest[end..];
+            if newline && !allow_newline {
+                return None;
+            }
+        } else {
+            break;
+        }
+    }
+    if rest.is_empty() {
+        return None;
+    }
+    if let Some(quoted) = rest.strip_prefix('"') {
+        let end = quoted.find('"').unwrap_or(quoted.len());
+        *rest = quoted.get(end + 1..).unwrap_or("");
+        Some(&quoted[..end])
+    } else {
+        let end = rest
+            .find(|c: char| c.is_ascii_whitespace())
+            .unwrap_or(rest.len());
+        let token = &rest[..end];
+        *rest = &rest[end..];
+        Some(token)
+    }
+}
+
 /// `atoi`: the integer part of a number, 0 for anything else.
 pub fn atoi(s: &str) -> i32 {
     s.trim().parse::<f64>().map_or(0, |v| v as i32)
@@ -149,6 +290,75 @@ pub fn default_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sun_paths_follow_the_stock_write_refusal_and_read_sanitizer() {
+        assert_eq!(sun_qpath("dawn.sun"), "sun/dawn.sun.sun");
+        assert_eq!(
+            sanitize_qpath(&sun_qpath("nested\\dawn")).unwrap(),
+            "sun/nested/dawn.sun"
+        );
+        // `r_savesun /x` writes `sun//x.sun`, the file `r_loadsun x` and `r_loadsun \x` read.
+        assert_eq!(sanitize_qpath(&sun_qpath("/x")).unwrap(), "sun/x.sun");
+        assert_eq!(sanitize_qpath(&sun_qpath("\\\\x")).unwrap(), "sun/x.sun");
+        assert_eq!(
+            sanitize_qpath(&sun_qpath("./a..b")).unwrap(),
+            "sun/a..b.sun"
+        );
+        assert!(!refuses_write(&sun_qpath("/x")));
+        for name in ["../x", "a/../x", "..\\x", "c:x", "x\0"] {
+            assert!(refuses_write(&sun_qpath(name)), "{name:?}");
+            assert_eq!(sanitize_qpath(&sun_qpath(name)), None, "{name:?}");
+        }
+        // `FS_CreatePath` refuses any `..`; the reader only a `../`.
+        assert!(refuses_write(&sun_qpath("a..b")));
+    }
+
+    #[test]
+    fn data_dvars_reset_warn_and_report_missing_in_list_order() {
+        let mut c = super::super::Cvars::default();
+        c.set("r_sunsprite_size", "99", false);
+        c.set("r_sunflare_max_alpha", "0.1", false);
+        let report = load_dvars(
+            &mut c,
+            &["r_sunsprite_size", "r_sunflare_max_alpha"],
+            "// comment\nalien 1 r_sunflare_max_alpha 0.8\nR_SUNSPRITE_SIZE \"32\" ignored\n",
+            "sun/test.sun",
+        );
+        assert!(!report.complete);
+        assert_eq!(c.get("r_sunsprite_size"), Some("32"));
+        assert_eq!(c.get("r_sunflare_max_alpha"), Some("1"));
+        assert_eq!(
+            report.messages,
+            [
+                "^3WARNING: unknown dvar 'alien' in file 'sun/test.sun'",
+                "^1ERROR: the following dvars were not specified in file 'sun/test.sun'",
+                "^1Error:   r_sunflare_max_alpha",
+            ]
+        );
+    }
+
+    #[test]
+    fn data_dvars_use_one_literal_value_per_line_and_last_duplicate_wins() {
+        let mut c = super::super::Cvars::default();
+        let report = load_dvars(
+            &mut c,
+            &[
+                "r_sunsprite_shader",
+                "r_sunflare_shader",
+                "r_sun_fx_position",
+            ],
+            "/* header\ncomment */ r_sunsprite_shader \"a\\b; c\"\n\
+             r_sunflare_shader\nr_sun_fx_position \"1 2 3\"\n\
+             r_sunsprite_shader \"final\\name\"\n",
+            "sun/test.sun",
+        );
+        assert!(report.complete);
+        assert!(report.messages.is_empty());
+        assert_eq!(c.get("r_sunsprite_shader"), Some("final\\name"));
+        assert_eq!(c.get("r_sunflare_shader"), Some(""));
+        assert_eq!(c.get("r_sun_fx_position"), Some("1 2 3"));
+    }
 
     fn one(line: &str) -> Vec<String> {
         let mut c = split_commands(line);
