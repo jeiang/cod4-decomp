@@ -8,8 +8,8 @@ tooling fact, or a flake's status changes, update this file in the same PR.
 ## Hosts and paths
 
 - The Linux test host is `artemis.jeiang.vpn` (`COD4E_LINUX_HOST`, the justfile's default). `artemis.local` no
-  longer answers. ssh to it sometimes resets (`kex_exchange_identification`); retry once.
-- Its login shell is fish. Send POSIX shell as a script on stdin: `ssh artemis.jeiang.vpn bash -s <<'EOF' ... EOF`.
+  longer answers. Use `scripts/host-ssh.py`, not raw ssh, for this host (see SSH transport below).
+- Its login shell is fish. Send POSIX shell on stdin: `scripts/host-ssh.py artemis.jeiang.vpn bash -s <<'EOF' ... EOF`.
   Nested `bash -c '...'` quoting has broken before.
 - Project work lives under `~/Projects/cod4e/`:
   - `shared/COD4`: the install every host run uses (`COD4_PATH`).
@@ -135,6 +135,43 @@ before a confirmed run. `just review-delta <n> <old>` shows what the PR's own ch
 - `just evidence-report --pr <n> --stage <stages> <bundle.zip>...` reports whether the bundles and the `windows`
   check cover the PR's current head. It is read only and does not approve a merge.
 
+### SSH transport
+
+Every Linux-host recipe and detached follower uses `scripts/host-ssh.py`. Run it in the dev shell (Python3 is
+required). The default `-F /dev/null` skips **both** ~/.ssh/config and system ssh_config/Includes, avoiding
+NetBird's `Match exec ... ssh detect` banner probes (#590). `ProxyCommand=none` alone does not avoid Match exec.
+The agent (`SSH_AUTH_SOCK`), default identity filenames and default known_hosts verification still work;
+host-key checking is never disabled. What is lost is config-only Host/HostName aliases, User/Port, IdentityFile,
+IdentitiesOnly, IdentityAgent (including 1Password routing), certificates, ProxyJump/ProxyCommand, custom
+known_hosts and host-key settings, and other user/system configuration. Use the real FQDN by default.
+
+For required nondefault settings, set `COD4E_LINUX_SSH_CONFIG=/absolute/path/to/detector-free-config` on every
+recipe. This separate OpenSSH config and every Include it uses must omit the NetBird detector. The repository
+does not edit/copy/filter ~/.ssh/config or change artemis. `-F` applies to effective-config lookup, master startup,
+control checks and command channels. Do not pass multiplexing/proxy overrides as wrapper `-o` arguments.
+
+The socket lives at `/tmp/cod4e-ssh-<uid>/<connection-hash>.sock` (`/private/tmp` on the Mac), in an owner-checked
+0700 directory, not a checkout or omp directory. The hash includes selected config path and effective host, user,
+port, identity and routing settings, not tty mode. First use takes an OS file lock, checks the master and starts
+`ControlMaster=yes -Nf` with `ControlPersist=600`. Never combine that option with `-M`: OpenSSH promotes the
+second master request to ask mode. Concurrent starts cannot create competing masters. Eight flock-backed channel
+tokens leave headroom under sshd's default MaxSessions=10. A separate local keeper owns each token until its SSH
+child exits, even when the invoking wrapper is killed and OpenSSH closes inherited descriptors. Master creation
+is not locked for a command's duration, so slots/serials share channels concurrently.
+Do not remove lock/token files: replacing their inode breaks cross-process locking.
+
+Followers never stop the shared master; OpenSSH expires it after 600 idle seconds. A dead/stale master is
+replaced by the next invocation under the creation lock. Command channels use `ControlMaster=no` and
+`ProxyCommand=false`: a master dying between check and use returns 255 rather than silently creating a new
+connection. Master death interrupts active channels, not detached host jobs. The wrapper never replays commands;
+only the follower retries idempotent start/poll/collect/remove operations. Uploads and arbitrary host commands
+fail normally. Restart/attach after an exhausted disconnect; never rerun the whole job blindly.
+
+File transfers currently use tar over this wrapper, not scp/rsync. If needed, use
+`rsync -e scripts/host-ssh.py ... artemis.jeiang.vpn:...` with the same config environment.
+The wrapper is not an scp `-S` adapter (scp supplies additional policy/subsystem options).
+Do not introduce a raw-SSH parallel transport.
+
 ### Detached runs: recovery and cancellation
 
 `remote-linux.sh` starts a host-owned `nohup setsid` session around the installed slot guard and the whole
@@ -145,8 +182,10 @@ needed; detachment requires the host's `setsid`, `nohup` and `flock` (absence is
 The private run directory keeps `.host-stdout`, `.host-stderr`, `.host-identity` (supervisor PID, exact `ps -o lstart=`
 start time, process group), `.host-status` (atomically published command exit status), and `.host-slot`. Its
 `.host-cmd` may contain a lease token: never print or copy it into an issue/log. SSH has `ConnectTimeout=10`,
-`ServerAliveInterval=10`, `ServerAliveCountMax=3` and batch mode. A lost connection retries every 5 seconds; only
-complete log snapshots advance the follower's byte offsets. A command's exit 255 is read from `.host-status`,
+`ServerAliveInterval=10`, `ServerAliveCountMax=3` and batch mode. Successful running polls sleep 5 seconds. Only
+transport exit 255 retries: four sleeps of 5/10/20/30 s plus 0–1 s jitter, reset after success, then the real 255
+and SSH diagnostic, with the directory retained. Sleep totals stay below 69 s per operation; connection timeout,
+keepalive detection and command runtime are additional. Only complete snapshots advance offsets. A command's exit 255 is read from `.host-status`,
 not confused with SSH's 255. A reachable host with a dead supervisor and no status is reported as incomplete
 (255) and retained for inspection.
 
@@ -166,7 +205,7 @@ For **intentional host cancellation**, first stop local followers (otherwise an 
 Use the exact logged run directory, and send POSIX commands to bash, not the host's fish login shell:
 
 ```sh
-ssh artemis.jeiang.vpn bash -s <<'EOF'
+scripts/host-ssh.py artemis.jeiang.vpn bash -s <<'EOF'
 run=$HOME/Projects/cod4e/run-<identity>
 { read -r pid; IFS= read -r started; read -r pgid; } < "$run/.host-identity"
 test "$(ps -o lstart= -p "$pid")" = "$started" || exit 1
