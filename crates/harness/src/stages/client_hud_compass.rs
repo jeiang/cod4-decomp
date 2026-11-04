@@ -81,13 +81,14 @@ pub(super) fn server_client(c: &mut Driven, slot: u64) -> Result<Value, String> 
         .ok_or_else(|| format!("the server has no client {slot}"))
 }
 
-/// What a failure needs of a server client record: its weapons, life and position.
+/// What a failure needs of a server client record: its weapons, life, health and position.
 fn body(p: &Value) -> String {
     format!(
-        "weapon {} weapons {} alive {} spawn_count {} deaths {} shots {} origin {}",
+        "weapon {} weapons {} alive {} health {} spawn_count {} deaths {} shots {} origin {}",
         p["weapon_name"],
         p["weapons"],
         p["alive"],
+        p["health"],
         p["spawn_count"],
         p["deaths"],
         p["shots"],
@@ -119,41 +120,187 @@ pub(super) fn enemy_bot(c: &mut Driven, team: u64) -> Result<u64, String> {
     }
 }
 
-/// Puts the bot at `spot` (`devtele` arguments) and has it give and raise `weapon`, so the burst after it is the
-/// weapon's fire and not its raise. Only a bot seen dead or respawned (a fresh inventory, somewhere else) is put back
-/// and given it again; a living bot that does not raise it within the hook's own wait fails. Returns the spawn count
-/// the bot holds it in.
-fn raise(c: &mut Driven, bot: u64, spot: &str, label: &str, weapon: &str) -> Result<Value, String> {
+/// The distances `place` tries, in turn, round the person (`devtele … near`): in front first, then behind (a negative
+/// distance), then further out. `teleport_near` picks the same spot for the same person, view and distance, so only
+/// another distance finds another spot.
+const PLACE_DISTS: [f32; 10] = [
+    96.0, -96.0, 128.0, -128.0, 160.0, -160.0, 192.0, -192.0, 224.0, -224.0,
+];
+/// How far the bot may stand from the wanted distance to the person, flat: `teleport_near` puts it exactly there.
+const PLACE_SLACK: f64 = 8.0;
+
+/// Where `place` left the bot: its server record at a checked spot, or why the attempt is lost.
+enum Placed {
+    At(Value),
+    Lost(String),
+}
+
+/// Whether a placement at `dist` held, from the bot's record before `devtele` (`pre`), its two samples after it (right
+/// away and one poll later) and the person's record: the same life, alive, no health lost and `dist` from the person
+/// flat. A spot in a hurt volume kills or hurts the bot (#584).
+fn spot_verdict(
+    dist: f32,
+    pre: &Value,
+    samples: [&Value; 2],
+    person: &Value,
+) -> Result<(), String> {
+    let f = |v: &Value| v.as_f64().unwrap_or(f64::NAN);
+    let at = |p: &Value, i: usize| f(&p["origin"][i]);
+    // False for a missing (NaN) value too.
+    let within = |x: f64, max: f64| x.abs() <= max;
+    for (k, s) in samples.iter().enumerate() {
+        let when = ["right after devtele", "at the next poll"][k];
+        if s["alive"] != json!(true) || s["spawn_count"] != pre["spawn_count"] {
+            return Err(format!("the bot died {when}"));
+        }
+        let (health, was) = (f(&s["health"]), f(&pre["health"]));
+        if health.is_nan() || health < was {
+            return Err(format!(
+                "the bot lost health {when} ({} -> {})",
+                pre["health"], s["health"]
+            ));
+        }
+        let flat = (at(s, 0) - at(person, 0)).hypot(at(s, 1) - at(person, 1));
+        if !within(flat - f64::from(dist.abs()), PLACE_SLACK) {
+            return Err(format!(
+                "the bot stands {flat:.1} units from the person {when}, not {}",
+                dist.abs()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Puts the living bot about a distance from the person (`devtele … near`, floor and a clear sight line) and checks
+/// the spot with [`spot_verdict`]. A spot with no floor in sight, or not at the distance asked for, is passed over
+/// for the next of [`PLACE_DISTS`], from `next` on. A spot the bot dies at, or a person who dies meanwhile, loses the
+/// attempt; `next` then points past the deadly spot, so the next attempt from the same person tries another.
+fn place(
+    c: &mut Driven,
+    bot: u64,
+    me: u64,
+    person: &Value,
+    next: &mut usize,
+) -> Result<Placed, String> {
+    let mut passed = Vec::new();
+    for _ in 0..PLACE_DISTS.len() {
+        let dist = PLACE_DISTS[*next % PLACE_DISTS.len()];
+        *next += 1;
+        let pre = server_client(c, bot)?;
+        if pre["alive"] != json!(true) {
+            return Ok(Placed::Lost(format!(
+                "bot {bot} was dead before its placement at {dist}: {}; passed over: [{}]",
+                body(&pre),
+                passed.join("; ")
+            )));
+        }
+        // The hook's own refusal ("no spot … with floor and a clear sight line") only rules out this distance.
+        if let Err(e) = exec(c, &format!("devtele {bot} near {me} {dist}")) {
+            passed.push(format!("dist {dist}: {e}"));
+            continue;
+        }
+        let first = server_client(c, bot)?;
+        c.pause(Duration::from_millis(500))?;
+        let second = server_client(c, bot)?;
+        let me_now = server_client(c, me)?;
+        if me_now["spawn_count"] != person["spawn_count"] || me_now["alive"] != json!(true) {
+            return Ok(Placed::Lost(format!(
+                "the person died while the bot was placed at {dist} (deaths {} -> {}, health {})",
+                person["deaths"], me_now["deaths"], me_now["health"]
+            )));
+        }
+        let Err(why) = spot_verdict(dist, &pre, [&first, &second], &me_now) else {
+            return Ok(Placed::At(second));
+        };
+        let note = format!(
+            "dist {dist}: {why}; person origin {}; bot before devtele: {}; right after: {}; at the next poll: {}",
+            me_now["origin"],
+            body(&pre),
+            body(&first),
+            body(&second)
+        );
+        if second["alive"] != json!(true) || second["spawn_count"] != pre["spawn_count"] {
+            return Ok(Placed::Lost(format!(
+                "bot {bot} died at its spot: {note}; passed over: [{}]",
+                passed.join("; ")
+            )));
+        }
+        passed.push(note);
+    }
+    Ok(Placed::Lost(format!(
+        "bot {bot}: no spot round the person held: [{}]",
+        passed.join("; ")
+    )))
+}
+
+/// Waits for bot `bot` to be alive: one killed in an earlier attempt is between lives for a few seconds.
+fn live_bot(c: &mut Driven, bot: u64, label: &str) -> Result<(), String> {
     let end = Instant::now() + Duration::from_secs(30);
-    let (mut placed, mut issued) = (Value::Null, Instant::now());
     loop {
         let p = server_client(c, bot)?;
-        if p["alive"] == json!(true) && p["spawn_count"] != placed {
-            exec(c, &format!("devtele {bot} {spot}"))?;
-            exec(c, &format!("devbotfire {bot} {weapon} 0"))?;
-            (placed, issued) = (p["spawn_count"].clone(), Instant::now());
+        if p["alive"] == json!(true) {
+            return Ok(());
+        }
+        if Instant::now() > end {
+            return Err(format!("{label}: bot {bot} never respawned: {}", body(&p)));
         }
         c.pause(Duration::from_millis(500))?;
+    }
+}
+
+/// What `raise` came to: the bot holds the weapon in the life it holds it in, or the attempt is lost.
+enum Raised {
+    Held(Value),
+    Lost(String),
+}
+
+/// Places the bot ([`place`]) and has it give and raise `weapon`, so the burst after it is the weapon's fire and not
+/// its raise. A bot that dies after its placement loses the attempt (#584: put back on the same spot, a bot that
+/// spot kills only died again until the deadline); a living bot that does not raise it within the hook's own wait
+/// fails. Returns the spawn count the bot holds it in.
+fn raise(
+    c: &mut Driven,
+    (bot, me): (u64, u64),
+    (person, next): (&Value, &mut usize),
+    label: &str,
+    weapon: &str,
+) -> Result<Raised, String> {
+    live_bot(c, bot, label)?;
+    let placed = match place(c, bot, me, person, next)? {
+        Placed::At(p) => p,
+        Placed::Lost(why) => return Ok(Raised::Lost(why)),
+    };
+    exec(c, &format!("devbotfire {bot} {weapon} 0"))?;
+    let (life, issued) = (placed["spawn_count"].clone(), Instant::now());
+    loop {
+        c.pause(Duration::from_millis(500))?;
         let held = server_client(c, bot)?;
-        let same_life = held["alive"] == json!(true) && held["spawn_count"] == placed;
-        if same_life && held["weapon_name"] == weapon {
-            return Ok(placed);
+        if held["alive"] != json!(true) || held["spawn_count"] != life {
+            return Ok(Raised::Lost(format!(
+                "bot {bot} died at its spot raising {weapon}: placed: {}; now: {}",
+                body(&placed),
+                body(&held)
+            )));
+        }
+        if held["weapon_name"] == weapon {
+            return Ok(Raised::Held(life));
         }
         // The hook asks for the weapon for 5 s (`DEV_RAISE_WAIT_MS` in `server/src/bot.rs`).
-        if (same_life && issued.elapsed() > Duration::from_secs(6)) || Instant::now() > end {
+        if issued.elapsed() > Duration::from_secs(6) {
             return Err(format!(
-                "{label}: bot {bot} never raised {weapon}: {}",
-                body(&held)
+                "{label}: bot {bot} never raised {weapon}: {}; placed: {}",
+                body(&held),
+                body(&placed)
             ));
         }
     }
 }
 
-/// One case: the bot, at `spot`, shoots `weapon`; the compass must ping or not. An attempt in which the bot
-/// respawned (something in the match killed it; the person's pings and its weapon are then another life's) proves
-/// nothing and is made again, up to [`ATTEMPTS`] times. So is one in which the person (client `me`) died: the bot's
-/// burst or another player can kill them, and a respawned person's compass holds another life's pings. The bot
-/// stands 96 units along x from where the person is at each attempt's start.
+/// One case: the bot, at a checked spot ([`place`]), shoots `weapon`; the compass must ping or not. An attempt in which
+/// the bot died or respawned (its spot or something in the match killed it; the person's pings and its weapon are then
+/// another life's) proves nothing and is made again, up to [`ATTEMPTS`] times. So is one in which the person (client
+/// `me`) died: the bot's burst or another player can kill them, and a respawned person's compass holds another life's
+/// pings. The bot stands about 96 units or more in front of or behind the person, in sight.
 fn case(
     c: &mut Driven,
     me: u64,
@@ -162,13 +309,16 @@ fn case(
     weapon: &str,
     pings: bool,
 ) -> Result<String, String> {
-    let mut lost = Vec::new();
+    let (mut lost, mut next) = (Vec::new(), 0);
     for attempt in 1..=ATTEMPTS {
         let person = alive_person(c, me)?;
-        let o = &person["origin"];
-        let at = |i: usize| o[i].as_f64().unwrap_or(0.0);
-        let spot = format!("{} {} {}", at(0) + 96.0, at(1), at(2));
-        let placed = raise(c, bot, &spot, label, weapon)?;
+        let placed = match raise(c, (bot, me), (&person, &mut next), label, weapon)? {
+            Raised::Held(life) => life,
+            Raised::Lost(why) => {
+                lost.push(format!("attempt {attempt}: {why}"));
+                continue;
+            }
+        };
         c.pause(SETTLE)?;
         let before = counts(c)?;
         let was = server_client(c, bot)?;
@@ -253,21 +403,20 @@ fn grenade_in(reply: &Value) -> bool {
         .is_some_and(|l| l.iter().any(|e| e["classname"] == json!("grenade")))
 }
 
-/// The frag case: the bot, 96 units along x from the person, throws a frag through the offhand path. The throw must be
+/// The frag case: the bot, at a checked spot ([`place`]), throws a frag through the offhand path. The throw must be
 /// proven (a `grenade` entity on the server, no `FireWeapon` shot) and must not ping the compass: an offhand throw
 /// raises no fire event (`WEAPTYPE_GRENADE`). The frag can hurt or kill the person or the bot itself; a death changes
 /// no fire or flag ping, so a seen grenade settles the case either way, and only a bot that respawned without one
-/// (another life, another inventory) makes the attempt again.
+/// (another life, another inventory) makes the attempt again. A placement that does not hold uses up an attempt too.
 fn frag_case(c: &mut Driven, me: u64, bot: u64) -> Result<String, String> {
-    let mut lost = Vec::new();
+    let (mut lost, mut next) = (Vec::new(), 0);
     for attempt in 1..=ATTEMPTS {
         let person = alive_person(c, me)?;
-        let o = &person["origin"];
-        let at = |i: usize| o[i].as_f64().unwrap_or(0.0);
-        exec(
-            c,
-            &format!("devtele {bot} {} {} {}", at(0) + 96.0, at(1), at(2)),
-        )?;
+        live_bot(c, bot, "grenade")?;
+        if let Placed::Lost(why) = place(c, bot, me, &person, &mut next)? {
+            lost.push(format!("attempt {attempt}: {why}"));
+            continue;
+        }
         c.pause(SETTLE)?;
         let before = counts(c)?;
         let was = server_client(c, bot)?;
@@ -465,8 +614,8 @@ pub(super) fn check(c: &mut Driven) -> Result<String, String> {
         person = alive_person(c, me)?;
         Ok(notes)
     })();
-    // Put the bot back where it stood before letting it think again: released 96 units from the person, an enemy
-    // with a raised SMG can kill them at the start of the next step.
+    // Put the bot back where it stood before letting it think again: released next to the person, an enemy with a
+    // raised SMG can kill them at the start of the next step.
     if let Some((bot, home)) = bot_home
         && let Some(o) = home.as_array().filter(|o| o.len() == 3)
     {
@@ -555,5 +704,30 @@ mod tests {
         assert!(frag_verdict(true, 0, c(2, 1, 9), c(3, 1, 9)).is_err());
         assert!(frag_verdict(true, 0, c(2, 1, 9), c(2, 2, 9)).is_err());
         assert!(frag_verdict(true, 0, c(2, 1, 9), c(2, 1, 10)).is_err());
+    }
+
+    fn bot(alive: bool, life: u64, health: i64, at: [f64; 3]) -> Value {
+        json!({"alive": alive, "spawn_count": life, "health": health, "origin": at})
+    }
+
+    #[test]
+    fn a_placement_holds_only_alive_in_the_same_life_unhurt_and_at_the_distance() {
+        let (pre, person) = (
+            bot(true, 3, 100, [0.0, 0.0, 0.0]),
+            bot(true, 1, 100, [0.0, 0.0, 64.0]),
+        );
+        let s = bot(true, 3, 100, [0.0, -96.0, 32.5]);
+        assert!(spot_verdict(-96.0, &pre, [&s, &s], &person).is_ok());
+        // #584: dead on the floor of a hurt volume, or hurt there.
+        let dead = bot(false, 3, 0, [0.0, -96.0, 32.5]);
+        assert!(spot_verdict(-96.0, &pre, [&s, &dead], &person).is_err());
+        let hurt = bot(true, 3, 90, [0.0, -96.0, 32.5]);
+        assert!(spot_verdict(-96.0, &pre, [&s, &hurt], &person).is_err());
+        // Respawned elsewhere between the read and the teleport: alive in another life.
+        let other = bot(true, 4, 100, [0.0, -96.0, 32.5]);
+        assert!(spot_verdict(-96.0, &pre, [&other, &other], &person).is_err());
+        // Not where the hook was asked to put it.
+        let far = bot(true, 3, 100, [0.0, -300.0, 32.5]);
+        assert!(spot_verdict(-96.0, &pre, [&far, &far], &person).is_err());
     }
 }
