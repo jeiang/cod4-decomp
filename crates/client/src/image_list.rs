@@ -151,7 +151,7 @@ mod tests {
         std::fs::write(root.join("main/images/external.iwi"), header).unwrap();
         let mut builder = assets::vfs::Builder::new(&root);
         builder.add_game_dir("main").unwrap();
-        let vfs = builder.finish(0);
+        let vfs = builder.finish(0).unwrap();
         let mut image = image("external", 9, [1024; 2]);
         image.load_def = None;
         assert_eq!(pixel_format(&image, &vfs).unwrap(), "DXT5  ");
@@ -184,7 +184,9 @@ mod tests {
 
     #[test]
     fn stock_rows_sort_deduplicate_and_total_both_platforms() {
-        let vfs = assets::vfs::Builder::new(std::path::Path::new(".")).finish(0);
+        let vfs = assets::vfs::Builder::new(std::path::Path::new("."))
+            .finish(0)
+            .unwrap();
         let old = image("old", 9, [1024, 2048]);
         let replaced = image("OLD", 3, [10240, 20480]);
         let first = image("first", 3, [1024, 2048]);

@@ -276,6 +276,7 @@ impl UiAssets {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assets::zone::DecodeFilter as _;
 
     fn install() -> Option<Install> {
         let root =
