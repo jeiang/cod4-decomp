@@ -71,14 +71,36 @@ def run(args):
                 continue
             break
         # A dead master must NOT silently fall back to a new direct connection.
-        child = subprocess.Popen([*common, "-o", "ControlMaster=no", "-o", "ProxyCommand=false", host, *command],
-                                 pass_fds=(channel.fileno(),))
-        def forward(sig, _frame):
-            child.send_signal(sig)
-        for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
-            signal.signal(sig, forward)
-        status = child.wait()
-        return status if status >= 0 else 128 - status
+        # OpenSSH closes inherited descriptors at startup. A separate keeper must
+        # own the token while waiting for SSH, even after the caller is SIGKILLed.
+        keeper = os.fork()
+        if keeper:
+            for token in channels:
+                token.close()
+            def forward(sig, _frame):
+                try:
+                    os.kill(keeper, sig)
+                except ProcessLookupError:
+                    pass
+            for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+                signal.signal(sig, forward)
+            _, status = os.waitpid(keeper, 0)
+            result = os.waitstatus_to_exitcode(status)
+            return result if result >= 0 else 128 - result
+        try:
+            for token in channels:
+                if token is not channel:
+                    token.close()
+            child = subprocess.Popen([*common, "-o", "ControlMaster=no", "-o", "ProxyCommand=false", host, *command])
+            def forward(sig, _frame):
+                child.send_signal(sig)
+            for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+                signal.signal(sig, forward)
+            status = child.wait()
+            os._exit(status if status >= 0 else 128 - status)
+        except OSError as error:
+            print(f"host-ssh: {error}", file=sys.stderr, flush=True)
+            os._exit(255)
     finally:
         for channel in channels:
             channel.close()

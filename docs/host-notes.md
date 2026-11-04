@@ -155,8 +155,9 @@ The socket lives at `/tmp/cod4e-ssh-<uid>/<connection-hash>.sock` (`/private/tmp
 port, identity and routing settings, not tty mode. First use takes an OS file lock, checks the master and starts
 `ControlMaster=yes -Nf` with `ControlPersist=600`. Never combine that option with `-M`: OpenSSH promotes the
 second master request to ask mode. Concurrent starts cannot create competing masters. Eight flock-backed channel
-tokens leave headroom under sshd's default MaxSessions=10; tokens are also held by the SSH child if its wrapper is
-killed. Master creation is not locked for a command's duration, so slots/serials share channels concurrently.
+tokens leave headroom under sshd's default MaxSessions=10. A separate local keeper owns each token until its SSH
+child exits, even when the invoking wrapper is killed and OpenSSH closes inherited descriptors. Master creation
+is not locked for a command's duration, so slots/serials share channels concurrently.
 Do not remove lock/token files: replacing their inode breaks cross-process locking.
 
 Followers never stop the shared master; OpenSSH expires it after 600 idle seconds. A dead/stale master is
@@ -167,8 +168,9 @@ only the follower retries idempotent start/poll/collect/remove operations. Uploa
 fail normally. Restart/attach after an exhausted disconnect; never rerun the whole job blindly.
 
 File transfers currently use tar over this wrapper, not scp/rsync. If needed, use
-`rsync -e scripts/host-ssh.py ... artemis.jeiang.vpn:...` or `scp -S scripts/host-ssh.py ... artemis.jeiang.vpn:...`
-with the same config environment. Do not introduce a raw-SSH parallel transport.
+`rsync -e scripts/host-ssh.py ... artemis.jeiang.vpn:...` with the same config environment.
+The wrapper is not an scp `-S` adapter (scp supplies additional policy/subsystem options).
+Do not introduce a raw-SSH parallel transport.
 
 ### Detached runs: recovery and cancellation
 

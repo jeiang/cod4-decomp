@@ -25,6 +25,8 @@ TOKEN = "lease-token-0123456789abcdef"
 
 SSH = f"""#!{sys.executable}
 import json, os, signal, subprocess, sys, time
+# Match OpenSSH's closefrom(3): the session cannot retain a passed token FD.
+os.closerange(3, 1024)
 args = sys.argv[1:]
 with open(os.environ["FAKE_RECORD"] + ".ssh", "a") as log:
     log.write(json.dumps(args) + "\\n")
@@ -411,6 +413,25 @@ class RemoteLinux(unittest.TestCase):
         counts = [int(n) for n in Path(self.record + ".active.seen").read_text().splitlines()]
         self.assertLessEqual(max(counts), 8)
         self.assertGreater(max(counts), 1)
+
+    def test_killed_wrapper_keeps_token_until_fd_closing_ssh_exits(self):
+        helper = os.path.join(SCRIPTS, "host-ssh.py")
+        env = self.remote_env(FAKE_COMMAND_DELAY="2")
+        args = [sys.executable, helper, "testhost", "true"]
+        calls = [subprocess.Popen(args, env=env) for _ in range(8)]
+        active = Path(self.record + ".active")
+        self.wait_for(lambda: active.exists() and active.read_text() == "8")
+        calls[0].kill()
+        calls[0].wait(timeout=5)
+        ninth = subprocess.Popen(args, env=env)
+        time.sleep(.25)
+        self.assertIsNone(ninth.poll())
+        self.assertEqual(active.read_text(), "8")
+        for p in calls[1:]:
+            self.assertEqual(p.wait(timeout=10), 0)
+        self.assertEqual(ninth.wait(timeout=10), 0)
+        counts = [int(n) for n in Path(self.record + ".active.seen").read_text().splitlines()]
+        self.assertEqual(max(counts), 8)
 
     def wait_for(self, predicate):
         end = time.monotonic() + 15
