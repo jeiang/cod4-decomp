@@ -221,7 +221,7 @@ fn front_end(c: &mut Driven) -> Result<(), String> {
     c.step("the error channel hidden and shown", |c| {
         typed(c, "con_hidechannel error", "Hiding channel: error")?;
         let before = lines(c)?;
-        c.console("imagelist")?;
+        c.console("r_smc_flush")?;
         c.pause(Duration::from_secs(1))?;
         let after = lines(c)?;
         if let Some(l) = fresh(&before, &after)

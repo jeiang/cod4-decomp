@@ -271,6 +271,7 @@ pub struct Ui2d {
     tex_layout: wgpu::BindGroupLayout,
     samplers: HashMap<u8, wgpu::Sampler>,
     images: HashMap<String, UiImage>,
+    texture_generation: u64,
     white: UiImage,
     vbuf: wgpu::Buffer,
     vbuf_vertices: u64,
@@ -475,6 +476,7 @@ impl Ui2d {
             tex_layout,
             samplers,
             images: HashMap::new(),
+            texture_generation: 0,
             white,
             vbuf,
             vbuf_vertices: INITIAL_VERTICES,
@@ -500,8 +502,18 @@ impl Ui2d {
         self.white.clone()
     }
 
+    fn sync_texture_generation(&mut self, cache: &TextureCache) {
+        let generation = cache.generation();
+        if self.texture_generation != generation {
+            self.images.clear();
+            self.missing.clear();
+            self.texture_generation = generation;
+        }
+    }
+
     /// The material as a drawable image, cached by lower-cased material name.
     pub fn image(&mut self, cache: &mut TextureCache, mat: &Material) -> UiImage {
+        self.sync_texture_generation(cache);
         let name = mat.name.as_deref().unwrap_or("").to_ascii_lowercase();
         if let Some(i) = self.images.get(&name) {
             return i.clone();
@@ -540,6 +552,7 @@ impl Ui2d {
     /// A loose image (`images/<name>.iwi`) as the original's default 2D material: alpha blended, linear, clamped.
     /// Cached by lower-cased name; an image that cannot be loaded is white and recorded in [`Ui2d::missing`].
     pub fn image_named(&mut self, cache: &mut TextureCache, name: &str) -> UiImage {
+        self.sync_texture_generation(cache);
         let key = name.trim_start_matches(',').to_ascii_lowercase();
         if let Some(i) = self.images.get(&key) {
             return i.clone();

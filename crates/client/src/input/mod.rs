@@ -892,6 +892,65 @@ impl Input {
         self.write_user_file("main", name, &text)
     }
 
+    /// `R_SaveSunFromDvars`: save the 21 sources in stock order, without changing the active profile.
+    /// `None` means this native input has no user folder. Browser files use page storage.
+    pub fn save_sun(&self, name: &str) -> std::io::Result<Option<PathBuf>> {
+        let file = config::sun_filename(name)?;
+        let mut text = String::new();
+        for name in crate::gfx::SUN_DVARS {
+            use std::fmt::Write;
+            writeln!(
+                text,
+                "{name} \"{}\"",
+                self.cvars.get(name).expect("registered sun dvar")
+            )
+            .expect("writing a string");
+        }
+        // Com_SaveDvarsToBuffer has an 8192-byte buffer including its terminating NUL.
+        if text.len() >= 8192 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "sun dvars exceed the 8192-byte stock save buffer",
+            ));
+        }
+        let Some(path) = self.user_file_path(&file) else {
+            return Ok(None);
+        };
+        write_config(&path, &text)?;
+        Ok(Some(path))
+    }
+
+    /// Read the user's sun file before the install VFS. Missing files return `None` without resetting dvars.
+    /// A found file resets/loads dvars even if incomplete; only a complete report permits world mutation.
+    /// The dispatcher owns usage, cheat/world checks, gfx file-error output, and system report messages.
+    pub fn load_sun(&mut self, name: &str) -> std::io::Result<Option<config::DvarLoad>> {
+        let file = config::sun_filename(name)?;
+        let mut text = None;
+        if let Some(path) = self.user_file_path(&file) {
+            match read_config(&path) {
+                Ok(value) => text = Some(value),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+        if text.is_none()
+            && let Some(vfs) = &self.vfs
+            && let Some(bytes) = vfs.read(&file)?
+        {
+            text = Some(String::from_utf8_lossy(&bytes).into_owned());
+        }
+        Ok(text
+            .map(|text| config::load_dvars(&mut self.cvars, &crate::gfx::SUN_DVARS, &text, &file)))
+    }
+
+    fn user_file_path(&self, file: &str) -> Option<PathBuf> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let root = self.config_dir.as_deref()?;
+        #[cfg(target_arch = "wasm32")]
+        let root = self.config_dir.as_deref().unwrap_or_else(|| Path::new(""));
+        Some(root.join(file))
+    }
+
     /// Writes `text` as `name` (`.cfg` added when it has no extension) in `dir` of the user's folder; `None`
     /// when there is no user folder.
     fn write_user_file(
@@ -900,20 +959,7 @@ impl Input {
         name: &str,
         text: &str,
     ) -> std::io::Result<Option<PathBuf>> {
-        let name: String = name.chars().take(MAX_EXEC_NAME).collect();
-        let name = name.replace('\\', "/");
-        // The VFS's stays_inside convention: no absolute path, drive or parent traversal.
-        if name.is_empty()
-            || name.ends_with('/')
-            || name.starts_with('/')
-            || name.contains(':')
-            || name.split('/').any(|p| p == "..")
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("config filename must stay inside the {dir} folder"),
-            ));
-        }
+        let name = config::user_filename(&name.chars().take(MAX_EXEC_NAME).collect::<String>())?;
         #[cfg(not(target_arch = "wasm32"))]
         let Some(root) = self.config_dir.as_deref() else {
             return Ok(None);
@@ -2438,6 +2484,52 @@ mod tests {
         assert!(named.exists(), "writeconfig writes without a change");
         assert!(!i.dirty);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sun_files_round_trip_user_first_then_vfs_without_touching_the_profile() {
+        let dir = std::env::temp_dir().join(format!("cod4e-input-sun-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let install = dir.join("install");
+        let user = dir.join("user");
+        std::fs::create_dir_all(install.join("main/sun")).unwrap();
+        let mut i = Input::detached();
+        i.config_dir = Some(user.clone());
+        i.cvars.set("r_sunflare_max_alpha", "0.6", false);
+        let saved = i.save_sun("roundtrip").unwrap().unwrap();
+        assert_eq!(saved, user.join("sun/roundtrip.sun"));
+        let text = std::fs::read_to_string(&saved).unwrap();
+        assert_eq!(
+            text.lines()
+                .map(|l| l.split(' ').next().unwrap())
+                .collect::<Vec<_>>(),
+            crate::gfx::SUN_DVARS
+        );
+        assert_eq!(text.lines().count(), 21);
+        assert!(!text.contains("set "));
+        std::fs::write(
+            install.join("main/sun/roundtrip.sun"),
+            text.replace("\"0.6\"", "\"0.2\""),
+        )
+        .unwrap();
+        i.vfs = Some(Vfs::open_stock(&install, 0).unwrap());
+        i.cvars.set("r_sunflare_max_alpha", "0.9", false);
+        assert!(i.load_sun("roundtrip").unwrap().unwrap().complete);
+        assert_eq!(i.cvar("r_sunflare_max_alpha"), Some("0.6"));
+        std::fs::remove_file(saved).unwrap();
+        assert!(i.load_sun("roundtrip").unwrap().unwrap().complete);
+        assert_eq!(i.cvar("r_sunflare_max_alpha"), Some("0.2"));
+        assert!(i.load_sun("missing").unwrap().is_none());
+        assert_eq!(i.cvar("r_sunflare_max_alpha"), Some("0.2"));
+        assert!(i.load_sun("../escape").is_err());
+        assert!(i.save_sun("../escape").is_err());
+        assert!(i.config_path.is_none());
+        assert!(!i.dirty);
+        assert!(
+            i.take_messages().is_empty(),
+            "the dispatcher owns console channels"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

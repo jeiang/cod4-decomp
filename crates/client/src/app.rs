@@ -2740,6 +2740,8 @@ const GFX_FACTS: &[&str] = &[
     "sun_flare",
     "sun_fx_position",
     "water",
+    "texture_cache",
+    "ui_texture_cache",
     "picmip",
     "pace",
 ];
@@ -2957,6 +2959,16 @@ fn gfx_value(st: &State, name: &str) -> Option<String> {
             .renderer
             .as_ref()
             .map(|r| u8::from(r.settings.draw_water).to_string()),
+        // Images evicted by reloads and image loads attempted, the world's cache: `reloadmaterialtextures`.
+        "texture_cache" => st
+            .renderer
+            .as_ref()
+            .map(|r| format!("{} {}", r.textures.generation(), r.textures.loads())),
+        // The same for the menus' cache, which the front end has too.
+        "ui_texture_cache" => st.shell.as_ref().map(|sh| {
+            let (generation, loads) = sh.texture_counts();
+            format!("{generation} {loads}")
+        }),
         // The picmips of colour, normal and specular maps the match's textures were loaded with.
         "picmip" => st.renderer.as_ref().map(|r| {
             let [c, b, s] = r.textures.picmips();
@@ -3519,6 +3531,132 @@ fn console_action(st: &mut State, line: &str) {
         let _command = tracing::debug_span!("command", name = %cmd[0]).entered();
         let verb = cmd[0].to_ascii_lowercase();
         match verb.as_str() {
+            "r_savesun" => {
+                if cmd.len() != 2 {
+                    say_channel(
+                        st,
+                        8,
+                        "USAGE: r_savesun <sunname>\n  sunname must not have an extension",
+                    );
+                } else {
+                    match st.input.save_sun(&cmd[1]) {
+                        Ok(Some(_)) => {}
+                        Ok(None) => say_channel(
+                            st,
+                            8,
+                            &format!(
+                                "WARNING: couldn't save sun file 'sun/{}.sun': no user folder",
+                                cmd[1]
+                            ),
+                        ),
+                        Err(error) => say_channel(
+                            st,
+                            8,
+                            &format!(
+                                "WARNING: couldn't save sun file 'sun/{}.sun': {error}",
+                                cmd[1]
+                            ),
+                        ),
+                    }
+                }
+            }
+            "r_loadsun" => {
+                if cmd.len() != 2 {
+                    say_channel(
+                        st,
+                        8,
+                        "USAGE: r_loadsun <sunname>\n  sunname must not have an extension",
+                    );
+                } else if !st.input.cvars.bool("sv_cheats") {
+                    say_channel(st, 8, "You must have cheats enabled to use r_loadsun");
+                } else if st.renderer.is_none() {
+                    say_channel(st, 8, "You can't r_loadsun while a map isn't loaded");
+                } else {
+                    match st.input.load_sun(&cmd[1]) {
+                        Ok(Some(report)) => {
+                            for message in report.messages {
+                                say_channel(st, 16, &message);
+                            }
+                            if report.complete
+                                && let Some(r) = st.renderer.as_mut()
+                            {
+                                gfx::apply_sun_dvars(&st.input.cvars, &mut r.sun_flare);
+                                if let Some(net) = st.net.as_mut() {
+                                    sun_flare_materials(&st.input.cvars, net, r);
+                                }
+                            }
+                        }
+                        Ok(None) => say_channel(
+                            st,
+                            8,
+                            &format!("WARNING: couldn't load sun file 'sun/{}.sun'", cmd[1]),
+                        ),
+                        Err(error) => say_channel(
+                            st,
+                            8,
+                            &format!(
+                                "WARNING: couldn't load sun file 'sun/{}.sun': {error}",
+                                cmd[1]
+                            ),
+                        ),
+                    }
+                }
+            }
+            "imagelist" => {
+                // `R_ImageList_f`: `imagelist all` also lists the renderer's generated images, which this build
+                // cannot enumerate yet (#581); any other form lists the loaded image assets.
+                if cmd.len() == 2 && cmd[1].eq_ignore_ascii_case("all") {
+                    crate::console::note_missing_form("imagelist all", 581);
+                } else if let Some(vfs) = st.input.vfs() {
+                    let ui = st
+                        .shell
+                        .as_ref()
+                        .into_iter()
+                        .flat_map(|sh| sh.ui.assets.images());
+                    let world = st.net.as_ref().into_iter().flat_map(|net| net.images());
+                    let lines = crate::image_list::format(ui.chain(world).map(Arc::as_ref), vfs);
+                    for line in lines {
+                        say_channel(st, 8, &line);
+                    }
+                } else {
+                    say_channel(st, 8, "WARNING: imagelist: no install to read images from");
+                }
+            }
+            "reloadmaterialtextures" => {
+                if cmd.len() != 2 {
+                    say_channel(st, 8, "Usage: reloadmaterialtextures <materialname>");
+                } else {
+                    // `Material_Find`: only a material already loaded, never a default made for the name.
+                    let key = cmd[1].trim_start_matches(',').to_ascii_lowercase();
+                    let material = st
+                        .net
+                        .as_ref()
+                        .and_then(|net| net.loaded_material(&cmd[1]).cloned())
+                        .or_else(|| {
+                            st.shell
+                                .as_ref()
+                                .and_then(|sh| sh.ui.assets.materials.get(&key).cloned())
+                        });
+                    match material {
+                        Some(m) => {
+                            if let Some(r) = st.renderer.as_mut() {
+                                r.reload_material_textures(&m);
+                            }
+                            if let Some(sh) = st.shell.as_mut() {
+                                sh.reload_material_textures(&m);
+                            }
+                        }
+                        None => say_channel(
+                            st,
+                            8,
+                            &format!(
+                                "ReloadMaterialTextures: Material '{}' is not currently loaded.",
+                                cmd[1]
+                            ),
+                        ),
+                    }
+                }
+            }
             "bots" => {
                 // `bots <n>` brings the listen server's bots to n at once (the command is the listen server's console's).
                 match (
@@ -4483,6 +4621,13 @@ fn enter_level(
         }
     }
     Ok(())
+}
+
+/// Stock output channels still apply to app-owned commands.
+fn say_channel(st: &mut State, channel: usize, text: &str) {
+    if st.input.channels.visible(channel) {
+        say(st, text);
+    }
 }
 
 /// A line for the console.

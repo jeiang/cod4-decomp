@@ -147,6 +147,10 @@ const COMMANDS: &[(&str, Owner)] = {
         ("snd_setEqQ", App),
         ("snd_setEqType", App),
         ("snd_deactivateEq", App),
+        ("imagelist", App),
+        ("reloadmaterialtextures", App),
+        ("r_loadsun", App),
+        ("r_savesun", App),
         ("quit", Frame),
         ("toggleMenu", Frame),
         ("chatmodepublic", Frame),
@@ -200,10 +204,6 @@ const COMMANDS: &[(&str, Owner)] = {
 /// (common.cpp:1328-1334).
 const MISSING: &[(&str, u32)] = &[
     ("cubemapShot", 527),
-    ("imagelist", 527),
-    ("reloadmaterialtextures", 527),
-    ("r_loadsun", 527),
-    ("r_savesun", 527),
     ("r_smc_flush", 527),
     ("r_smc_stats", 527),
     ("devgui", 528),
@@ -314,11 +314,15 @@ pub fn names() -> impl Iterator<Item = String> {
 /// A stock command this build does not carry out: one warning per command name, naming the issue that tracks it,
 /// which the console shows.
 pub fn note_missing(name: &str) {
-    let issue = missing_issue(name).unwrap_or_default();
+    note_missing_form(name, missing_issue(name).unwrap_or_default());
+}
+
+/// A stock form of a command this build does not carry out (`imagelist all`), with the issue that tracks it.
+pub fn note_missing_form(command: &str, issue: u32) {
     logging::dedup!(
         WARN,
-        name,
-        command = name,
+        command,
+        command = command,
         issue = issue,
         "stock command not implemented"
     );
@@ -817,7 +821,8 @@ mod tests {
         }
         assert!(BUTTONS.iter().all(|b| *b == b.to_ascii_lowercase()));
         assert_eq!(owner("MeminFo"), Some(Owner::App));
-        assert_eq!(owner("IMAGELIST"), Some(Owner::Missing));
+        assert_eq!(owner("IMAGELIST"), Some(Owner::App));
+        assert_eq!(owner("r_smc_flush"), Some(Owner::Missing));
         assert_eq!(owner("gfx_stats"), None, "1.8 only: unknown, as in 1.7");
         assert_eq!(owner("openscriptmenu"), Some(Owner::Shell));
         assert_eq!(owner("TOGGLEPRONE"), Some(Owner::Input));

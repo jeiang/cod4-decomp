@@ -931,6 +931,20 @@ impl Shell {
         }
     }
 
+    /// The menu cache is separate from the world's; retained UiImage bindings must be dropped too.
+    pub fn reload_material_textures(&mut self, material: &::assets::zone::gfx::Material) -> usize {
+        let evicted = self.cache.reload_material_textures(material);
+        if evicted != 0 {
+            self.images.clear();
+        }
+        evicted
+    }
+
+    /// Images evicted by reloads and image loads attempted, the menus' cache.
+    pub fn texture_counts(&self) -> (u64, u64) {
+        (self.cache.generation(), self.cache.loads())
+    }
+
     /// A line for the console's output; it keeps the latest 256.
     fn log(&mut self, text: &str) {
         self.st.log(text);

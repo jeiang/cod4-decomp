@@ -11,7 +11,7 @@ use crate::gpu::Gpu;
 use crate::state::StateBits;
 use crate::texture::{Tex, TextureCache};
 use crate::water::WaterSim;
-use assets::zone::gfx::{ArgValue, Material, Pass, TechniqueSet, TextureSource};
+use assets::zone::gfx::{ArgValue, GfxImage, Material, Pass, TechniqueSet, TextureSource};
 use sm3::{Options, SamplerDim, Stage, Translation, VertexFix};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -131,7 +131,8 @@ pub struct Compiled {
 }
 
 pub(crate) enum TexSource {
-    Image(Arc<Tex>, u8),
+    // Keep the asset, not a GPU texture: reloads must also refresh already prepared passes and failures.
+    Image(Arc<GfxImage>, u8),
     /// A water height map, by its key in [`Materials::waters`].
     Water(usize, u8),
     Code(u32),
@@ -924,10 +925,8 @@ impl Materials {
                     let tex = mat.textures.iter().find(|t| t.name_hash == *h);
                     let src = match tex.map(|t| (&t.source, t.sampler_state)) {
                         Some((TextureSource::Image(Some(img)), st)) => {
-                            match textures.image(gpu, img) {
-                                Some(t) => TexSource::Image(t, st),
-                                None => TexSource::Missing(st),
-                            }
+                            let _ = textures.image(gpu, img);
+                            TexSource::Image(img.clone(), st)
                         }
                         Some((TextureSource::Water(Some(w)), st)) => {
                             let key = Arc::as_ptr(w) as usize;
@@ -1193,7 +1192,7 @@ impl Materials {
         let mut views: Vec<(u32, Arc<Tex>, Arc<wgpu::Sampler>)> = Vec::new();
         for s in &p.slots {
             let (tex, state) = match &s.source {
-                TexSource::Image(t, st) => (Some(t.clone()), SamplerKey::State(*st)),
+                TexSource::Image(img, st) => (textures.image(gpu, img), SamplerKey::State(*st)),
                 TexSource::Water(key, st) => (
                     self.waters.get(key).map(|w| w.tex.clone()),
                     SamplerKey::State(*st),

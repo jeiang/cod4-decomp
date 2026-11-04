@@ -727,6 +727,7 @@ pub struct Renderer {
     /// The multisampled colour and depth of the scene pass, while `r_aaSamples` asks for more than one sample.
     msaa: Option<Msaa>,
     tex_bgs: HashMap<TexKey, Arc<wgpu::BindGroup>>,
+    texture_generation: u64,
     /// `settings.z_feather` and `settings.outdoor` as the cached bind groups were made.
     z_feather_bound: bool,
     outdoor_bound: bool,
@@ -896,6 +897,7 @@ impl Renderer {
             depth: None,
             msaa: None,
             tex_bgs: HashMap::new(),
+            texture_generation: 0,
             z_feather_bound: true,
             outdoor_bound: true,
             samples_cache: std::cell::Cell::new(None),
@@ -1066,6 +1068,23 @@ impl Renderer {
                 .iter()
                 .flatten()
                 .any(|l| l.kind == LIGHT_KIND_SPOT && l.can_shadow)
+    }
+
+    /// Reload a material already resolved from the loaded asset database. Returns the number of
+    /// successful or failed texture-cache entries evicted, not the number of texture definitions.
+    /// GPU textures are read again when their bind groups are rebuilt for the next frame.
+    pub fn reload_material_textures(&mut self, material: &Material) -> usize {
+        let evicted = self.textures.reload_material_textures(material);
+        self.sync_texture_generation();
+        evicted
+    }
+
+    fn sync_texture_generation(&mut self) {
+        let generation = self.textures.generation();
+        if self.texture_generation != generation {
+            self.tex_bgs.clear();
+            self.texture_generation = generation;
+        }
     }
 
     /// Cloud materials the match will draw: their pipelines are built with [`Renderer::warm`].
@@ -1654,6 +1673,7 @@ impl Renderer {
         probe: u8,
         light: u16,
     ) -> Arc<wgpu::BindGroup> {
+        self.sync_texture_generation();
         let key = TexKey {
             prep: p.id(),
             lightmap: lm,
