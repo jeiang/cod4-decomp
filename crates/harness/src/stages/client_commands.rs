@@ -11,7 +11,9 @@
 //! bad arguments print the stock usage lines (`bind`, `unbind`, `set`, `seta` through a bind, `reset`,
 //! `setfromdvar`, `con_showchannel`, `openscriptmenu`); `bind k`, `bindlist`, `reset`, `togglep`,
 //! `cmdlist <filter>` and `clear` show or do what the original's do; hiding the `error` channel keeps a
-//! not-implemented command's warning (#527) off the console and showing it brings it back. The stock commands of
+//! not-implemented command's warning (#527) off the console and showing it brings it back.
+//! `devgui` has no recovered retail 1.7 command registration (#528): typed at the front end it takes the same
+//! unknown-command path as any unknown word, rather than the missing-command warning. The stock commands of
 //! #479 answer as the original's: `dvar_int` registers a ranged dvar that refuses a value outside it, `setenv` sets
 //! and shows a variable, `clientinfo` reports state 0 at the front end and 9 in a match, `configstrings` and a bare
 //! `serverstatus` need a server, `fs_openedList`, `path` and `fdir` list the search path, `writedefaults` names its
@@ -376,6 +378,9 @@ fn front_end(c: &mut Driven) -> Result<(), String> {
         }
         typed(c, "con_showchannel error", "Adding channel: error")?;
         typed(c, "r_smc_stats", "not implemented")
+    })?;
+    c.step("devgui takes the unknown-command path", |c| {
+        typed(c, "devgui", "Unknown command \"devgui\"")
     })?;
     c.step("the renderer commands at the front end", |c| {
         let reply = |c: &mut Driven, line: &str, text: &str| {

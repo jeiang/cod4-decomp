@@ -70,19 +70,26 @@ trap 'interrupted 130' INT
 trap 'interrupted 143' TERM
 trap 'interrupted 129' HUP
 host=${COD4E_LINUX_HOST:?set COD4E_LINUX_HOST to the ssh host of the Linux test machine}
-ssh_opts=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3)
-# Only connection failures are retried; command errors remain errors. No SSH status is a host-run status.
-host_ssh() { ssh "${ssh_opts[@]}" "$host" "$@"; }
+transport="$(cd "$(dirname "$0")" && pwd)/host-ssh.py"
+# The helper owns detector-free config and the shared cross-worktree master.
+host_ssh() { python3 "$transport" "$host" "$@"; }
 retry_ssh() {
-  local dest=$1 rc
+  local dest=$1 rc attempt=0 delay
   shift
   while :; do
     kill -0 "$controller" 2>/dev/null || exit 143
     host_ssh "$@" > "$dest" && return 0
     rc=$?
-    [ "$rc" = 255 ] || [ "$rc" -ge 128 ] || return "$rc"
-    echo "remote: connection lost; host state unknown, reconnecting in 5s ($dir)" >&2
-    sleep 5
+    [ "$rc" = 255 ] || return "$rc"
+    if [ "$attempt" = 4 ]; then
+      echo "remote: reconnect attempts exhausted; retained $host $dir for recovery" >&2
+      return "$rc"
+    fi
+    case $attempt in 0) delay=5;; 1) delay=10;; 2) delay=20;; 3) delay=30;; esac
+    delay="$delay.$((RANDOM % 1000))"
+    attempt=$((attempt + 1))
+    echo "remote: connection lost; host state unknown, reconnecting in ${delay}s ($dir)" >&2
+    sleep "$delay"
   done
 }
 attach=0
@@ -239,7 +246,7 @@ while :; do
   state=$(cat "$scratch/snapshot/state")
   case $state in
     done) status=$(cat "$scratch/snapshot/status"); break ;;
-    running) sleep 1 ;;
+    running) sleep 5 ;;
     *) echo "remote: host supervisor is gone without an exit status; retained $dir for inspection" >&2; exit 255 ;;
   esac
 done

@@ -128,8 +128,8 @@ serial-log ref stages="":
 slot-guard-install:
     #!/usr/bin/env bash
     set -euo pipefail
-    ssh {{host}} "bash -c 'mkdir -p ~/Projects/cod4e/bin && cat > ~/Projects/cod4e/bin/.slot-guard.py.new'" < scripts/slot-guard.py
-    ssh {{host}} bash -s <<'EOF'
+    scripts/host-ssh.py {{host}} "bash -c 'mkdir -p ~/Projects/cod4e/bin && cat > ~/Projects/cod4e/bin/.slot-guard.py.new'" < scripts/slot-guard.py
+    scripts/host-ssh.py {{host}} bash -s <<'EOF'
     set -euo pipefail
     b=~/Projects/cod4e/bin
     nix build --out-link $b/python3 nixpkgs#python3
@@ -142,35 +142,35 @@ slot-guard-install:
 
 # Put a GC-rooted Chromium for the web-* stages on the Linux host (~/Projects/cod4e/bin/chromium), so a GC cannot skip them
 chromium-install:
-    ssh {{host}} "bash -c 'mkdir -p ~/Projects/cod4e/bin && nix build --out-link ~/Projects/cod4e/bin/chromium nixpkgs#chromium && ~/Projects/cod4e/bin/chromium/bin/chromium --version'"
+    scripts/host-ssh.py {{host}} "bash -c 'mkdir -p ~/Projects/cod4e/bin && nix build --out-link ~/Projects/cod4e/bin/chromium nixpkgs#chromium && ~/Projects/cod4e/bin/chromium/bin/chromium --version'"
 
 # Lease slot n to an owner (coordinator); prints a new token unless COD4E_SLOT_TOKEN gives one
 slot-lease n owner *args:
     #!/usr/bin/env bash
     set -euo pipefail
     { printf 'export COD4E_SLOT_TOKEN=%q\n' "${COD4E_SLOT_TOKEN:-}"
-      printf '~/Projects/cod4e/bin/slot-guard acquire %s\n' "$(printf '%q ' "$@")"; } | ssh {{host}} bash -s
+      printf '~/Projects/cod4e/bin/slot-guard acquire %s\n' "$(printf '%q ' "$@")"; } | scripts/host-ssh.py {{host}} bash -s
 
 # Release slot n's lease with its COD4E_SLOT_TOKEN, or `--force` (coordinator) once no guarded run is live
 slot-release n *args:
     #!/usr/bin/env bash
     set -euo pipefail
     { printf 'export COD4E_SLOT_TOKEN=%q\n' "${COD4E_SLOT_TOKEN:-}"
-      printf '~/Projects/cod4e/bin/slot-guard release %s\n' "$(printf '%q ' "$@")"; } | ssh {{host}} bash -s
+      printf '~/Projects/cod4e/bin/slot-guard release %s\n' "$(printf '%q ' "$@")"; } | scripts/host-ssh.py {{host}} bash -s
 
 # Run a bash command on the Linux host in ~/Projects/cod4e
 host +cmd:
-    @ssh {{host}} bash -s <<< "cd ~/Projects/cod4e && $*"
+    @scripts/host-ssh.py {{host}} bash -s <<< "cd ~/Projects/cod4e && $*"
 
 # Open a bash shell on the Linux host
 host-shell:
-    ssh -t {{host}} 'cd ~/Projects/cod4e; exec bash -l'
+    scripts/host-ssh.py -t {{host}} 'cd ~/Projects/cod4e; exec bash -l'
 
 # Show slots, serial lock, queued and running host runs, harness processes, VRAM, model servers and disk on the Linux host
 host-status:
     #!/usr/bin/env bash
     set -euo pipefail
-    ssh {{host}} bash -s <<'EOF'
+    scripts/host-ssh.py {{host}} bash -s <<'EOF'
     r=~/Projects/cod4e
     if [ -e $r/.serial-pending ]; then echo "serial run pending"; else echo "no serial run pending"; fi
     for n in 1 2 3; do
@@ -178,8 +178,8 @@ host-status:
     done
     if [ -x $r/bin/slot-guard ]; then $r/bin/slot-guard version; $r/bin/slot-guard status; else echo "slot-guard not installed"; fi
     EOF
-    ssh {{host}} bash -s -- --queue < scripts/host-run.sh
-    ssh {{host}} bash -s <<'EOF'
+    scripts/host-ssh.py {{host}} bash -s -- --queue < scripts/host-run.sh
+    scripts/host-ssh.py {{host}} bash -s <<'EOF'
     pgrep -af 'cod4e-harness|cod4e-server|/cod4e |sway|chromium|iw3mp' || echo "no harness processes"
     echo "VRAM used: $(( $(cat /sys/class/drm/card1/device/mem_info_vram_used) / 1048576 )) MiB"
     echo "embed: $(curl -s -m 5 http://127.0.0.1:8189/health || echo down)"
@@ -191,7 +191,7 @@ host-status:
 original *args:
     #!/usr/bin/env bash
     set -euo pipefail
-    ssh {{host}} bash -s -- $(printf '%q ' "$@") <<'EOF'
+    scripts/host-ssh.py {{host}} bash -s -- $(printf '%q ' "$@") <<'EOF'
     r=~/Projects/cod4e
     # The serial-run marker protocol of scripts/host-run.sh: queue behind other serial owners, name the owner PID,
     # and remove only our own marker.
