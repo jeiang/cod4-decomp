@@ -145,7 +145,7 @@ impl Entry {
             pure: num("pure") != 0,
             punkbuster: num("pb") != 0,
             modded: num("mod") != 0,
-            hardware: num("hw"),
+            hardware: hardware_byte(get("hw")) as i32,
             friendly_fire: num("ff"),
             killcam: num("kc") != 0,
             hardcore: num("hc"),
@@ -155,6 +155,31 @@ impl Entry {
             game: get("game").to_owned(),
             protocol: get("protocol").trim().parse().unwrap_or(0),
         })
+    }
+}
+
+/// 1.7's server-info parser (0x470ad0) stores atoi(hw)'s low byte, exposed unsigned by LAN_GetServerInfo.
+fn hardware_byte(value: &str) -> u8 {
+    let mut bytes = value.bytes().skip_while(u8::is_ascii_whitespace).peekable();
+    let negative = match bytes.peek() {
+        Some(b'-') => {
+            bytes.next();
+            true
+        }
+        Some(b'+') => {
+            bytes.next();
+            false
+        }
+        _ => false,
+    };
+    let mut number = 0u8;
+    for digit in bytes.take_while(u8::is_ascii_digit) {
+        number = number.wrapping_mul(10).wrapping_add(digit - b'0');
+    }
+    if negative {
+        number.wrapping_neg()
+    } else {
+        number
     }
 }
 
@@ -1075,6 +1100,47 @@ mod tests {
         assert_eq!(
             Entry::from_info(addr("1.2.3.4:1"), &kv(&[("hostname", "x")]), 5),
             None
+        );
+    }
+
+    #[test]
+    fn hardware_uses_decimal_prefix_and_unsigned_byte_storage() {
+        for (wire, want) in [
+            ("", 0),
+            ("0", 0),
+            ("1", 1),
+            ("2", 2),
+            ("3", 3),
+            ("6", 6),
+            ("7", 7),
+            ("4", 4),
+            ("10", 10),
+            ("-1", 255),
+            ("258", 2),
+            ("256", 0),
+            ("2suffix", 2),
+            (" \t+258tail", 2),
+            ("-254", 2),
+            ("suffix", 0),
+        ] {
+            let kv = vec![
+                ("mapname".into(), "mp_crash".into()),
+                ("hw".into(), wire.into()),
+            ];
+            assert_eq!(
+                Entry::from_info(addr("127.0.0.1:28960"), &kv, 1)
+                    .unwrap()
+                    .hardware,
+                want,
+                "{wire:?}"
+            );
+        }
+        let kv = vec![("mapname".into(), "mp_crash".into())];
+        assert_eq!(
+            Entry::from_info(addr("127.0.0.1:28960"), &kv, 1)
+                .unwrap()
+                .hardware,
+            0
         );
     }
 
