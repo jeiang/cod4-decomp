@@ -6,7 +6,8 @@
 //! and `stoprecord` leaves a demo file; Escape > Call Vote > Restart Map calls a vote the server announces; the B key
 //! opens the quick message menu and two keys say a team line the server relays; `setFromLocString` localizes into a
 //! cvar; `cmd` forwards its words to the server; a word nothing knows is `Unknown command` at the front end and, in a
-//! match, forwarded to the server, whose answer names it. `writeconfig` exports archived settings and binds to the
+//! match, forwarded to the server, whose answer names it. Hiding the `client` channel hides the local unknown-word
+//! diagnostic, and showing it restores the diagnostic (#589). `writeconfig` exports archived settings and binds to the
 //! named file, not the active profile; missing or extra arguments only print usage. The console commands of #365:
 //! bad arguments print the stock usage lines (`bind`, `unbind`, `set`, `seta` through a bind, `reset`,
 //! `setfromdvar`, `con_showchannel`, `openscriptmenu`); `bind k`, `bindlist`, `reset`, `togglep`,
@@ -381,12 +382,31 @@ fn writeconfig(c: &mut Driven, active: &Path) -> Result<(), String> {
 
 /// The console commands at the front end: usage lines, binds, cvars, channels, and a connect nothing answers.
 fn front_end(c: &mut Driven) -> Result<(), String> {
+    c.step(
+        "the client channel hidden and shown for an unknown word",
+        |c| {
+            typed(c, "con_hidechannel client", "Hiding channel: client")?;
+            let before = lines(c)?;
+            c.console("zz_unknown_at_front")?;
+            // Let the app consume the pending console command before checking absence.
+            c.frames(5)?;
+            let after = lines(c)?;
+            if let Some(l) = fresh(&before, &after).iter().find(|l| {
+                !l.starts_with("] ") && l.contains("Unknown command \"zz_unknown_at_front\"")
+            }) {
+                return Err(format!("the hidden client channel still printed {l:?}"));
+            }
+            typed(c, "con_showchannel client", "Adding channel: client")?;
+            says(
+                c,
+                |c| c.console("zz_unknown_at_front"),
+                "Unknown command \"zz_unknown_at_front\"",
+                true,
+                5,
+            )
+        },
+    )?;
     c.step("front-end console commands", |c| {
-        typed(
-            c,
-            "zz_unknown_at_front",
-            "Unknown command \"zz_unknown_at_front\"",
-        )?;
         typed(
             c,
             "bind",

@@ -195,6 +195,10 @@ The other stock console commands answer as the original's. `dvar_bool`, `dvar_in
 
 `devgui` takes the normal unknown-command path (at the front end, `Unknown command "devgui"`; in a match, normal forwarding). No retail 1.7 command registration was recovered: its string is used by a binding comparison and the console channel table, not a registered toggle (#528). `updatehunkusage` remains explicitly unimplemented and warns with `stock command not implemented` and issue 528: this engine has no stock hunk allocator, so it cannot truthfully write `Hunk_Used`.
 
+Local `Unknown command` diagnostics use the `client` console channel (`CL_ForwardCommandToServer`, retail 1.7):
+`con_hidechannel client` hides them and `con_showchannel client` restores them, including startup/config execution.
+The default `client-commands` stage types an unknown word with the channel hidden and shown and asserts both results.
+
 The cgame's server commands (`give`, `noclip`, `follow`, ...) have no handler on the client, so, as in the original, a dvar of the same name is shown or set instead of forwarding the line, typed or bound. `connect <server>` joins from the front end; in a game it prints `Already connected to a server. Disconnect first` unless the third word is `reconnect` (`CL_Connect_f`).
 
 The dedicated server's console has the same variable and channel commands (`togglep`, `dvarlist`, `dvardump`, `cmdlist`, `con_*`) and the stock usage lines for `set`, `reset`, `setfromdvar`, `kick`, `banUser` and `banClient`; its stdout is never filtered by channel, as the original's dedicated server prints every line. Commands that are not MP stock stay unknown: `echo` (a connectionless packet only), `condump`, `cvarlist`'s client form, `cvar_restart`, `play`, `timescale` (a dvar), `nextlevel` (single player).
