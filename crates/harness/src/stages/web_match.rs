@@ -79,35 +79,62 @@ struct DisabledBrowser {
 }
 
 impl DisabledBrowser {
-    fn cleanup(&mut self) -> Result<Value, String> {
+    /// Kills and reaps the process group, then removes the profile; failures are recorded in `errors`.
+    fn cleanup(&mut self) -> Value {
         let mut evidence = json!({"profile": self.profile});
+        let mut errors = Vec::new();
         if let Some(mut child) = self.child.take() {
             evidence["process_group"] = json!(child.id());
             #[cfg(unix)]
+            unsafe extern "C" {
+                #[link_name = "kill"]
+                fn kill_group(pid: i32, signal: i32) -> i32;
+            }
+            #[cfg(unix)]
             {
-                unsafe extern "C" {
-                    #[link_name = "kill"]
-                    fn kill_group(pid: i32, signal: i32) -> i32;
-                }
                 // The browser starts in its own process group. Kill its renderers/GPU processes too.
                 let result = unsafe { kill_group(-(child.id() as i32), 9) };
                 evidence["group_kill"] = json!(result == 0);
             }
             #[cfg(not(unix))]
             let _ = child.kill();
-            let status = child
-                .wait()
-                .map_err(|e| format!("reap disabled browser: {e}"))?;
-            evidence["reaped"] = json!(true);
-            evidence["exit"] = json!(status.to_string());
+            match child.wait() {
+                Ok(status) => {
+                    evidence["reaped"] = json!(true);
+                    evidence["exit"] = json!(status.to_string());
+                }
+                Err(e) => errors.push(format!("reap disabled browser: {e}")),
+            }
+            #[cfg(unix)]
+            {
+                // Signal 0 finds any surviving member; descendants reparented after the kill need a moment to exit.
+                let end = Instant::now() + Duration::from_secs(5);
+                let mut empty = false;
+                while Instant::now() < end {
+                    if unsafe { kill_group(-(child.id() as i32), 0) } != 0 {
+                        empty = true;
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                evidence["group_empty"] = json!(empty);
+                if !empty {
+                    errors.push(format!(
+                        "disabled browser process group {} survived cleanup",
+                        child.id()
+                    ));
+                }
+            }
         }
         match std::fs::remove_dir_all(&self.profile) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("remove disabled browser profile: {e}")),
+            Ok(()) => evidence["profile_removed"] = json!(true),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                evidence["profile_removed"] = json!(true)
+            }
+            Err(e) => errors.push(format!("remove disabled browser profile: {e}")),
         }
-        evidence["profile_removed"] = json!(true);
-        Ok(evidence)
+        evidence["errors"] = json!(errors);
+        evidence
     }
 }
 
@@ -192,11 +219,19 @@ fn control_disabled(chrome: &Path, dir: &Path, report: &mut StageReport) -> Resu
         Ok(())
     })();
     let cleanup = browser.cleanup();
-    evidence["cleanup"] = match &cleanup {
-        Ok(value) => value.clone(),
-        Err(e) => json!({"error": e}),
-    };
-    let outcome = outcome.and(cleanup.map(|_| ()));
+    let cleanup_errors = cleanup["errors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join("; ");
+    evidence["cleanup"] = cleanup;
+    let outcome = outcome.and(if cleanup_errors.is_empty() {
+        Ok(())
+    } else {
+        Err(cleanup_errors)
+    });
     evidence["passed"] = json!(outcome.is_ok());
     if let Err(e) = &outcome {
         evidence["error"] = json!(e);
