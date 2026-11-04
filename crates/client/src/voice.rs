@@ -103,6 +103,19 @@ impl Talker {
     }
 }
 
+/// `winvoice_mic_reclevel` as stock reads it with `atof`: the longest leading number, else 0 (muted); 65535 when the
+/// dvar is absent.
+pub fn record_level(text: Option<&str>) -> f32 {
+    let Some(text) = text else { return 65535.0 };
+    let text = text.trim_start();
+    (1..=text.len())
+        .rev()
+        .filter(|&end| text.is_char_boundary(end))
+        .find_map(|end| text[..end].parse::<f32>().ok())
+        .filter(|v| v.is_finite())
+        .unwrap_or(0.0)
+}
+
 /// The mean sample size of a block, in 16-bit units (`Record_QueueAudioDataForEncoding`).
 fn mean_size(block: &[i16]) -> f32 {
     if block.is_empty() {
@@ -297,6 +310,15 @@ mod tests {
         };
         assert_eq!(at(299), vec![5]);
         assert!(at(300).is_empty());
+    }
+
+    #[test]
+    fn the_record_level_reads_text_as_atof_does() {
+        assert_eq!(record_level(None), 65535.0);
+        assert_eq!(record_level(Some("32767")), 32767.0);
+        assert_eq!(record_level(Some("  12abc")), 12.0);
+        assert_eq!(record_level(Some("abc")), 0.0);
+        assert_eq!(record_level(Some("")), 0.0);
     }
 
     #[test]

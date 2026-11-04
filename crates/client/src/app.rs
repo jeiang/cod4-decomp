@@ -3355,11 +3355,7 @@ fn voice_capture(
         .and_then(|v| v.trim().parse::<f32>().ok())
         .filter(|v| v.is_finite())
         .unwrap_or(1.0);
-    let rec_level = input
-        .cvar("winvoice_mic_reclevel")
-        .and_then(|v| v.trim().parse::<f32>().ok())
-        .filter(|v| v.is_finite())
-        .unwrap_or(65535.0);
+    let rec_level = crate::voice::record_level(input.cvar("winvoice_mic_reclevel"));
     let Some(sh) = shell else {
         return talker.frames(talking, false, scaler, rec_level, Instant::now());
     };
