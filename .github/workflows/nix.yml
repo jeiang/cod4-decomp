@@ -12,8 +12,10 @@ permissions:
 env:
   GARRET_SUBSTITUTER: https://cache.jeiang.dev
   GARRET_PUBLIC_KEY: "cache.jeiang.dev-1:owXJK5/UX9NSf1lhmDDT3QTxMtbVk9YfHhjvOXyPhpA="
-  # The garret client .ci/garret.sh installs; the cache holds this rev.
-  GARRET_CLIENT_REV: cd668bd59815b7496fbb86380d033563d3bcee82
+  # The garret client .ci/garret.sh installs; the cache holds this rev. It must
+  # include garret 5374acf: older clients read an empty Nix database path when
+  # the config has no [watch] table, so the store watcher never starts.
+  GARRET_CLIENT_REV: a90a9bf4d847cf288f1192b700f727b8cbeb848e
 
   MAX_SUBSTITUTION_JOBS: "32"
   HTTP_CONNECTIONS: "64"
