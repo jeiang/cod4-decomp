@@ -1,0 +1,58 @@
+name: nix
+
+# Realises the dev shell and pushes it to the garret cache, so `nix develop`
+# substitutes it (wasm-bindgen-cli above all, which builds from source).
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  GARRET_SUBSTITUTER: https://cache.jeiang.dev
+  GARRET_PUBLIC_KEY: "cache.jeiang.dev-1:owXJK5/UX9NSf1lhmDDT3QTxMtbVk9YfHhjvOXyPhpA="
+  # The garret client .ci/garret.sh installs; the cache holds this rev.
+  GARRET_CLIENT_REV: cd668bd59815b7496fbb86380d033563d3bcee82
+
+  MAX_SUBSTITUTION_JOBS: "32"
+  HTTP_CONNECTIONS: "64"
+
+jobs:
+  devshell:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Write garret's post-build hook
+        run: ./.ci/garret.sh hook
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
+        with:
+          extra_nix_config: |
+            extra-substituters = ${{ env.GARRET_SUBSTITUTER }}
+            extra-trusted-public-keys = ${{ env.GARRET_PUBLIC_KEY }}
+            max-substitution-jobs = ${{ env.MAX_SUBSTITUTION_JOBS }}
+            http-connections = ${{ env.HTTP_CONNECTIONS }}
+            post-build-hook = ${{ runner.temp }}/garret-hook
+
+      - name: Start pushing to garret as paths are built
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        continue-on-error: true
+        run: ./.ci/garret.sh watch
+
+      - name: Realise the dev shell
+        run: nix develop --profile "$RUNNER_TEMP/toolchain" --command true && echo "$RUNNER_TEMP/toolchain" > "$RUNNER_TEMP/garret-outputs"
+
+      - name: Push to garret what the watcher has not
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        continue-on-error: true
+        timeout-minutes: 30
+        run: ./.ci/garret.sh drain
