@@ -45,6 +45,9 @@ operations, and confirm strings, flags and keys in the binary where 1.7 may diff
   and fmt by a `slot-full`, `remote` or `serial` run. No host recipe runs the wasm check.
 - `nix develop -c just script-tests` (the scripts' Python tests) runs locally. CI does not run it. Scripts must work
   with macOS's bash 3.2, and a `| head` in a pipeline can kill the writer with SIGPIPE.
+- The `nix` CI workflow (`.github/workflows/nix.yml`) realises the dev shell on each push to main and pushes it to
+  the garret cache (`.ci/garret.sh`); add `https://cache.jeiang.dev` as a substituter (its key is in nix.yml) to
+  fetch it prebuilt.
 - `/tmp` is `/private/tmp`: compare canonical paths.
 - Raw logs such as `out-slot*.log` are not in `.gitignore`. Check `git status` before a commit.
 - Command location is not edit location: the edit, read and write tools resolve relative paths against the main

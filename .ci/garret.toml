@@ -1,0 +1,5 @@
+endpoint = "https://cache-push.jeiang.dev"
+puller_endpoint = "https://cache.jeiang.dev"
+
+[oidc]
+audience = "https://cache-push.jeiang.dev/"
