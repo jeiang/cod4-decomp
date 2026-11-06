@@ -151,6 +151,14 @@ const COMMANDS: &[(&str, Owner)] = {
         ("reloadmaterialtextures", App),
         ("r_loadsun", App),
         ("r_savesun", App),
+        // Ragdoll_InitCommands 1.7 0x5bb350; process-lifetime definitions, also used by `exec ragdoll.cfg`.
+        ("ragdoll_clear", Input),
+        ("ragdoll_bone", Input),
+        ("ragdoll_joint", Input),
+        ("ragdoll_limit", Input),
+        ("ragdoll_selfpair", Input),
+        ("ragdoll_baselerp_bone", Input),
+        ("ragdoll_pin_bone", Input),
         ("quit", Frame),
         ("toggleMenu", Frame),
         ("chatmodepublic", Frame),
@@ -213,13 +221,6 @@ const MISSING: &[(&str, u32)] = &[
     ("r_smc_flush", 527),
     ("r_smc_stats", 527),
     ("updatehunkusage", 528),
-    ("ragdoll_baselerp_bone", 529),
-    ("ragdoll_bone", 529),
-    ("ragdoll_clear", 529),
-    ("ragdoll_joint", 529),
-    ("ragdoll_limit", 529),
-    ("ragdoll_pin_bone", 529),
-    ("ragdoll_selfpair", 529),
     ("touchFile", 530),
     ("fs_referencedList", 530),
     ("net_dumpprofile", 531),
@@ -835,7 +836,7 @@ mod tests {
         assert_eq!(owner("updatehunkusage"), Some(Owner::Missing));
         assert_eq!(owner("phys_stop"), Some(Owner::Frame));
         assert_eq!(owner("phys_go"), Some(Owner::Frame));
-        assert_eq!(owner("ragdoll_clear"), Some(Owner::Missing));
+        assert_eq!(owner("ragdoll_clear"), Some(Owner::Input));
         assert_eq!(owner("openscriptmenu"), Some(Owner::Shell));
         assert_eq!(owner("TOGGLEPRONE"), Some(Owner::Input));
         assert_eq!(owner("give"), Some(Owner::Forward));

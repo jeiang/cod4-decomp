@@ -10,7 +10,7 @@
 //! (tag 8) is dropped when the next map loads. A mod's `mod.ff` (tag 16, `DB_ZONE_MOD`) is loaded
 //! after the boot zones and outranks them and the map zone.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -333,6 +333,10 @@ pub struct Content {
     pub map_name: Option<String>,
     /// Per-zone decode time, for the boot log.
     pub timings: Vec<(String, Duration)>,
+    /// Each loaded client zone's script-string table with its zone tag; a zone that unloads takes its strings.
+    zone_strings: Vec<(u8, Vec<Arc<str>>)>,
+    /// The union of [`Self::zone_strings`], rebuilt on each zone load and unload.
+    script_strings: Arc<HashSet<Arc<str>>>,
 }
 
 impl Content {
@@ -351,6 +355,38 @@ impl Content {
         }
     }
 
+    /// Case-sensitive script-string membership of this client's currently loaded zones, including strings no
+    /// retained asset references. Replacing the map (or the mod) drops the strings of the zone it unloads.
+    /// Strings a listen server interns at runtime (script literals, `scr_const`) are not here. Dedicated-server
+    /// content does not collect these strings.
+    pub fn script_strings(&self) -> &Arc<HashSet<Arc<str>>> {
+        &self.script_strings
+    }
+
+    fn collect_script_strings(&mut self, tag: u8, strings: &[Option<Arc<str>>]) {
+        if self.client {
+            self.zone_strings
+                .push((tag, strings.iter().flatten().cloned().collect()));
+            self.rebuild_script_strings();
+        }
+    }
+
+    fn unload_script_strings(&mut self, tag: u8) {
+        if self.client {
+            self.zone_strings.retain(|(t, _)| *t != tag);
+            self.rebuild_script_strings();
+        }
+    }
+
+    fn rebuild_script_strings(&mut self) {
+        self.script_strings = Arc::new(
+            self.zone_strings
+                .iter()
+                .flat_map(|(_, s)| s.iter().cloned())
+                .collect(),
+        );
+    }
+
     /// Decodes `<zone>.ff` into the base layer (`tag`) or, when `tag` is [`MAP_TAG`], into the
     /// map layer.
     pub fn load_zone(&mut self, install: &Install, zone: &str, tag: u8) -> Result<(), String> {
@@ -367,6 +403,7 @@ impl Content {
         };
         self.modded = Layer::default();
         self.db.unload(MOD_TAG);
+        self.unload_script_strings(MOD_TAG);
         self.decode_zone(&path, "mod", MOD_TAG)?;
         self.base.merge(&self.modded);
         if self.map_name.is_some() {
@@ -379,12 +416,13 @@ impl Content {
         let t = Instant::now();
         let file = assets::fs::buffered(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let z = Zone::open(file).map_err(|e| format!("{zone}: {e}"))?;
+        let strings = z.script_strings().to_vec();
+        self.collect_script_strings(tag, &strings);
         let layer = match tag {
             MAP_TAG => &mut self.map,
             MOD_TAG => &mut self.modded,
             _ => &mut self.base,
         };
-        let strings = z.script_strings().to_vec();
         let client = self.client;
         let filter = ContentFilter {
             presentation: client,
@@ -511,13 +549,19 @@ impl Content {
 
     /// Replaces the map layer with `map`'s zone (`{map, alloc 8, free 8}`).
     pub fn load_map(&mut self, install: &Install, map: &str) -> Result<(), String> {
-        self.map = Layer::default();
-        self.map_name = None;
-        self.db.unload(MAP_TAG);
+        self.unload_map();
         self.load_zone(install, map, MAP_TAG)?;
         self.map.merge(&self.modded);
         self.map_name = Some(map.to_owned());
         Ok(())
+    }
+
+    /// Unloads the map zone: its assets and its script strings.
+    fn unload_map(&mut self) {
+        self.map = Layer::default();
+        self.map_name = None;
+        self.db.unload(MAP_TAG);
+        self.unload_script_strings(MAP_TAG);
     }
 
     /// Every rawfile (name, text) the zones define, each name once, the winning zone's copy.
@@ -820,6 +864,42 @@ impl Content {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_script_strings_are_the_loaded_zones_and_leave_with_the_map() {
+        let name: Arc<str> = "not_a_skeleton_bone".into();
+        let strings = [
+            None,
+            Some(name.clone()),
+            Some(name.clone()),
+            Some("MixedCase".into()),
+        ];
+        let mut content = Content::for_client();
+        content.collect_script_strings(4, &strings);
+        assert_eq!(content.script_strings().len(), 2);
+        assert!(content.script_strings().contains("not_a_skeleton_bone"));
+        assert!(content.script_strings().contains("MixedCase"));
+        assert!(!content.script_strings().contains("mixedcase"));
+        assert!(!content.script_strings().contains("unknown"));
+        assert!(Arc::ptr_eq(
+            content.script_strings().get("not_a_skeleton_bone").unwrap(),
+            &name
+        ));
+
+        // The first map's zone, then a map change: its strings go, the boot zone's (tag 4) stay.
+        content.collect_script_strings(MAP_TAG, &[Some("first_map_only".into())]);
+        assert!(content.script_strings().contains("first_map_only"));
+        content.unload_map();
+        content.collect_script_strings(MAP_TAG, &[Some("next_map_only".into())]);
+        assert!(!content.script_strings().contains("first_map_only"));
+        assert!(content.script_strings().contains("next_map_only"));
+        assert!(content.script_strings().contains("not_a_skeleton_bone"));
+        assert!(content.base.skeletons.is_empty());
+
+        let mut server = Content::default();
+        server.collect_script_strings(4, &strings);
+        assert!(server.script_strings().is_empty());
+    }
 
     fn presentation_material(name: &str, sort_key: u8) -> Arc<Material> {
         Arc::new(Material {

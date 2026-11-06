@@ -271,6 +271,14 @@ pub struct Input {
     /// What `setenv` put in the environment, over the process's own: Rust 2024 makes changing the process
     /// environment of a threaded program unsafe, and nothing this build starts reads it.
     env: HashMap<String, String>,
+    /// Client-lifetime definitions (`Ragdoll_Register`), not assets of a particular map.
+    pub ragdoll_defs: crate::ragdoll::Defs,
+    pub ragdoll_revision: u64,
+    pub ragdoll_reset_revision: u64,
+    /// Script strings of the front-end zones currently loaded (`SL_FindString`'s zone-interned names).
+    pub ui_script_strings: Arc<std::collections::HashSet<Arc<str>>>,
+    /// Script strings of the match's currently loaded zones, replaced on each map load and emptied on disconnect.
+    pub match_script_strings: Arc<std::collections::HashSet<Arc<str>>>,
 }
 
 const MAX_EXEC_DEPTH: u32 = 8;
@@ -370,6 +378,17 @@ impl Input {
         i
     }
 
+    /// `CL_Init` 1.7 0x46d4e0: after startup zones have interned their strings, run the definitions through `exec`.
+    pub fn register_ragdolls(&mut self) {
+        if self
+            .vfs
+            .as_ref()
+            .is_some_and(|v| v.locate("ragdoll.cfg").is_some())
+        {
+            self.exec_text("exec ragdoll.cfg", None, false, 0);
+        }
+    }
+
     /// [`Input::detached`] with the install's files, for what a script `exec`s.
     #[cfg(test)]
     pub(crate) fn detached_with(vfs: Vfs) -> Self {
@@ -447,6 +466,11 @@ impl Input {
             messages: Vec::new(),
             channels: logging::channels::Channels::default(),
             env: HashMap::new(),
+            ragdoll_defs: crate::ragdoll::Defs::default(),
+            ragdoll_revision: 0,
+            ragdoll_reset_revision: 0,
+            ui_script_strings: Default::default(),
+            match_script_strings: Default::default(),
         }
     }
 
@@ -1398,6 +1422,32 @@ impl Input {
         use crate::console::{Owner, owner};
         let args: Vec<&str> = toks[1..].iter().map(String::as_str).collect();
         let name = toks[0].to_ascii_lowercase();
+        if matches!(
+            name.as_str(),
+            "ragdoll_clear"
+                | "ragdoll_bone"
+                | "ragdoll_joint"
+                | "ragdoll_limit"
+                | "ragdoll_selfpair"
+                | "ragdoll_baselerp_bone"
+                | "ragdoll_pin_bone"
+        ) {
+            let (ui, matched) = (&self.ui_script_strings, &self.match_script_strings);
+            match self
+                .ragdoll_defs
+                .apply(toks, |n| ui.contains(n) || matched.contains(n))
+            {
+                Ok(crate::ragdoll::Applied::Ignored) => {}
+                Ok(applied) => {
+                    self.ragdoll_revision += 1;
+                    if applied == crate::ragdoll::Applied::Reset {
+                        self.ragdoll_reset_revision += 1;
+                    }
+                }
+                Err(message) => self.say(message.trim_end()),
+            }
+            return;
+        }
         match (name.as_str(), args.as_slice()) {
             ("bind", []) => self.say("bind <key> [command] : attach a command to a key"),
             ("bind" | "unbind", [key, ..]) if !keys::is_key_name(key) => {

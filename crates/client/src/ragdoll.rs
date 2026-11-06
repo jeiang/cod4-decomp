@@ -129,10 +129,11 @@ const HIT_SPEED: f32 = 30.0;
 const HIT_GAP: f32 = 0.25;
 
 /// The definition every body uses: `ragdoll.cfg`'s second (`Ragdoll_CreateRagdollForDObj` always binds 1).
+#[cfg(test)]
 const DEFINITION: &str = "1";
 
-/// A ragdoll definition, as the lines of `ragdoll.cfg` about [`DEFINITION`] build it.
-#[derive(Debug, Default, Clone)]
+/// A ragdoll definition built by the console commands; corpses snapshot definition 1.
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Def {
     bones: Vec<BoneDef>,
     joints: Vec<JointDef>,
@@ -140,7 +141,7 @@ pub struct Def {
     lerps: Vec<LerpDef>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct BoneDef {
     /// The skeleton bones the capsule runs between.
     from: String,
@@ -149,19 +150,22 @@ struct BoneDef {
     /// Where the centre of mass sits between the two, 0 to 1.
     cog: f32,
     mass: f32,
+    _friction: f32,
+    _geom: &'static str,
     parent: Option<usize>,
     /// The skeleton's right-side bones point away from their child.
     mirror: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct JointDef {
     bone: usize,
     hinge: bool,
+    enabled: bool,
     limits: Vec<LimitDef>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct LimitDef {
     /// Unit axis in the child's frame.
     axis: Vec3,
@@ -172,7 +176,7 @@ struct LimitDef {
 
 /// A skeleton bone that takes its place relative to a body from the pose it is in to the bind pose
 /// (`ragdoll_baselerp_bone`, and `ragdoll_pin_bone` with no time).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct LerpDef {
     bone: String,
     /// The body whose first joint the bone is placed against.
@@ -182,7 +186,303 @@ struct LerpDef {
     millis: u32,
 }
 
+/// Process-lifetime console definitions. Body snapshots and revision counters belong to the caller.
+#[derive(Debug, Default)]
+pub struct Defs {
+    definitions: [Def; 2],
+}
+
+/// Whether a command changed a definition and whether stock resets existing bodies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Applied {
+    Ignored,
+    Edited,
+    Reset,
+}
+
+impl Defs {
+    pub fn get(&self, index: usize) -> &Def {
+        &self.definitions[index]
+    }
+
+    pub fn fact(&self, index: usize) -> String {
+        let d = self.get(index);
+        let limits: usize = d.joints.iter().map(|j| j.limits.len()).sum();
+        format!(
+            "{} {} {limits} {} {}",
+            d.bones.len(),
+            d.joints.len(),
+            d.pairs.len(),
+            d.lerps.len()
+        )
+    }
+
+    /// Arguments include the command name. `lookup` must query real script-string membership,
+    /// not skeleton membership; only pin uses it. Errors are the stock console messages.
+    pub fn apply(
+        &mut self,
+        args: &[String],
+        lookup: impl Fn(&str) -> bool,
+    ) -> Result<Applied, String> {
+        let arg = |i: usize| args.get(i).map_or("", String::as_str);
+        let command = arg(0);
+        let minimum = if command.eq_ignore_ascii_case("ragdoll_clear") {
+            2
+        } else if command.eq_ignore_ascii_case("ragdoll_bone") {
+            11
+        } else if command.eq_ignore_ascii_case("ragdoll_joint")
+            || command.eq_ignore_ascii_case("ragdoll_selfpair")
+        {
+            4
+        } else if command.eq_ignore_ascii_case("ragdoll_limit") {
+            7
+        } else if command.eq_ignore_ascii_case("ragdoll_baselerp_bone")
+            || command.eq_ignore_ascii_case("ragdoll_pin_bone")
+        {
+            3
+        } else {
+            return Ok(Applied::Ignored);
+        };
+        if args.len() < minimum {
+            return Ok(Applied::Ignored);
+        }
+        let index = loose_int(arg(1)) as usize;
+        let Some(d) = self.definitions.get_mut(index) else {
+            return Ok(Applied::Ignored);
+        };
+        if command.eq_ignore_ascii_case("ragdoll_clear") {
+            *d = Def::default();
+        } else if command.eq_ignore_ascii_case("ragdoll_bone") {
+            if d.bones.len() >= 14 {
+                return Err("Ragdoll: Too many ragdoll bones, max 14\n".into());
+            }
+            let parent = loose_int(arg(8));
+            if parent >= d.bones.len() as i32 {
+                return Err(format!(
+                    "Ragdoll: Child bones must come after parent bones: {parent}\n"
+                ));
+            }
+            // iw3mp.exe 1.7 ReadGeomType (0x5baa10), table at 0x71e6f0.
+            let geom = ["n", "box", "brushmodel", "brush", "cyl", "cap"]
+                .into_iter()
+                .find(|name| {
+                    arg(10)
+                        .get(..name.len())
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(name))
+                })
+                .ok_or_else(|| format!("Ragdoll: Unknown bone geom type {}\n", arg(10)))?;
+            let mass = loose_float(arg(6));
+            if mass.is_nan() || mass.abs() < 0.000001 {
+                return Err(format!(
+                    "Ragdoll: Bone {} validation failed\n",
+                    d.bones.len()
+                ));
+            }
+            d.bones.push(BoneDef {
+                from: bone_text(arg(2)),
+                to: bone_text(arg(3)),
+                radius: loose_float(arg(4)),
+                cog: loose_float(arg(5)),
+                mass,
+                _friction: loose_float(arg(7)),
+                _geom: geom,
+                parent: (parent != -1).then_some(parent as usize),
+                mirror: loose_int(arg(9)) != 0,
+            });
+        } else if command.eq_ignore_ascii_case("ragdoll_joint") {
+            if d.joints.len() >= 28 {
+                return Err("Ragdoll: Too many ragdoll joints, max 28\n".into());
+            }
+            let bone = usize::from(loose_int(arg(2)) as u8);
+            if bone >= d.bones.len() {
+                return Err("Ragdoll: Joint referenced nonexistent bone\n".into());
+            }
+            if bone == 0 {
+                return Err("Ragdoll: Joint referenced bone with no parent (0)\n".into());
+            }
+            let kind = arg(3);
+            if !["none", "hinge", "swivel"]
+                .iter()
+                .any(|k| kind.eq_ignore_ascii_case(k))
+            {
+                return Err(format!("Ragdoll: Unknown joint type {kind}\n"));
+            }
+            d.joints.push(JointDef {
+                bone,
+                hinge: kind.eq_ignore_ascii_case("hinge"),
+                enabled: !kind.eq_ignore_ascii_case("none"),
+                limits: Vec::new(),
+            });
+        } else if command.eq_ignore_ascii_case("ragdoll_limit") {
+            // Stock checks the joint capacity even though this command adds an axis.
+            if d.joints.len() >= 28 {
+                return Err("Ragdoll: Too many ragdoll joints, max 28\n".into());
+            }
+            let index = loose_int(arg(2));
+            let Some(j) = d.joints.get_mut(index as usize) else {
+                return Err(format!(
+                    "Ragdoll: Angular limit added to nonexistent joint {index}\n"
+                ));
+            };
+            if j.limits.len() >= 3 {
+                return Err(format!(
+                    "Ragdoll: Too many limit axes for joint {index}, max 3\n"
+                ));
+            }
+            let axis = axis_of(arg(3)).ok_or_else(|| {
+                format!(
+                    "Ragdoll: Unknown bone axis {}\n",
+                    arg(3).strip_prefix('-').unwrap_or(arg(3))
+                )
+            })?;
+            let radians = |s| {
+                loose_float(s)
+                    .to_radians()
+                    .clamp(-std::f32::consts::PI, std::f32::consts::PI)
+            };
+            j.limits.push(LimitDef {
+                axis,
+                friction: loose_float(arg(4)),
+                min: radians(arg(5)),
+                max: radians(arg(6)),
+            });
+        } else if command.eq_ignore_ascii_case("ragdoll_selfpair") {
+            if d.pairs.len() >= 33 {
+                return Err("Ragdoll: Too many ragdoll self collision pairs, max 33\n".into());
+            }
+            let pair = [loose_int(arg(2)) as u8, loose_int(arg(3)) as u8];
+            for bone in pair {
+                if usize::from(bone) > d.bones.len() {
+                    return Err(format!("Ragdoll: Bad self collision pair bone {bone}\n"));
+                }
+            }
+            // Stock accepts count itself; retain it, but bounds-check it in the solver.
+            d.pairs.push(pair.map(usize::from));
+        } else {
+            if d.lerps.len() >= 9 {
+                return Err("Ragdoll: Too many base pose lerping bones, max 9\n".into());
+            }
+            let pin = command.eq_ignore_ascii_case("ragdoll_pin_bone");
+            let parent = (if pin {
+                loose_int(arg(3))
+            } else {
+                loose_int(arg(4))
+            }) as u32;
+            if pin {
+                if !lookup(arg(2)) {
+                    return Err(format!(
+                        "Ragdoll: Couldn't find pinned bone named {}\n",
+                        arg(2)
+                    ));
+                }
+                if parent as usize >= d.bones.len() {
+                    return Err(format!(
+                        "Ragdoll: Pinned bone has invalid parent index {}\n",
+                        parent as i32
+                    ));
+                }
+            }
+            d.lerps.push(LerpDef {
+                bone: if pin {
+                    arg(2).to_owned()
+                } else {
+                    bone_text(arg(2))
+                },
+                parent: parent as usize,
+                millis: if pin {
+                    0
+                } else {
+                    loose_int(arg(3)).clamp(100, 6000) as u32
+                },
+            });
+            return Ok(Applied::Edited);
+        }
+        Ok(Applied::Reset)
+    }
+}
+
+/// `atoi` accepts whitespace, a sign and the leading digits, ignoring the remaining suffix.
+fn loose_int(text: &str) -> i32 {
+    let text = text.trim_start();
+    let sign = if text.starts_with('-') { -1i32 } else { 1 };
+    let digits = text
+        .strip_prefix('-')
+        .or_else(|| text.strip_prefix('+'))
+        .unwrap_or(text);
+    digits
+        .bytes()
+        .take_while(u8::is_ascii_digit)
+        .fold(0i32, |n, b| {
+            n.wrapping_mul(10).wrapping_add(i32::from(b - b'0'))
+        })
+        .wrapping_mul(sign)
+}
+
+/// `atof` consumes a floating-point prefix, including an optional exponent.
+fn loose_float(text: &str) -> f32 {
+    let text = text.trim_start();
+    let bytes = text.as_bytes();
+    let mut end = usize::from(matches!(bytes.first(), Some(b'+' | b'-')));
+    let unsigned = &text[end..];
+    if unsigned
+        .get(..3)
+        .is_some_and(|s| s.eq_ignore_ascii_case("nan"))
+    {
+        return f32::NAN;
+    }
+    if unsigned
+        .get(..3)
+        .is_some_and(|s| s.eq_ignore_ascii_case("inf"))
+    {
+        return if text.starts_with('-') {
+            f32::NEG_INFINITY
+        } else {
+            f32::INFINITY
+        };
+    }
+    let start = end;
+    while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+        end += 1;
+    }
+    let mut digits = end - start;
+    if bytes.get(end) == Some(&b'.') {
+        end += 1;
+        let start = end;
+        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+            end += 1;
+        }
+        digits += end - start;
+    }
+    if digits == 0 {
+        return 0.0;
+    }
+    if matches!(bytes.get(end), Some(b'e' | b'E')) {
+        let exponent = end;
+        end += 1;
+        if matches!(bytes.get(end), Some(b'+' | b'-')) {
+            end += 1;
+        }
+        let start = end;
+        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+            end += 1;
+        }
+        if start == end {
+            end = exponent;
+        }
+    }
+    text[..end].parse().unwrap_or(0.0)
+}
+
+fn bone_text(text: &str) -> String {
+    let mut end = text.len().min(19);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
+}
+
 impl Def {
+    #[cfg(test)]
     /// Reads the `ragdoll_bone`, `ragdoll_joint`, `ragdoll_limit`, `ragdoll_selfpair`, `ragdoll_baselerp_bone` and
     /// `ragdoll_pin_bone` lines about definition 1 (`ragdoll_clear 1` empties it). A line that does not parse, or
     /// refers to what is not there yet, is skipped as the original's console command would.
@@ -210,6 +510,7 @@ impl Def {
                         d.joints.push(JointDef {
                             bone,
                             hinge,
+                            enabled: true,
                             limits: Vec::new(),
                         });
                     }
@@ -279,6 +580,7 @@ impl Def {
         d
     }
 
+    #[cfg(test)]
     /// One `ragdoll_bone` line's columns after the definition: the two joints, radius, centre of mass, mass, friction
     /// (unused: the grip is [`CONTACT_FRICTION`]), parent bone and mirror flag.
     fn bone(&self, cols: &[&str]) -> Option<BoneDef> {
@@ -295,11 +597,14 @@ impl Def {
             radius: radius.parse().ok()?,
             cog: cog.parse().ok()?,
             mass: mass.parse::<f32>().ok().filter(|m| *m > 0.0)?,
+            _friction: _friction.parse().ok()?,
+            _geom: "cap",
             parent,
             mirror: mirror.parse::<i32>().ok()? != 0,
         })
     }
 
+    #[cfg(test)]
     /// One baselerp or pinned bone against body `parent`: at most nine, as the original has room for.
     fn lerp(&mut self, bone: String, parent: usize, millis: u32) {
         if parent < self.bones.len() && self.lerps.len() < 9 {
@@ -330,11 +635,16 @@ fn axis_of(s: &str) -> Option<Vec3> {
         Some(n) => (-1.0, n),
         None => (1.0, s),
     };
-    let v = match name {
-        "x" => Vec3::X,
-        "y" => Vec3::Y,
-        "z" => Vec3::Z,
-        _ => return None,
+    let v = if name.eq_ignore_ascii_case("x") {
+        Vec3::X
+    } else if name.eq_ignore_ascii_case("y") {
+        Vec3::Y
+    } else if name.eq_ignore_ascii_case("z") {
+        Vec3::Z
+    } else if name.eq_ignore_ascii_case("n") {
+        Vec3::ZERO
+    } else {
+        return None;
     };
     Some(v * sign)
 }
@@ -574,7 +884,11 @@ impl Ragdoll {
             .joints
             .iter()
             .filter_map(|j| {
-                let parent = def.bones[j.bone].parent?;
+                if !j.enabled {
+                    return None;
+                }
+                let parent = def.bones.get(j.bone)?.parent?;
+                bodies.get(parent)?;
                 let anchor = frames[j.bone] + Vec3::Z * lift;
                 let (c, p) = (&bodies[j.bone], &bodies[parent]);
                 let mut lo = [-std::f32::consts::PI; 3];
@@ -947,7 +1261,9 @@ impl Ragdoll {
 
     /// Limbs that must not pass through each other are held a scaled capsule apart.
     fn keep_apart(&mut self, [a, b]: [usize; 2]) {
-        let (ba, bb) = (&self.bodies[a], &self.bodies[b]);
+        let (Some(ba), Some(bb)) = (self.bodies.get(a), self.bodies.get(b)) else {
+            return;
+        };
         let (pa, pb) = closest_on_segments(
             ba.at(ba.ends[0]),
             ba.at(ba.ends[1]),
@@ -1163,6 +1479,337 @@ mod tests {
     use super::*;
     use sim::cm::Trace;
 
+    fn command(defs: &mut Defs, text: &str) -> Result<Applied, String> {
+        let args: Vec<String> = text.split_whitespace().map(str::to_owned).collect();
+        defs.apply(&args, |name| name == "known_pin")
+    }
+
+    fn two_bones() -> Defs {
+        let mut defs = Defs::default();
+        assert_eq!(
+            command(&mut defs, "ragdoll_bone 1 a b 1 .5 1 .3 -1 0 capsule"),
+            Ok(Applied::Reset)
+        );
+        assert_eq!(
+            command(&mut defs, "ragdoll_bone 1 b c 2 .4 2 .2 0 1 capsule"),
+            Ok(Applied::Reset)
+        );
+        defs
+    }
+
+    #[test]
+    fn console_definitions_preserve_every_old_definition_one_field() {
+        let old = Def::parse(DEF);
+        let mut defs = Defs::default();
+        for line in DEF.lines() {
+            let text = line.split("//").next().unwrap_or("");
+            command(&mut defs, text).unwrap();
+        }
+        // Derived equality traverses every bone, joint, limit, pair and lerp field.
+        assert_eq!(defs.get(1), &old);
+        assert_eq!(defs.get(0).bones.len(), 2);
+        let snapshot = defs.get(1).clone();
+        assert_eq!(
+            command(&mut defs, "RAGDOLL_CLEAR 1 ignored"),
+            Ok(Applied::Reset)
+        );
+        assert_eq!(snapshot, old);
+        assert!(defs.get(1).is_empty());
+        assert_eq!(defs.fact(1), "0 0 0 0 0");
+    }
+
+    #[test]
+    fn installed_definition_one_preserves_every_old_parser_field() {
+        let Some(root) = std::env::var_os("COD4_PATH") else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let vfs =
+            assets::vfs::Vfs::open_stock(std::path::Path::new(&root), 0).expect("startup VFS");
+        let bytes = vfs
+            .read("ragdoll.cfg")
+            .expect("read installed ragdoll.cfg")
+            .expect("installed ragdoll.cfg exists");
+        let text = std::str::from_utf8(&bytes).expect("ragdoll.cfg text");
+        let old = Def::parse(text);
+        assert!(!old.is_empty(), "installed definition 1 has bodies");
+        // The real exec path tokenizes each console line and calls Defs::apply with the
+        // process script-string lookup; do not invent a skeleton or accept-any pin lookup.
+        let mut input = crate::input::Input::detached_with(vfs);
+        input.exec_line("exec ragdoll.cfg");
+        assert_eq!(input.ragdoll_defs.get(1), &old);
+    }
+
+    #[test]
+    fn console_short_commands_and_invalid_definitions_are_ignored() {
+        let mut defs = Defs::default();
+        for text in [
+            "",
+            "unknown 1",
+            "ragdoll_clear",
+            "ragdoll_clear -1",
+            "ragdoll_clear 2",
+            "ragdoll_bone 1 a b 1 .5 1 .3 -1 0",
+            "ragdoll_joint 1 0",
+            "ragdoll_limit 1 0 x 1 0",
+            "ragdoll_selfpair 1 0",
+            "ragdoll_baselerp_bone 1",
+            "ragdoll_pin_bone 1",
+        ] {
+            assert_eq!(command(&mut defs, text), Ok(Applied::Ignored), "{text}");
+        }
+        // atoi(non-numeric) selects definition zero; stock resets even an empty definition.
+        assert_eq!(
+            command(&mut defs, "ragdoll_clear nonsense"),
+            Ok(Applied::Reset)
+        );
+        assert_eq!(
+            command(&mut defs, "ragdoll_bone 0 a b 1 .5 1 .3 -1 0 capsule"),
+            Ok(Applied::Reset)
+        );
+        assert_eq!(defs.get(0).bones.len(), 1);
+    }
+
+    #[test]
+    fn console_bones_follow_loose_numbers_mass_validation_and_name_storage() {
+        let mut defs = Defs::default();
+        assert_eq!(
+            command(
+                &mut defs,
+                "RaGdOlL_BoNe 1suffix abcdefghijklmnopqrstuv b 2.5suffix .5 -2kg .3 -1 2 CaPsUlE_suffix"
+            ),
+            Ok(Applied::Reset)
+        );
+        let b = &defs.get(1).bones[0];
+        assert_eq!(
+            (b.from.as_str(), b.radius, b.mass, b.mirror),
+            ("abcdefghijklmnopqrs", 2.5, -2.0, true)
+        );
+        for (text, message) in [
+            (
+                "ragdoll_bone 1 a b 1 .5 1 .3 9 0 capsule",
+                "Ragdoll: Child bones must come after parent bones: 9\n",
+            ),
+            (
+                "ragdoll_bone 1 a b 1 .5 0 .3 0 0 capsule",
+                "Ragdoll: Bone 1 validation failed\n",
+            ),
+            (
+                "ragdoll_bone 1 a b 1 .5 .0000001 .3 0 0 capsule",
+                "Ragdoll: Bone 1 validation failed\n",
+            ),
+            (
+                "ragdoll_bone 1 a b 1 .5 nan .3 0 0 capsule",
+                "Ragdoll: Bone 1 validation failed\n",
+            ),
+            (
+                "ragdoll_bone 1 a b 1 .5 1 .3 0 0 bogus",
+                "Ragdoll: Unknown bone geom type bogus\n",
+            ),
+        ] {
+            let before = defs.get(1).clone();
+            assert_eq!(command(&mut defs, text), Err(message.into()));
+            assert_eq!(defs.get(1), &before);
+        }
+        assert_eq!(
+            command(&mut defs, "ragdoll_bone 1 a b -2 7 .000001 9 0 0 capsule"),
+            Ok(Applied::Reset)
+        );
+        assert_eq!(loose_int(" \t-12junk"), -12);
+        assert_eq!(loose_int("+7x"), 7);
+        assert_eq!(loose_float(" -1.5e2suffix"), -150.0);
+        assert_eq!(loose_float("nothing"), 0.0);
+        for (input, stored) in [
+            ("n", "n"),
+            ("none", "n"),
+            ("BOX_extra", "box"),
+            ("brushmodel_more", "brushmodel"),
+            ("brush_extra", "brush"),
+            ("cylinder", "cyl"),
+            ("capsule", "cap"),
+        ] {
+            assert_eq!(
+                command(
+                    &mut defs,
+                    &format!("ragdoll_bone 1 a b 1 .5 1 .3 0 0 {input}")
+                ),
+                Ok(Applied::Reset)
+            );
+            assert_eq!(defs.get(1).bones.last().unwrap()._geom, stored);
+        }
+    }
+
+    #[test]
+    fn console_joints_limits_and_errors_match_stock() {
+        let mut defs = two_bones();
+        for (text, message) in [
+            (
+                "ragdoll_joint 1 0 hinge",
+                "Ragdoll: Joint referenced bone with no parent (0)\n",
+            ),
+            (
+                "ragdoll_joint 1 2 hinge",
+                "Ragdoll: Joint referenced nonexistent bone\n",
+            ),
+            (
+                "ragdoll_joint 1 1 ball",
+                "Ragdoll: Unknown joint type ball\n",
+            ),
+            (
+                "ragdoll_limit 1 0 x 1 0 1",
+                "Ragdoll: Angular limit added to nonexistent joint 0\n",
+            ),
+        ] {
+            assert_eq!(command(&mut defs, text), Err(message.into()));
+        }
+        for kind in ["NoNe", "HINGE", "sWiVeL"] {
+            assert_eq!(
+                command(&mut defs, &format!("ragdoll_joint 1 1 {kind}")),
+                Ok(Applied::Reset)
+            );
+        }
+        assert!(!defs.get(1).joints[0].enabled);
+        assert!(defs.get(1).joints[1].hinge);
+        assert!(!defs.get(1).joints[2].hinge);
+        assert_eq!(
+            command(&mut defs, "ragdoll_limit 1 0 -BAD 1 0 1"),
+            Err("Ragdoll: Unknown bone axis BAD\n".into())
+        );
+        for axis in ["-Y", "X", "n"] {
+            assert_eq!(
+                command(
+                    &mut defs,
+                    &format!("ragdoll_limit 1 0 {axis} 2.5suffix -400 400")
+                ),
+                Ok(Applied::Reset)
+            );
+        }
+        let limits = &defs.get(1).joints[0].limits;
+        assert_eq!(limits[0].axis, -Vec3::Y);
+        assert_eq!(limits[0].friction, 2.5);
+        assert_eq!(
+            (limits[0].min, limits[0].max),
+            (-std::f32::consts::PI, std::f32::consts::PI)
+        );
+        assert_eq!(limits[2].axis, Vec3::ZERO);
+        assert_eq!(
+            command(&mut defs, "ragdoll_limit 1 0 z 1 0 1"),
+            Err("Ragdoll: Too many limit axes for joint 0, max 3\n".into())
+        );
+        assert_eq!(defs.fact(1), "2 3 3 0 0");
+    }
+
+    #[test]
+    fn console_lerps_pin_lookup_and_missing_argument_quirks_do_not_reset() {
+        let mut defs = two_bones();
+        for text in [
+            "ragdoll_baselerp_bone 1 no_time",
+            "ragdoll_baselerp_bone 1 no_parent 25",
+            "ragdoll_baselerp_bone 1 unchecked_parent 9000 99",
+            "ragdoll_baselerp_bone 1 negative_parent -1 -2",
+            "ragdoll_pin_bone 1 known_pin",
+        ] {
+            assert_eq!(command(&mut defs, text), Ok(Applied::Edited));
+        }
+        let lerps = &defs.get(1).lerps;
+        assert_eq!((lerps[0].millis, lerps[0].parent), (100, 0));
+        assert_eq!((lerps[1].millis, lerps[1].parent), (100, 0));
+        assert_eq!((lerps[2].millis, lerps[2].parent), (6000, 99));
+        assert_eq!(lerps[3].parent, (-2i32) as u32 as usize);
+        assert_eq!((lerps[4].millis, lerps[4].parent), (0, 0));
+        assert_eq!(
+            command(&mut defs, "ragdoll_pin_bone 1 absent 0"),
+            Err("Ragdoll: Couldn't find pinned bone named absent\n".into())
+        );
+        assert_eq!(
+            command(&mut defs, "ragdoll_pin_bone 1 known_pin 2"),
+            Err("Ragdoll: Pinned bone has invalid parent index 2\n".into())
+        );
+        assert_eq!(
+            command(&mut defs, "ragdoll_pin_bone 1 known_pin -1"),
+            Err("Ragdoll: Pinned bone has invalid parent index -1\n".into())
+        );
+        assert_eq!(defs.get(1).lerps.len(), 5);
+        let args = ["ragdoll_baselerp_bone", "1", "unregistered"].map(str::to_owned);
+        assert_eq!(
+            defs.apply(&args, |_| panic!(
+                "baselerp must not look up script strings"
+            )),
+            Ok(Applied::Edited)
+        );
+    }
+
+    #[test]
+    fn console_indices_keep_stock_storage_widths() {
+        let mut defs = two_bones();
+        assert_eq!(
+            command(&mut defs, "ragdoll_joint 1 257 hinge"),
+            Ok(Applied::Reset)
+        );
+        assert_eq!(defs.get(1).joints[0].bone, 1);
+        assert_eq!(
+            command(&mut defs, "ragdoll_selfpair 1 256 258"),
+            Ok(Applied::Reset)
+        );
+        assert_eq!(defs.get(1).pairs[0], [0, 2]);
+        assert_eq!(
+            command(&mut defs, "ragdoll_selfpair 1 -1 0"),
+            Err("Ragdoll: Bad self collision pair bone 255\n".into())
+        );
+    }
+
+    #[test]
+    fn console_capacities_and_selfpair_count_boundary_match_stock() {
+        let mut defs = two_bones();
+        assert_eq!(
+            command(&mut defs, "ragdoll_selfpair 1 0 2"),
+            Ok(Applied::Reset)
+        );
+        assert_eq!(defs.get(1).pairs[0], [0, 2]);
+        assert_eq!(
+            command(&mut defs, "ragdoll_selfpair 1 0 3"),
+            Err("Ragdoll: Bad self collision pair bone 3\n".into())
+        );
+        for _ in 1..33 {
+            command(&mut defs, "ragdoll_selfpair 1 0 1").unwrap();
+        }
+        assert_eq!(
+            command(&mut defs, "ragdoll_selfpair 1 0 1"),
+            Err("Ragdoll: Too many ragdoll self collision pairs, max 33\n".into())
+        );
+        for _ in 2..14 {
+            command(&mut defs, "ragdoll_bone 1 a b 1 .5 1 .3 0 0 capsule").unwrap();
+        }
+        assert_eq!(
+            command(&mut defs, "ragdoll_bone 1 a b 1 .5 1 .3 0 0 capsule"),
+            Err("Ragdoll: Too many ragdoll bones, max 14\n".into())
+        );
+        for _ in 0..28 {
+            command(&mut defs, "ragdoll_joint 1 1 hinge").unwrap();
+        }
+        for text in ["ragdoll_joint 1 1 hinge", "ragdoll_limit 1 0 x 1 0 1"] {
+            assert_eq!(
+                command(&mut defs, text),
+                Err("Ragdoll: Too many ragdoll joints, max 28\n".into())
+            );
+        }
+        for _ in 0..9 {
+            command(&mut defs, "ragdoll_baselerp_bone 1 a").unwrap();
+        }
+        for text in [
+            "ragdoll_baselerp_bone 1 a",
+            "ragdoll_pin_bone 1 known_pin 0",
+        ] {
+            assert_eq!(
+                command(&mut defs, text),
+                Err("Ragdoll: Too many base pose lerping bones, max 9\n".into())
+            );
+        }
+        let mut body = make(&standing(&[]), [0.0, 0.0, 100.0], [0.0; 3]);
+        body.keep_apart([0, body.bodies.len()]);
+        body.keep_apart([usize::MAX, 0]);
+    }
+
     /// A flat floor at z = 0.
     struct Floor;
 
@@ -1345,9 +1992,12 @@ mod tests {
         before: Option<Motion>,
         tun: Tunables,
     ) -> Ragdoll {
-        let def = Def::parse(DEF);
+        let mut defs = Defs::default();
+        for line in DEF.lines() {
+            command(&mut defs, line.split("//").next().unwrap_or("")).unwrap();
+        }
         Ragdoll::new(
-            &def,
+            defs.get(1),
             &skel(),
             Birth {
                 pose,

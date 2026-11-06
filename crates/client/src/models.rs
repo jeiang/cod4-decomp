@@ -188,8 +188,6 @@ impl RestPose {
 /// The loaded content and the animation sets built from it.
 pub struct Library {
     pub content: Content,
-    /// The install's `ragdoll.cfg`: empty when it has none, which leaves bodies in the pose they died in.
-    pub ragdoll: Def,
     /// [`assets::vfs::pure_digest`] of the IWDs this library was read through: what an `sv_pure` server compares.
     pub pure_digest: u32,
     anims: HashMap<(String, Vec<Attachment>), Arc<PlayerAnims>>,
@@ -211,21 +209,9 @@ impl Library {
         content.load_zone(&install, "common_mp", 4)?;
         content.load_mod(&install)?;
         content.load_map(&install, map)?;
-        let ragdoll = match install.vfs.read("ragdoll.cfg") {
-            Ok(Some(bytes)) => Def::parse(&String::from_utf8_lossy(&bytes)),
-            Ok(None) => {
-                tracing::debug!("no ragdoll.cfg in the install; bodies keep their death pose");
-                Def::default()
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "ragdoll.cfg unreadable; bodies keep their death pose");
-                Def::default()
-            }
-        };
         let pure_digest = assets::vfs::pure_digest(&install.vfs.pure_iwds(&install.root));
         Ok(Library {
             content,
-            ragdoll,
             pure_digest,
             anims: HashMap::new(),
             rests: HashMap::new(),
@@ -596,6 +582,15 @@ impl Player {
         )
     }
 
+    /// Re-captures a corpse's current physics pose before rebuilding its definition (`BS_DOBJ_WAIT`).
+    pub fn capture_ragdoll_pose(&mut self, bones: &[sim::skel::BoneMat], yaw: f32) {
+        self.pose.len = bones.len();
+        self.pose.bones[..bones.len()].copy_from_slice(bones);
+        self.yaw = yaw;
+        self.before.clear();
+        self.step = 0.0;
+    }
+
     /// Where the `j_head` bone is for a player standing at `origin` in the last [`Player::update`]'s pose.
     pub fn head_pos(&self, origin: [f32; 3]) -> Option<[f32; 3]> {
         let i = self.anims.rig().bone_index("j_head")?;
@@ -763,7 +758,6 @@ mod tests {
     fn a_scripted_body_missing_from_the_zones_is_noted_and_not_drawn() {
         let lib = Library {
             content: Content::for_client(),
-            ragdoll: Def::default(),
             pure_digest: 0,
             anims: HashMap::new(),
             rests: HashMap::new(),
@@ -911,7 +905,12 @@ mod tests {
         };
         let mut lib =
             Library::load(std::path::Path::new(&root), "", "mp_backlot").expect("content");
-        assert!(!lib.ragdoll.is_empty(), "the install has a ragdoll.cfg");
+        let vfs =
+            assets::vfs::Vfs::open_stock(std::path::Path::new(&root), 0).expect("startup VFS");
+        let mut input = crate::input::Input::detached_with(vfs);
+        input.exec_line("exec ragdoll.cfg");
+        let def = input.ragdoll_defs.get(1);
+        assert!(!def.is_empty(), "the startup VFS has a ragdoll.cfg");
         let set = lib.team_models(Team::Allies).expect("allied models");
         let mut p = lib.player(&set).expect("player");
         p.update(0.0, &PlayerPoseInput::default());
@@ -923,7 +922,7 @@ mod tests {
         );
         let mut r = p
             .ragdoll(
-                &lib.ragdoll,
+                def,
                 [0.0; 3],
                 [120.0, 0.0, 0.0],
                 crate::ragdoll::Tunables::default(),
