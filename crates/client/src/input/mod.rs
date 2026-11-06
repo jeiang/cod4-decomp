@@ -1586,7 +1586,10 @@ impl Input {
                 None if name.starts_with('-') => {}
                 None => {
                     crate::console::note_unknown(&toks[0]);
-                    self.say(format!("Unknown command \"{}\"", toks[0]));
+                    // Startup/config execution uses the same client channel as `CL_ForwardCommandToServer`.
+                    if self.channels.visible(14) {
+                        self.say(format!("Unknown command \"{}\"", toks[0]));
+                    }
                 }
             },
         }

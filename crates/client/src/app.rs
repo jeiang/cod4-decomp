@@ -3945,7 +3945,8 @@ fn forward_to_server(st: &mut State, cmd: &[String]) {
         Some(net) => net.send_command(&crate::input::config::join(cmd)),
         None => {
             crate::console::note_unknown(v);
-            say(st, &format!("Unknown command \"{v}\""));
+            // Retail 1.7 `CL_ForwardCommandToServer` (0x4698f0): CON_CHANNEL_CLIENT.
+            say_channel(st, 14, &format!("Unknown command \"{v}\""));
         }
     }
 }
