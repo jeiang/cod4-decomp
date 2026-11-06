@@ -90,11 +90,6 @@ fn person_until(
     }
 }
 
-/// Types one line at the console as Enter sends it.
-fn exec(c: &mut Driven, line: &str) -> Result<(), String> {
-    c.ask(json!({"cmd": "exec", "line": line})).map(|_| ())
-}
-
 pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let skipped = |why: &str| {
         let mut r = StageReport::new(NAME, Status::Skipped);
@@ -133,7 +128,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         )?;
 
         // #366: the host's console reaches the server's commands.
-        exec(c, "status")?;
+        c.console("status")?;
         console_until(c, "hostname:", 1, "status")?;
         console_until(c, "map: mp_crash", 1, "status")?;
         let clients = server_clients(c)?;
@@ -144,7 +139,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             .ok_or("no bot to kick")?
             .to_owned();
         let before = clients.len();
-        exec(c, &format!("kick \"{bot}\""))?;
+        c.console(&format!("kick \"{bot}\""))?;
         let end = Instant::now() + Duration::from_secs(15);
         loop {
             let n = server_clients(c)?.len();
@@ -160,11 +155,11 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
 
         // #523: the server's message of the day, read at the level spawn `map_restart` runs, reaches the client in
         // `CS_MOTD` (10), which it holds (`net.motd`) and its stock `configstrings` console command lists.
-        c.ask(json!({"cmd": "server", "op": "exec", "line": format!("set g_motd \"{MOTD}\"")}))?;
+        c.console(&format!("set g_motd \"{MOTD}\""))?;
         let loads = c.ask(json!({"cmd": "server", "op": "state", "what": "map"}))?["level_loads"]
             .as_u64()
             .unwrap_or(0);
-        exec(c, "map_restart")?;
+        c.console("map_restart")?;
         let end = Instant::now() + Duration::from_secs(60);
         loop {
             let now = c.ask(json!({"cmd": "server", "op": "state", "what": "map"}))?["level_loads"]
@@ -195,7 +190,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         // #370 without cheats: each verb is refused in the player's language, never as the raw key.
         let seen = console_count(c, REFUSAL)?;
         for verb in REFUSED {
-            exec(c, verb)?;
+            c.console(verb)?;
         }
         console_until(c, REFUSAL, seen + REFUSED.len(), "refusals")?;
         if console_count(c, "GAME_CHEATSNOTENABLED")? > 0 {
@@ -209,7 +204,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         }
 
         // `devmap` at the console: a server with cheats, joined through the team and class menus.
-        exec(c, "devmap mp_crash")?;
+        c.console("devmap mp_crash")?;
         c.until(
             json!({"menu.open.0": "team_marinesopfor"}),
             Duration::from_secs(180),
@@ -234,34 +229,34 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             return Err(format!("devmap left sv_cheats at {cheats}"));
         }
 
-        exec(c, "noclip")?;
+        c.console("noclip")?;
         person_until(c, "noclip", |p| p["noclip"] == json!(true))?;
-        exec(c, "noclip")?;
+        c.console("noclip")?;
         person_until(c, "noclip off", |p| p["noclip"] == json!(false))?;
-        exec(c, "ufo")?;
+        c.console("ufo")?;
         person_until(c, "ufo", |p| p["ufo"] == json!(true))?;
-        exec(c, "ufo")?;
+        c.console("ufo")?;
         person_until(c, "ufo off", |p| p["ufo"] == json!(false))?;
-        exec(c, "god")?;
+        c.console("god")?;
         person_until(c, "god", |p| p["godmode"] == json!(true))?;
         let health = person(c)?["health"].as_i64().unwrap_or(0);
-        exec(c, "take health 60")?;
+        c.console("take health 60")?;
         person_until(c, "take health 60", |p| {
             p["health"].as_i64() == Some((health - 60).max(1))
         })?;
-        exec(c, "give health")?;
+        c.console("give health")?;
         person_until(c, "give health", |p| p["health"].as_i64() == Some(health))?;
-        exec(c, "take weapons")?;
+        c.console("take weapons")?;
         person_until(c, "take weapons", |p| {
             p["weapons"].as_array().is_some_and(Vec::is_empty)
         })?;
-        exec(c, "give rpg_mp")?;
+        c.console("give rpg_mp")?;
         person_until(c, "give rpg_mp", |p| {
             p["weapons"]
                 .as_array()
                 .is_some_and(|w| w.contains(&json!("rpg_mp")))
         })?;
-        exec(c, "give all")?;
+        c.console("give all")?;
         let p = person_until(c, "give all", |p| {
             p["weapons"].as_array().is_some_and(|w| w.len() > 10)
         })?;
@@ -269,7 +264,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             "weapons_after_give_all".into(),
             p["weapons"].as_array().map_or(0.0, |w| w.len() as f64),
         );
-        exec(c, "setviewpos 100 200 300 90")?;
+        c.console("setviewpos 100 200 300 90")?;
         person_until(c, "setviewpos 100 200 300 90", |p| {
             let o = p["origin"].as_array().cloned().unwrap_or_default();
             let at = |i: usize| o.get(i).and_then(Value::as_f64).unwrap_or(f64::NAN);

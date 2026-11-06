@@ -154,6 +154,11 @@ numbers skipped, and how often), and the first 16 `gaps` (`[before, after]`), `a
 turned away. `{"cmd":"watch","clear":true}` stops it; the section is `null` while nothing is followed.
 For same-camera rendering comparisons, the diagnostic console commands `drawscriptmodels 0` and `drawprops 0`
 hide those two classes independently; `1` restores them, as with `drawvehicles`.
+These direct renderer A/B requests are retained diagnostics, not stock player-command coverage. In contrast,
+`client-garage` types its stock `devmap`, `noclip`, settings and `setviewpos` through `Driven::console`.
+`client-host-console` types every host/cheat command and `set g_motd` the same way; its state queries remain
+read-only checks of the resulting command effects. `client-hud` uses typed `devmap` and team/class clicks to
+establish cheats for its crosshair diagnostic, then types `god`, rather than forcing the protected dvar.
 
 ```sh
 printf '%s\n' '{"id":1,"cmd":"state","what":"menu"}' | nc -q1 127.0.0.1 18095
